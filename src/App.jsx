@@ -1960,7 +1960,10 @@ export default function App() {
   const systemDimensionRef = useRef('2d');
 
   const [isLoaded, setIsLoaded] = useState(false);
-  const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+  const [isSidebarOpen, setIsSidebarOpen] = useState(() => {
+    if (typeof window === 'undefined') return true;
+    return !window.matchMedia('(max-width: 760px)').matches;
+  });
   const [isTimelineOpen, setIsTimelineOpen] = useState(false);
   const [isTimelinePinned, setIsTimelinePinned] = useState(false);
   const isTimelineExpanded = isTimelineOpen || isTimelinePinned;
@@ -5027,6 +5030,17 @@ export default function App() {
                 <Lock size={13} />
                 <span>{cameraLocked ? t(locale, 'locked') : t(locale, 'lock')}</span>
               </button>
+              {!isSidebarOpen && (
+                <button
+                  className="icon-text-button dark panel-open-inline"
+                  onClick={() => setIsSidebarOpen(true)}
+                  title={t(locale, 'panelOpen')}
+                  type="button"
+                >
+                  <Menu size={18} />
+                  <span>{t(locale, 'panelButton')}</span>
+                </button>
+              )}
             </div>
             <div className="scene-control-dock" aria-label={t(locale, 'graphControls')}>
               <div className="rank-chip" title={t(locale, 'rankTitle')}>
@@ -5234,16 +5248,6 @@ export default function App() {
                 </div>
               )}
             </div>
-            {!isSidebarOpen && (
-              <button
-                className="icon-text-button dark"
-                onClick={() => setIsSidebarOpen(true)}
-                title={t(locale, 'panelOpen')}
-              >
-                <Menu size={18} />
-                <span>{t(locale, 'panelButton')}</span>
-              </button>
-            )}
           </div>
         </div>
 
@@ -5422,7 +5426,19 @@ export default function App() {
         )}
       </section>
 
-      <aside className={`control-panel ${isSidebarOpen ? 'open' : 'closed'}`}>
+      <aside
+        className={`control-panel ${isSidebarOpen ? 'open' : 'closed'}`}
+        style={{
+          bottom: '0px',
+          clipPath: isSidebarOpen ? 'inset(0 0 0 0)' : 'inset(100% 0 0 0)',
+          opacity: isSidebarOpen ? 1 : 0,
+          pointerEvents: isSidebarOpen ? 'auto' : 'none',
+          transform: 'none',
+          '--panel-mobile-clip': isSidebarOpen ? 'inset(0 0 0 0)' : 'inset(100% 0 0 0)',
+          '--panel-mobile-opacity': isSidebarOpen ? 1 : 0,
+          '--panel-mobile-pointer': isSidebarOpen ? 'auto' : 'none',
+        }}
+      >
         <header className="panel-header">
           <div>
             <p className="eyebrow">{t(locale, 'panelEyebrow')}</p>
