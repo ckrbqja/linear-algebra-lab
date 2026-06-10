@@ -12,7 +12,6 @@ import {
   Lock,
   Menu,
   PanelRightClose,
-  Pin,
   Play,
   Plus,
   RotateCcw,
@@ -1024,6 +1023,32 @@ function writeUrlDb(encoded, state) {
   } catch {
     window.localStorage.setItem(urlStateKey, encoded);
   }
+}
+
+function replaceShareStateInUrl(state, locale) {
+  if (typeof window === 'undefined' || !state) return;
+  const encoded = encodeShareState(state);
+  const url = new URL(window.location.href);
+  url.searchParams.set('s', encoded);
+  url.searchParams.set('lang', normalizeLocale(locale ?? state.locale));
+  window.history.replaceState(null, '', url);
+  writeUrlDb(encoded, state);
+}
+
+function patchCameraStateInUrl(camera, locale) {
+  if (typeof window === 'undefined' || !camera) return;
+  const url = new URL(window.location.href);
+  const raw = url.searchParams.get('s') ?? window.localStorage?.getItem(urlStateKey);
+  const decoded = decodeShareState(raw);
+  if (!decoded || decoded.v !== 1) return;
+  replaceShareStateInUrl(
+    {
+      ...decoded,
+      locale: normalizeLocale(decoded.locale ?? locale),
+      camera,
+    },
+    locale
+  );
 }
 
 function upsertMeta(selector, attributes, textContent = null) {
@@ -4004,8 +4029,9 @@ export default function App() {
       const next = cameraShareStateFromRefs(threeRef.current);
       if (!next) return;
       setCameraState((previous) => (cameraStatesAlmostEqual(previous, next) ? previous : next));
+      if (delay <= 0) patchCameraStateInUrl(next, locale);
     }, delay);
-  }, []);
+  }, [locale]);
 
   const animate = useCallback((time) => {
     frameIdRef.current = requestAnimationFrame(animate);
@@ -4619,8 +4645,10 @@ export default function App() {
       setActiveView(null);
     };
     const handleControlsChange = () => queueCameraShareUpdate(220);
+    const handleControlsEnd = () => queueCameraShareUpdate(0);
     controls.addEventListener('start', handleControlsStart);
     controls.addEventListener('change', handleControlsChange);
+    controls.addEventListener('end', handleControlsEnd);
 
     scene.add(new THREE.AmbientLight(0xffffff, 0.72));
     const keyLight = new THREE.DirectionalLight(0xffffff, 0.86);
@@ -5204,6 +5232,7 @@ export default function App() {
       container.removeEventListener('pointerleave', clearArrowHover);
       controls.removeEventListener('start', handleControlsStart);
       controls.removeEventListener('change', handleControlsChange);
+      controls.removeEventListener('end', handleControlsEnd);
       controls.dispose();
       clearEquationGroup(equationGroup);
       clearEquationGroup(vectorScalarGroup);
@@ -5685,7 +5714,7 @@ export default function App() {
         }}
       />
       <AdSlot placement="top" locale={locale} />
-      <div className="workspace-shell">
+      <div className={`workspace-shell ${isTimelineExpanded ? 'timeline-open' : ''}`}>
       <section className="scene-area" aria-label={t(locale, 'title')}>
         {!isLoaded && (
           <div className="loader">
@@ -6941,26 +6970,16 @@ export default function App() {
       >
         <div className="timeline-drawer-head">
           <button
-            aria-label={isTimelinePinned ? '타임라인 고정 해제' : '타임라인 고정'}
-            aria-pressed={isTimelinePinned}
-            className="icon-button timeline-drawer-pin"
+            aria-label="타임라인 닫기"
+            className="icon-button timeline-drawer-close"
             onClick={(event) => {
               event.preventDefault();
               event.stopPropagation();
-              if (timelineCloseTimerRef.current) {
-                window.clearTimeout(timelineCloseTimerRef.current);
-                timelineCloseTimerRef.current = null;
-              }
-              setIsTimelinePinned((pinned) => {
-                const next = !pinned;
-                timelinePinnedRef.current = next;
-                setIsTimelineOpen(next);
-                return next;
-              });
+              closeTimelineDrawerNow();
             }}
             type="button"
           >
-            <Pin size={15} />
+            <X size={12} />
           </button>
         </div>
         <div className="timeline-drawer-body">

@@ -95,6 +95,10 @@ button {
   overflow: hidden;
 }
 
+.workspace-shell.timeline-open .control-panel {
+  box-shadow: none;
+}
+
 .scene-area {
   position: relative;
   order: 1;
@@ -1939,7 +1943,7 @@ button {
   --timeline-drawer-width: 136px;
   position: absolute;
   top: 0;
-  right: 408px;
+  right: min(408px, calc(100vw - var(--timeline-drawer-width)));
   bottom: 0;
   z-index: 34;
   display: grid;
@@ -1960,8 +1964,7 @@ button {
     width 240ms cubic-bezier(0.22, 1, 0.36, 1),
     min-width 240ms cubic-bezier(0.22, 1, 0.36, 1),
     opacity 120ms ease,
-    transform 240ms cubic-bezier(0.22, 1, 0.36, 1),
-    box-shadow 160ms ease;
+    transform 240ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .control-panel.closed ~ .timeline-drawer {
@@ -1984,33 +1987,33 @@ button {
 
 .timeline-drawer-head {
   position: absolute;
-  top: 8px;
-  right: 1px;
+  top: 4px;
+  right: 4px;
   z-index: 6;
   display: flex;
-  width: 24px;
-  min-width: 24px;
-  height: 24px;
+  width: 18px;
+  min-width: 18px;
+  height: 18px;
   pointer-events: auto;
 }
 
-.timeline-drawer-pin {
-  width: 21px;
-  height: 21px;
-  border: 1px solid rgba(35, 35, 31, 0.12);
+.timeline-drawer-close {
+  width: 18px;
+  height: 18px;
+  border: 0;
   border-radius: 999px;
-  background: rgba(255, 250, 240, 0.92);
-  color: #65625a;
+  background: transparent;
+  color: rgba(85, 80, 71, 0.64);
   box-shadow: none;
   pointer-events: auto;
-  backdrop-filter: blur(10px);
+  opacity: 0.72;
+  backdrop-filter: none;
 }
 
-.timeline-drawer-pin:hover,
-.timeline-drawer-pin[aria-pressed="true"] {
-  border-color: #0f8f87;
-  background: #0f8f87;
-  color: #fffaf0;
+.timeline-drawer-close:hover {
+  background: rgba(35, 35, 31, 0.08);
+  color: #23231f;
+  opacity: 1;
 }
 
 .timeline-drawer-body {
@@ -3814,7 +3817,7 @@ button {
   .timeline-drawer {
     position: absolute;
     top: 0;
-    right: 0;
+    right: min(408px, calc(100vw - var(--timeline-drawer-width)));
     bottom: 0;
     height: 100%;
   }
