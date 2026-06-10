@@ -32,6 +32,7 @@ import {
   rank3,
   transformVector3,
 } from './linearAlgebra.js';
+import { managedLocaleMessages, managedPresetLocaleNames } from './i18n.js';
 
 const ANIMATION_MS = 1001;
 const CAMERA_MOVE_MS = 850;
@@ -41,845 +42,58 @@ const AXIS_LOCK_RATIO_3D = 0.045;
 const PLANE_LOCK_RATIO_3D = 0.018;
 const AXIS_LOCK_MAX_3D = 0.14;
 const PLANE_LOCK_MAX_3D = 0.07;
-const MEASURE_DOT_HEX = 0xe8edf7;
-const MEASURE_DOT_GUIDE_HEX = 0xb8c0cc;
+const MEASURE_DOT_HEX = 0xf1b434;
+const MEASURE_DOT_GUIDE_HEX = 0xffd66b;
 const MEASURE_AREA_HEX = 0xff4fd8;
 const MEASURE_AREA_EDGE_HEX = 0xff9bea;
 const MEASURE_VOLUME_HEX = 0xff7a59;
 const MEASURE_VOLUME_EDGE_HEX = 0xffb199;
+const monetizationConfig = {
+  adProvider: import.meta.env.VITE_AD_PROVIDER || 'adsense',
+  adClient: import.meta.env.VITE_AD_CLIENT || '',
+  topAdSlot: import.meta.env.VITE_AD_TOP_SLOT || '',
+  bottomAdSlot: import.meta.env.VITE_AD_BOTTOM_SLOT || '',
+  admobAppId: import.meta.env.VITE_ADMOB_APP_ID || '',
+  donationUrl: import.meta.env.VITE_DONATION_URL || '',
+  donationLabel: import.meta.env.VITE_DONATION_LABEL || '',
+};
+const urlStateKey = 'linearAlgebraShareState';
+const urlDbKey = 'linearAlgebraUrlDb';
 const CAMERA_HOME_POSITION = new THREE.Vector3(5.25, 4.05, 6.45);
 const CAMERA_HOME_TARGET = new THREE.Vector3(0.35, 0.35, 0.35);
 
 const viewPresets = {
   '3d': {
-    label: '3D 시점',
+    labelKey: 'view3d',
     position: CAMERA_HOME_POSITION,
     target: CAMERA_HOME_TARGET,
   },
   '2d': {
-    label: '2D 시점',
+    labelKey: 'view2d',
     position: new THREE.Vector3(0, 0, 8.35),
     target: new THREE.Vector3(0, 0, 0),
   },
   '1d': {
-    label: '1D 시점',
+    labelKey: 'view1d',
     position: new THREE.Vector3(0, 2.65, 7.15),
     target: new THREE.Vector3(0, 0, 0),
   },
 };
 
-const localeMessages = {
-  ko: {
-    code: 'ko-KR',
-    name: '한국어',
-    title: '3D 선형대수 실험실',
-    subtitle: '행렬, 기저, 부피, 사영',
-    description: '행렬 변환, 기저 벡터, 내적, 부피, 연립방정식을 3D로 탐구하는 인터랙티브 선형대수 실험실.',
-    adTop: '상단 광고',
-    adBottom: '하단 광고',
-    adPlaceholder: '광고 키를 넣으면 이 영역에 광고가 표시됩니다.',
-    donation: '도네이션',
-    donationText: '도움이 됐다면 개발을 응원해주세요.',
-    shareUrl: 'URL 복사',
-    shareCopied: '공유 URL이 복사되었습니다',
-    language: '언어',
-  },
-  en: {
-    code: 'en-US',
-    name: 'English',
-    title: '3D Linear Algebra Lab',
-    subtitle: 'Matrices, basis vectors, volume, projections',
-    description: 'An interactive 3D linear algebra lab for matrix transformations, basis vectors, dot products, volume, and systems of equations.',
-    adTop: 'Top ad',
-    adBottom: 'Bottom ad',
-    adPlaceholder: 'Add an ad key to show ads in this slot.',
-    donation: 'Donate',
-    donationText: 'Support development if this helped you learn.',
-    shareUrl: 'Copy URL',
-    shareCopied: 'Share URL copied',
-    language: 'Language',
-  },
-  ja: {
-    code: 'ja-JP',
-    name: '日本語',
-    title: '3D線形代数ラボ',
-    subtitle: '行列、基底、体積、射影',
-    description: '行列変換、基底ベクトル、内積、体積、連立方程式を3Dで学べるインタラクティブな線形代数ラボです。',
-    adTop: '上部広告',
-    adBottom: '下部広告',
-    adPlaceholder: '広告キーを入れるとここに広告が表示されます。',
-    donation: '寄付',
-    donationText: '役に立ったら開発を応援してください。',
-    shareUrl: 'URLをコピー',
-    shareCopied: '共有URLをコピーしました',
-    language: '言語',
-  },
-  zh: {
-    code: 'zh-CN',
-    name: '中文',
-    title: '3D线性代数实验室',
-    subtitle: '矩阵、基向量、体积、投影',
-    description: '用于探索矩阵变换、基向量、点积、体积和线性方程组的交互式3D线性代数实验室。',
-    adTop: '顶部广告',
-    adBottom: '底部广告',
-    adPlaceholder: '填入广告密钥后将在这里显示广告。',
-    donation: '赞助',
-    donationText: '如果这个工具帮到了你，欢迎支持开发。',
-    shareUrl: '复制 URL',
-    shareCopied: '分享 URL 已复制',
-    language: '语言',
-  },
-};
-
-const uiLocaleMessages = {
-  ko: {
-    view3d: '3D 시점',
-    view2d: '2D 시점',
-    view1d: '1D 시점',
-    viewTitle: '{label} 보기',
-    loader: '3D 엔진 준비 중',
-    cameraLock: '현재 카메라 시점 고정',
-    cameraUnlock: '카메라 고정 해제',
-    locked: '고정됨',
-    lock: '고정',
-    graphControls: '그래프 컨트롤',
-    rankTitle: '현재 공간의 행렬 랭크',
-    space: '공간',
-    spaceDisplay: '공간 표시',
-    baseGrid: '기본',
-    baseGridTitle: '기본 격자 표시',
-    relativeGrid: '상대',
-    relativeGridTitle: '상대 격자 표시',
-    axes: '축',
-    axesTitle: '축 표시',
-    coordinates: '좌표',
-    coordinatesTitle: '좌표 표시',
-    vector: '벡터',
-    vectorDisplay: '벡터 표시',
-    basis: '기저',
-    basisDisplay: '기저 표시',
-    vectorLegend: '벡터 범례',
-    vectorAllDisplay: '벡터 전체 표시',
-    hideAll: '전체 숨기기',
-    showAll: '전체 보이기',
-    chooseForMeasure: '측정에 선택',
-    hide: '숨기기',
-    show: '보이기',
-    measurement: '측정',
-    makeMeasurement: '측정 만들기',
-    dot: '내적',
-    volume: '부피',
-    area: '면적',
-    dotConnect: '내적 연결',
-    areaVolumeConnect: '면적/부피 연결',
-    hideTarget: '숨기기',
-    dotMakeTitle: '내적 만들기: 대상 2개 선택',
-    volumeMakeTitle: '부피/면적 만들기: 대상 2~3개 선택',
-    targetSelect: '대상 선택',
-    toggleMeasurement: '{type} 표시 전환',
-    continueDot: '이 내적에서 이어가기',
-    reverseDirection: '방향 바꾸기',
-    convertToVolume: '부피로 변환',
-    convertToDot: '내적으로 변환',
-    extendVolume: '세 번째 벡터로 부피 이어가기',
-    deleteMeasurement: '측정 삭제',
-    removeMeasurement: '측정 제거',
-    panelOpen: '컨트롤 패널 열기',
-    panelButton: '패널',
-    resetSpace: '공간 초기화',
-    reset: '초기화',
-    animationProgress: '애니메이션 진행률',
-    panelTitle: '변환 패널',
-    panelClose: '컨트롤 패널 닫기',
-    workspaceMode: '작업 모드',
-    transform: '변환',
-    system: '연립',
-    systemTitle: '연립방정식',
-    addEquation: '식 추가',
-    systemExamples: '연립방정식 예제',
-    intersection: '교점',
-    parallel: '평행',
-    overlap: '겹침',
-    overlap3d: '3D 겹침',
-    status: '상태',
-    linePoint: '교점',
-    invalidLineNote: 'L{items} 형식을 확인해줘.',
-    sameLineNote: '모든 식이 같은 직선을 가리켜서 해가 직선 전체야.',
-    parallelLineNote: '기울기는 같고 위치가 달라서 서로 만나지 않아.',
-    noCommonLineNote: '일부 선은 만나지만 모든 식을 동시에 만족하는 점은 없어.',
-    single3dNote: '식 하나가 3D 공간의 평면 하나로 펼쳐져. 해는 그 평면 전체야.',
-    infinite3dNote: '공통해만 노란 선으로 강조했어. 평면은 배경처럼 낮춰서 겹치는 축이 보이게 했어.',
-    commonLine: '교선',
-    commonPlane: '공통 평면',
-    no3dNote: '평면들이 한 점이나 한 선에서 동시에 만나지 않아.',
-    applyPointToVector: '교점을 {name}에 넣기',
-    currentSpace: '현재 공간',
-    timeline: '타임라인',
-    spaceTimeline: '공간 타임라인',
-    transformHistory: '변환 히스토리',
-    deleteHistory: '히스토리 삭제',
-    matrixInput: '행렬 입력',
-    matrixCopy: '행렬 복사',
-    matrixPaste: '행렬 붙여넣기',
-    matrixDimension: '행렬 차원',
-    applyMatrix: '현재 공간에 곱하기',
-    matrixPresets: '행렬 프리셋',
-    presetLoadTitle: '{name} 행렬을 입력칸에 불러오기',
-    presetApplyTitle: '{name} 바로 적용',
-    vectorTracking: '벡터 추적',
-    addVector: '벡터 추가',
-    vectorTools: '벡터 도구',
-    fixed: '고정',
-    baseBasis: '기본 기저',
-    resetBasis: '{name} 기본 기저로',
-    resetBasisAria: '{name} 기본 기저로 초기화',
-    vectorMeasureMenu: '{name} 측정',
-    dotStartTitle: '{name} 내적 측정 시작',
-    volumeStartTitle: '{name} 면적/부피 측정 시작',
-    scalarConstraint: '스칼라 제약',
-    scalar: '스칼라',
-    vectorDelete: '벡터 삭제',
-    scalarConstraints: '스칼라 제약',
-    constraintsCount: '{count}개 · 드래그',
-    plane: '평면',
-    line: '직선',
-    point: '점',
-    dotBetweenVectors: '벡터끼리',
-    noDotVectors: '내적을 볼 일반 벡터가 없습니다.',
-    vectorVolume: '벡터 부피',
-    vectorArea: '벡터 면적',
-    parallelepiped: '평행육면체',
-    parallelogram: '평행사변형',
-    unique: '유일해',
-    infinite: '무한해',
-    infiniteMany: '무한히 많음',
-    noSolution: '해 없음',
-    invalidFormat: '형식 확인',
-    waitingInput: '입력 대기',
-    solution: '해',
-    generalSolution: '일반해',
-    contradictionNote: '계수행렬과 확장행렬의 rank가 달라서 모순이 생김.',
-    applySolutionToVector: '해를 추적 벡터에 넣기',
-    timelineClose: '타임라인 닫기',
-    timelinePin: '타임라인 고정',
-    timelineUnpin: '타임라인 고정 해제',
-    current: '현재',
-    preview: '미리보기',
-    inverse: '역행렬',
-    none: '없음',
-    matrix: '행렬',
-    previousMatrix: '이전 행렬',
-    resultMatrix: '결과 행렬',
-    matrixValueLabel: '행렬 값 {index}',
-    copyMatrix: '{label} 복사',
-    copied: '복사되었습니다',
-    copyFailed: '복사하지 못했습니다',
-    pasted: '붙여넣었습니다',
-    pasteNoNumbers: '붙여넣을 숫자가 없습니다',
-    pasteFailed: '붙여넣기 실패',
-    input2dDefaultName: '2x2 사영 입력',
-    input1dDefaultName: '1x1 축 입력',
-    directInput: '직접 입력',
-    initialSpace: '초기 공간',
-    solutionStatusSingle: '선 1개',
-    solutionStatusUnique: '한 점에서 만남',
-    solutionStatusSame: '같은 선',
-    solutionStatusParallel: '평행',
-    solutionStatusNone: '공통해 없음',
-    solutionStatusSingle3d: '평면 1개',
-    solutionStatusInfinite3d: '무한해',
-    dotZeroVector: '영벡터',
-    dotOrthogonal: '직교',
-    dotAcute: '예각',
-    dotObtuse: '둔각',
-    presetApplyNow: '바로 적용',
-  },
-  en: {
-    view3d: '3D view',
-    view2d: '2D view',
-    view1d: '1D view',
-    viewTitle: 'Show {label}',
-    loader: 'Preparing 3D engine',
-    cameraLock: 'Lock current camera view',
-    cameraUnlock: 'Unlock camera',
-    locked: 'Locked',
-    lock: 'Lock',
-    graphControls: 'Graph controls',
-    rankTitle: 'Matrix rank of current space',
-    space: 'Space',
-    spaceDisplay: 'Space display',
-    baseGrid: 'Base',
-    baseGridTitle: 'Show base grid',
-    relativeGrid: 'Relative',
-    relativeGridTitle: 'Show relative grid',
-    axes: 'Axes',
-    axesTitle: 'Show axes',
-    coordinates: 'Coords',
-    coordinatesTitle: 'Show coordinates',
-    vector: 'Vector',
-    vectorDisplay: 'Show vectors',
-    basis: 'Basis',
-    basisDisplay: 'Show basis',
-    vectorLegend: 'Vector legend',
-    vectorAllDisplay: 'Show all vectors',
-    hideAll: 'Hide all',
-    showAll: 'Show all',
-    chooseForMeasure: 'Select for measurement',
-    hide: 'Hide',
-    show: 'Show',
-    measurement: 'Measure',
-    makeMeasurement: 'Create measurement',
-    dot: 'Dot',
-    volume: 'Volume',
-    area: 'Area',
-    dotConnect: 'Connect dot product',
-    areaVolumeConnect: 'Connect area/volume',
-    hideTarget: 'Hide',
-    dotMakeTitle: 'Create dot product: select 2 targets',
-    volumeMakeTitle: 'Create area/volume: select 2-3 targets',
-    targetSelect: 'Select target',
-    toggleMeasurement: 'Toggle {type}',
-    continueDot: 'Continue from this dot product',
-    reverseDirection: 'Reverse direction',
-    convertToVolume: 'Convert to volume',
-    convertToDot: 'Convert to dot product',
-    extendVolume: 'Add third vector for volume',
-    deleteMeasurement: 'Delete measurement',
-    removeMeasurement: 'Remove measurement',
-    panelOpen: 'Open control panel',
-    panelButton: 'Panel',
-    resetSpace: 'Reset space',
-    reset: 'Reset',
-    animationProgress: 'Animation progress',
-    panelTitle: 'Transform Panel',
-    panelClose: 'Close control panel',
-    workspaceMode: 'Workspace mode',
-    transform: 'Transform',
-    system: 'Systems',
-    systemTitle: 'Systems of Equations',
-    addEquation: 'Add equation',
-    systemExamples: 'Equation examples',
-    intersection: 'Intersect',
-    parallel: 'Parallel',
-    overlap: 'Overlap',
-    overlap3d: '3D overlap',
-    status: 'Status',
-    linePoint: 'Point',
-    invalidLineNote: 'Check the format of L{items}.',
-    sameLineNote: 'All equations describe the same line, so every point on it is a solution.',
-    parallelLineNote: 'The slopes match but the positions differ, so they do not meet.',
-    noCommonLineNote: 'Some lines meet, but no point satisfies every equation at once.',
-    single3dNote: 'One equation expands into one plane in 3D space. The solution is the whole plane.',
-    infinite3dNote: 'Only the common solution is highlighted. Planes are muted so the overlap stays visible.',
-    commonLine: 'Common line',
-    commonPlane: 'Common plane',
-    no3dNote: 'The planes do not meet at a shared point or line.',
-    applyPointToVector: 'Put point into {name}',
-    currentSpace: 'Current space',
-    timeline: 'Timeline',
-    spaceTimeline: 'Space timeline',
-    transformHistory: 'Transform history',
-    deleteHistory: 'Delete history',
-    matrixInput: 'Matrix Input',
-    matrixCopy: 'Copy matrix',
-    matrixPaste: 'Paste matrix',
-    matrixDimension: 'Matrix dimension',
-    applyMatrix: 'Multiply current space',
-    matrixPresets: 'Matrix presets',
-    presetLoadTitle: 'Load {name} into matrix input',
-    presetApplyTitle: 'Apply {name} now',
-    vectorTracking: 'Vector Tracking',
-    addVector: 'Add vector',
-    vectorTools: 'Vector tools',
-    fixed: 'Fixed',
-    baseBasis: 'Base basis',
-    resetBasis: 'Reset {name} to base',
-    resetBasisAria: 'Reset {name} to base basis',
-    vectorMeasureMenu: '{name} measurement',
-    dotStartTitle: 'Start dot measurement from {name}',
-    volumeStartTitle: 'Start area/volume measurement from {name}',
-    scalarConstraint: 'Scalar constraint',
-    scalar: 'Scalar',
-    vectorDelete: 'Delete vector',
-    scalarConstraints: 'Scalar constraints',
-    constraintsCount: '{count} · drag',
-    plane: 'Plane',
-    line: 'Line',
-    point: 'Point',
-    dotBetweenVectors: 'between vectors',
-    noDotVectors: 'No regular vectors to measure dot products.',
-    vectorVolume: 'Vector volume',
-    vectorArea: 'Vector area',
-    parallelepiped: 'Parallelepiped',
-    parallelogram: 'Parallelogram',
-    unique: 'Unique',
-    infinite: 'Infinite',
-    infiniteMany: 'Infinitely many',
-    noSolution: 'No solution',
-    invalidFormat: 'Check format',
-    waitingInput: 'Waiting',
-    solution: 'Solution',
-    generalSolution: 'General solution',
-    contradictionNote: 'rank(A) differs from rank([A|b]), so the system is inconsistent.',
-    applySolutionToVector: 'Put solution into tracked vector',
-    timelineClose: 'Close timeline',
-    timelinePin: 'Pin timeline',
-    timelineUnpin: 'Unpin timeline',
-    current: 'Current',
-    preview: 'Preview',
-    inverse: 'Inverse',
-    none: 'None',
-    matrix: 'Matrix',
-    previousMatrix: 'Previous matrix',
-    resultMatrix: 'Result matrix',
-    matrixValueLabel: 'Matrix value {index}',
-    copyMatrix: 'Copy {label}',
-    copied: 'Copied',
-    copyFailed: 'Could not copy',
-    pasted: 'Pasted',
-    pasteNoNumbers: 'No numbers to paste',
-    pasteFailed: 'Paste failed',
-    input2dDefaultName: '2x2 projection input',
-    input1dDefaultName: '1x1 axis input',
-    directInput: 'Direct input',
-    initialSpace: 'Initial space',
-    solutionStatusSingle: 'One line',
-    solutionStatusUnique: 'Meet at one point',
-    solutionStatusSame: 'Same line',
-    solutionStatusParallel: 'Parallel',
-    solutionStatusNone: 'No common solution',
-    solutionStatusSingle3d: 'One plane',
-    solutionStatusInfinite3d: 'Infinite',
-    dotZeroVector: 'Zero vector',
-    dotOrthogonal: 'Orthogonal',
-    dotAcute: 'Acute',
-    dotObtuse: 'Obtuse',
-    presetApplyNow: 'Apply now',
-  },
-  ja: {
-    view3d: '3D視点',
-    view2d: '2D視点',
-    view1d: '1D視点',
-    viewTitle: '{label}を表示',
-    loader: '3Dエンジンを準備中',
-    cameraLock: '現在のカメラ視点を固定',
-    cameraUnlock: 'カメラ固定を解除',
-    locked: '固定中',
-    lock: '固定',
-    graphControls: 'グラフ操作',
-    rankTitle: '現在空間の行列ランク',
-    space: '空間',
-    spaceDisplay: '空間表示',
-    baseGrid: '基本',
-    baseGridTitle: '基本グリッドを表示',
-    relativeGrid: '相対',
-    relativeGridTitle: '相対グリッドを表示',
-    axes: '軸',
-    axesTitle: '軸を表示',
-    coordinates: '座標',
-    coordinatesTitle: '座標を表示',
-    vector: 'ベクトル',
-    vectorDisplay: 'ベクトルを表示',
-    basis: '基底',
-    basisDisplay: '基底を表示',
-    vectorLegend: 'ベクトル凡例',
-    vectorAllDisplay: 'ベクトル全体表示',
-    hideAll: 'すべて隠す',
-    showAll: 'すべて表示',
-    chooseForMeasure: '測定に選択',
-    hide: '隠す',
-    show: '表示',
-    measurement: '測定',
-    makeMeasurement: '測定を作成',
-    dot: '内積',
-    volume: '体積',
-    area: '面積',
-    dotConnect: '内積を接続',
-    areaVolumeConnect: '面積/体積を接続',
-    hideTarget: '隠す',
-    dotMakeTitle: '内積を作成: 対象を2つ選択',
-    volumeMakeTitle: '面積/体積を作成: 対象を2〜3つ選択',
-    targetSelect: '対象を選択',
-    toggleMeasurement: '{type}表示を切替',
-    continueDot: 'この内積から続ける',
-    reverseDirection: '向きを反転',
-    convertToVolume: '体積へ変換',
-    convertToDot: '内積へ変換',
-    extendVolume: '3つ目のベクトルで体積へ',
-    deleteMeasurement: '測定を削除',
-    removeMeasurement: '測定を削除',
-    panelOpen: '操作パネルを開く',
-    panelButton: 'パネル',
-    resetSpace: '空間をリセット',
-    reset: 'リセット',
-    animationProgress: 'アニメーション進行',
-    panelTitle: '変換パネル',
-    panelClose: '操作パネルを閉じる',
-    workspaceMode: '作業モード',
-    transform: '変換',
-    system: '連立',
-    systemTitle: '連立方程式',
-    addEquation: '式を追加',
-    systemExamples: '連立方程式の例',
-    intersection: '交点',
-    parallel: '平行',
-    overlap: '重なり',
-    overlap3d: '3D重なり',
-    status: '状態',
-    linePoint: '交点',
-    invalidLineNote: 'L{items} の形式を確認してください。',
-    sameLineNote: 'すべての式が同じ直線を表すため、直線全体が解です。',
-    parallelLineNote: '傾きは同じですが位置が異なるため交わりません。',
-    noCommonLineNote: '一部は交わりますが、すべてを同時に満たす点はありません。',
-    single3dNote: '1つの式が3D空間の1つの平面になります。解はその平面全体です。',
-    infinite3dNote: '共通解だけを強調しています。重なりが見えるよう平面は薄く表示しています。',
-    commonLine: '交線',
-    commonPlane: '共通平面',
-    no3dNote: '平面は共通の点や線で交わりません。',
-    applyPointToVector: '交点を{name}に入れる',
-    currentSpace: '現在の空間',
-    timeline: 'タイムライン',
-    spaceTimeline: '空間タイムライン',
-    transformHistory: '変換履歴',
-    deleteHistory: '履歴を削除',
-    matrixInput: '行列入力',
-    matrixCopy: '行列をコピー',
-    matrixPaste: '行列を貼り付け',
-    matrixDimension: '行列の次元',
-    applyMatrix: '現在空間に掛ける',
-    matrixPresets: '行列プリセット',
-    presetLoadTitle: '{name}を入力欄に読み込む',
-    presetApplyTitle: '{name}をすぐ適用',
-    vectorTracking: 'ベクトル追跡',
-    addVector: 'ベクトルを追加',
-    vectorTools: 'ベクトルツール',
-    fixed: '固定',
-    baseBasis: '基本基底',
-    resetBasis: '{name}を基本基底へ',
-    resetBasisAria: '{name}を基本基底にリセット',
-    vectorMeasureMenu: '{name}の測定',
-    dotStartTitle: '{name}から内積測定を開始',
-    volumeStartTitle: '{name}から面積/体積測定を開始',
-    scalarConstraint: 'スカラー制約',
-    scalar: 'スカラー',
-    vectorDelete: 'ベクトルを削除',
-    scalarConstraints: 'スカラー制約',
-    constraintsCount: '{count}個 · ドラッグ',
-    plane: '平面',
-    line: '直線',
-    point: '点',
-    dotBetweenVectors: 'ベクトル同士',
-    noDotVectors: '内積を測れる通常ベクトルがありません。',
-    vectorVolume: 'ベクトル体積',
-    vectorArea: 'ベクトル面積',
-    parallelepiped: '平行六面体',
-    parallelogram: '平行四辺形',
-    unique: '一意解',
-    infinite: '無限解',
-    infiniteMany: '無限に多い',
-    noSolution: '解なし',
-    invalidFormat: '形式確認',
-    waitingInput: '入力待ち',
-    solution: '解',
-    generalSolution: '一般解',
-    contradictionNote: 'rank(A) と rank([A|b]) が異なるため矛盾しています。',
-    applySolutionToVector: '解を追跡ベクトルに入れる',
-    timelineClose: 'タイムラインを閉じる',
-    timelinePin: 'タイムラインを固定',
-    timelineUnpin: 'タイムライン固定を解除',
-    current: '現在',
-    preview: 'プレビュー',
-    inverse: '逆行列',
-    none: 'なし',
-    matrix: '行列',
-    previousMatrix: '前の行列',
-    resultMatrix: '結果行列',
-    matrixValueLabel: '行列値 {index}',
-    copyMatrix: '{label}をコピー',
-    copied: 'コピーしました',
-    copyFailed: 'コピーできませんでした',
-    pasted: '貼り付けました',
-    pasteNoNumbers: '貼り付ける数値がありません',
-    pasteFailed: '貼り付け失敗',
-    input2dDefaultName: '2x2射影入力',
-    input1dDefaultName: '1x1軸入力',
-    directInput: '直接入力',
-    initialSpace: '初期空間',
-    solutionStatusSingle: '直線1本',
-    solutionStatusUnique: '1点で交わる',
-    solutionStatusSame: '同じ直線',
-    solutionStatusParallel: '平行',
-    solutionStatusNone: '共通解なし',
-    solutionStatusSingle3d: '平面1つ',
-    solutionStatusInfinite3d: '無限解',
-    dotZeroVector: '零ベクトル',
-    dotOrthogonal: '直交',
-    dotAcute: '鋭角',
-    dotObtuse: '鈍角',
-    presetApplyNow: 'すぐ適用',
-  },
-  zh: {
-    view3d: '3D 视角',
-    view2d: '2D 视角',
-    view1d: '1D 视角',
-    viewTitle: '显示{label}',
-    loader: '正在准备 3D 引擎',
-    cameraLock: '锁定当前相机视角',
-    cameraUnlock: '解除相机锁定',
-    locked: '已锁定',
-    lock: '锁定',
-    graphControls: '图形控制',
-    rankTitle: '当前空间的矩阵秩',
-    space: '空间',
-    spaceDisplay: '空间显示',
-    baseGrid: '基本',
-    baseGridTitle: '显示基本网格',
-    relativeGrid: '相对',
-    relativeGridTitle: '显示相对网格',
-    axes: '轴',
-    axesTitle: '显示坐标轴',
-    coordinates: '坐标',
-    coordinatesTitle: '显示坐标',
-    vector: '向量',
-    vectorDisplay: '显示向量',
-    basis: '基',
-    basisDisplay: '显示基向量',
-    vectorLegend: '向量图例',
-    vectorAllDisplay: '显示全部向量',
-    hideAll: '全部隐藏',
-    showAll: '全部显示',
-    chooseForMeasure: '选择用于测量',
-    hide: '隐藏',
-    show: '显示',
-    measurement: '测量',
-    makeMeasurement: '创建测量',
-    dot: '点积',
-    volume: '体积',
-    area: '面积',
-    dotConnect: '连接点积',
-    areaVolumeConnect: '连接面积/体积',
-    hideTarget: '隐藏',
-    dotMakeTitle: '创建点积：选择 2 个对象',
-    volumeMakeTitle: '创建面积/体积：选择 2-3 个对象',
-    targetSelect: '选择对象',
-    toggleMeasurement: '切换{type}显示',
-    continueDot: '从此点积继续',
-    reverseDirection: '反转方向',
-    convertToVolume: '转换为体积',
-    convertToDot: '转换为点积',
-    extendVolume: '添加第三个向量形成体积',
-    deleteMeasurement: '删除测量',
-    removeMeasurement: '移除测量',
-    panelOpen: '打开控制面板',
-    panelButton: '面板',
-    resetSpace: '重置空间',
-    reset: '重置',
-    animationProgress: '动画进度',
-    panelTitle: '变换面板',
-    panelClose: '关闭控制面板',
-    workspaceMode: '工作模式',
-    transform: '变换',
-    system: '方程组',
-    systemTitle: '线性方程组',
-    addEquation: '添加方程',
-    systemExamples: '方程组示例',
-    intersection: '交点',
-    parallel: '平行',
-    overlap: '重合',
-    overlap3d: '3D 重合',
-    status: '状态',
-    linePoint: '交点',
-    invalidLineNote: '请检查 L{items} 的格式。',
-    sameLineNote: '所有方程表示同一条直线，因此整条直线都是解。',
-    parallelLineNote: '斜率相同但位置不同，所以不会相交。',
-    noCommonLineNote: '有些直线相交，但没有一个点同时满足所有方程。',
-    single3dNote: '一个方程在 3D 空间中形成一个平面，解是整个平面。',
-    infinite3dNote: '只高亮公共解，平面会降低亮度以便看清重合部分。',
-    commonLine: '公共直线',
-    commonPlane: '公共平面',
-    no3dNote: '这些平面没有共同的点或线。',
-    applyPointToVector: '把交点放入 {name}',
-    currentSpace: '当前空间',
-    timeline: '时间线',
-    spaceTimeline: '空间时间线',
-    transformHistory: '变换历史',
-    deleteHistory: '删除历史',
-    matrixInput: '矩阵输入',
-    matrixCopy: '复制矩阵',
-    matrixPaste: '粘贴矩阵',
-    matrixDimension: '矩阵维度',
-    applyMatrix: '乘到当前空间',
-    matrixPresets: '矩阵预设',
-    presetLoadTitle: '将{name}载入输入框',
-    presetApplyTitle: '立即应用{name}',
-    vectorTracking: '向量追踪',
-    addVector: '添加向量',
-    vectorTools: '向量工具',
-    fixed: '固定',
-    baseBasis: '基本基',
-    resetBasis: '将{name}重置为基本基',
-    resetBasisAria: '重置{name}为基本基',
-    vectorMeasureMenu: '{name} 测量',
-    dotStartTitle: '从{name}开始点积测量',
-    volumeStartTitle: '从{name}开始面积/体积测量',
-    scalarConstraint: '标量约束',
-    scalar: '标量',
-    vectorDelete: '删除向量',
-    scalarConstraints: '标量约束',
-    constraintsCount: '{count} 个 · 拖动',
-    plane: '平面',
-    line: '直线',
-    point: '点',
-    dotBetweenVectors: '向量之间',
-    noDotVectors: '没有可用于点积的普通向量。',
-    vectorVolume: '向量体积',
-    vectorArea: '向量面积',
-    parallelepiped: '平行六面体',
-    parallelogram: '平行四边形',
-    unique: '唯一解',
-    infinite: '无穷解',
-    infiniteMany: '无穷多个',
-    noSolution: '无解',
-    invalidFormat: '检查格式',
-    waitingInput: '等待输入',
-    solution: '解',
-    generalSolution: '通解',
-    contradictionNote: 'rank(A) 与 rank([A|b]) 不同，因此方程组矛盾。',
-    applySolutionToVector: '把解放入追踪向量',
-    timelineClose: '关闭时间线',
-    timelinePin: '固定时间线',
-    timelineUnpin: '取消固定时间线',
-    current: '当前',
-    preview: '预览',
-    inverse: '逆矩阵',
-    none: '无',
-    matrix: '矩阵',
-    previousMatrix: '前一矩阵',
-    resultMatrix: '结果矩阵',
-    matrixValueLabel: '矩阵值 {index}',
-    copyMatrix: '复制{label}',
-    copied: '已复制',
-    copyFailed: '复制失败',
-    pasted: '已粘贴',
-    pasteNoNumbers: '没有可粘贴的数字',
-    pasteFailed: '粘贴失败',
-    input2dDefaultName: '2x2 投影输入',
-    input1dDefaultName: '1x1 轴输入',
-    directInput: '直接输入',
-    initialSpace: '初始空间',
-    solutionStatusSingle: '一条直线',
-    solutionStatusUnique: '相交于一点',
-    solutionStatusSame: '同一直线',
-    solutionStatusParallel: '平行',
-    solutionStatusNone: '无公共解',
-    solutionStatusSingle3d: '一个平面',
-    solutionStatusInfinite3d: '无穷解',
-    dotZeroVector: '零向量',
-    dotOrthogonal: '正交',
-    dotAcute: '锐角',
-    dotObtuse: '钝角',
-    presetApplyNow: '立即应用',
-  },
-};
-
-Object.entries(uiLocaleMessages).forEach(([localeKey, messages]) => {
-  Object.assign(localeMessages[localeKey], messages);
-});
-
-const presetLocaleNames = {
-  en: {
-    '3d-identity': 'Identity matrix',
-    '3d-rotate-x': 'Rotate X 90°',
-    '3d-rotate-y': 'Rotate Y 90°',
-    '3d-rotate-z': 'Rotate Z 90°',
-    '3d-scale-up': 'Scale 1.5x',
-    '3d-shear-xy': 'X-Y shear',
-    '3d-swap-xy': 'X/Y permutation',
-    '3d-compress-z': 'Compress Z',
-    '3d-project-xy': 'Project to XY plane',
-    '2d-identity': 'Identity matrix',
-    '2d-permutation': 'Permutation matrix',
-    '2d-rotate': 'Rotate 90°',
-    '2d-reflect-x': 'Reflect X axis',
-    '2d-reflect-y': 'Reflect Y axis',
-    '2d-scale-up': 'Scale 2x',
-    '2d-scale-down': 'Scale 1/2',
-    '2d-shear-x': 'X shear',
-    '2d-shear-y': 'Y shear',
-    '2d-project-x': 'Project to X axis',
-    '1d-identity': 'Identity',
-    '1d-flip': 'Flip direction',
-    '1d-scale-up': 'Scale 2x',
-    '1d-scale-down': 'Scale 1/2',
-    '1d-zero': 'Project to origin',
-  },
-  ja: {
-    '3d-identity': '単位行列',
-    '3d-rotate-x': 'X軸90°回転',
-    '3d-rotate-y': 'Y軸90°回転',
-    '3d-rotate-z': 'Z軸90°回転',
-    '3d-scale-up': '1.5倍拡大',
-    '3d-shear-xy': 'X-Yせん断',
-    '3d-swap-xy': 'X/Y置換',
-    '3d-compress-z': 'Z圧縮',
-    '3d-project-xy': 'XY平面射影',
-    '2d-identity': '単位行列',
-    '2d-permutation': '置換行列',
-    '2d-rotate': '90°回転',
-    '2d-reflect-x': 'X軸反射',
-    '2d-reflect-y': 'Y軸反射',
-    '2d-scale-up': '2倍拡大',
-    '2d-scale-down': '1/2縮小',
-    '2d-shear-x': 'Xせん断',
-    '2d-shear-y': 'Yせん断',
-    '2d-project-x': 'X軸射影',
-    '1d-identity': '単位',
-    '1d-flip': '方向反転',
-    '1d-scale-up': '2倍拡大',
-    '1d-scale-down': '1/2縮小',
-    '1d-zero': '原点射影',
-  },
-  zh: {
-    '3d-identity': '单位矩阵',
-    '3d-rotate-x': '绕 X 轴旋转 90°',
-    '3d-rotate-y': '绕 Y 轴旋转 90°',
-    '3d-rotate-z': '绕 Z 轴旋转 90°',
-    '3d-scale-up': '放大 1.5 倍',
-    '3d-shear-xy': 'X-Y 剪切',
-    '3d-swap-xy': 'X/Y 置换',
-    '3d-compress-z': '压缩 Z',
-    '3d-project-xy': '投影到 XY 平面',
-    '2d-identity': '单位矩阵',
-    '2d-permutation': '置换矩阵',
-    '2d-rotate': '旋转 90°',
-    '2d-reflect-x': 'X 轴反射',
-    '2d-reflect-y': 'Y 轴反射',
-    '2d-scale-up': '放大 2 倍',
-    '2d-scale-down': '缩小 1/2',
-    '2d-shear-x': 'X 剪切',
-    '2d-shear-y': 'Y 剪切',
-    '2d-project-x': '投影到 X 轴',
-    '1d-identity': '单位',
-    '1d-flip': '方向反转',
-    '1d-scale-up': '放大 2 倍',
-    '1d-scale-down': '缩小 1/2',
-    '1d-zero': '投影到原点',
-  },
-};
-
+const localeMessages = Object.fromEntries(
+  Object.entries(managedLocaleMessages).map(([localeKey, messages]) => [
+    localeKey,
+    { ...messages },
+  ])
+);
 const localeOrder = ['ko', 'en', 'ja', 'zh'];
-const urlStateKey = 'linearAlgebraUrlState';
-const urlDbKey = 'linearAlgebraUrlDb';
 
-const monetizationConfig = {
-  adProvider: import.meta.env.VITE_AD_PROVIDER ?? 'adsense',
-  adClient: import.meta.env.VITE_AD_CLIENT ?? '',
-  topAdSlot: import.meta.env.VITE_AD_SLOT_TOP ?? '',
-  bottomAdSlot: import.meta.env.VITE_AD_SLOT_BOTTOM ?? '',
-  admobAppId: import.meta.env.VITE_ADMOB_APP_ID ?? '',
-  donationUrl: import.meta.env.VITE_DONATION_URL ?? '',
-  donationLabel: import.meta.env.VITE_DONATION_LABEL ?? '',
-};
+const presetLocaleNames = Object.fromEntries(
+  Object.entries(managedPresetLocaleNames).map(([localeKey, messages]) => [
+    localeKey,
+    { ...messages },
+  ])
+);
 
 function normalizeLocale(value) {
   const raw = String(value ?? '').toLowerCase();
@@ -900,8 +114,13 @@ function detectLocale() {
   return normalizeLocale(languages.find(Boolean));
 }
 
-function t(locale, key) {
-  return localeMessages[locale]?.[key] ?? localeMessages.ko[key] ?? key;
+function t(locale, key, values = null) {
+  const template = localeMessages[locale]?.[key] ?? localeMessages.ko[key] ?? key;
+  if (!values) return template;
+  return Object.entries(values).reduce(
+    (text, [name, value]) => text.replaceAll(`{${name}}`, String(value)),
+    template
+  );
 }
 
 function encodeShareState(state) {
@@ -1115,45 +334,36 @@ function configureControlsForView(controls, viewKey, locked = false) {
   controls.touches.ONE = THREE.TOUCH.ROTATE;
 }
 
-const transformPresets = [
-  { name: 'X축 90도 회전', matrix: [1, 0, 0, 0, 0, -1, 0, 1, 0], mode: '3d' },
-  { name: 'Y축 90도 회전', matrix: [0, 0, 1, 0, 1, 0, -1, 0, 0], mode: '3d' },
-  { name: 'Z축 90도 회전', matrix: [0, -1, 0, 1, 0, 0, 0, 0, 1], mode: '3d' },
-  { name: '1.5배 확대', matrix: [1.5, 0, 0, 0, 1.5, 0, 0, 0, 1.5], mode: '3d' },
-  { name: 'X-Y 전단', matrix: [1, 1, 0, 0, 1, 0, 0, 0, 1], mode: '3d' },
-  { name: 'Z 압축', matrix: [1, 0, 0, 0, 1, 0, 0, 0, 0.35], mode: '3d' },
-];
-
 const matrixPresetGroups = {
   '3d': [
-    { id: '3d-identity', name: '단위 행렬', matrix: [1, 0, 0, 0, 1, 0, 0, 0, 1], mode: '3d' },
-    { id: '3d-rotate-x', name: 'X축 90도 회전', matrix: [1, 0, 0, 0, 0, -1, 0, 1, 0], mode: '3d' },
-    { id: '3d-rotate-y', name: 'Y축 90도 회전', matrix: [0, 0, 1, 0, 1, 0, -1, 0, 0], mode: '3d' },
-    { id: '3d-rotate-z', name: 'Z축 90도 회전', matrix: [0, -1, 0, 1, 0, 0, 0, 0, 1], mode: '3d' },
-    { id: '3d-scale-up', name: '1.5배 확대', matrix: [1.5, 0, 0, 0, 1.5, 0, 0, 0, 1.5], mode: '3d' },
-    { id: '3d-shear-xy', name: 'X-Y 전단', matrix: [1, 1, 0, 0, 1, 0, 0, 0, 1], mode: '3d' },
-    { id: '3d-swap-xy', name: 'X/Y 순열', matrix: [0, 1, 0, 1, 0, 0, 0, 0, 1], mode: '3d' },
-    { id: '3d-compress-z', name: 'Z 압축', matrix: [1, 0, 0, 0, 1, 0, 0, 0, 0.35], mode: '3d' },
-    { id: '3d-project-xy', name: 'XY 평면 사영', matrix: [1, 0, 0, 0, 1, 0, 0, 0, 0], mode: '3d' },
+    { id: '3d-identity', name: 'Identity matrix', matrix: [1, 0, 0, 0, 1, 0, 0, 0, 1], mode: '3d' },
+    { id: '3d-rotate-x', name: 'Rotate X 90', matrix: [1, 0, 0, 0, 0, -1, 0, 1, 0], mode: '3d' },
+    { id: '3d-rotate-y', name: 'Rotate Y 90', matrix: [0, 0, 1, 0, 1, 0, -1, 0, 0], mode: '3d' },
+    { id: '3d-rotate-z', name: 'Rotate Z 90', matrix: [0, -1, 0, 1, 0, 0, 0, 0, 1], mode: '3d' },
+    { id: '3d-scale-up', name: 'Scale 1.5x', matrix: [1.5, 0, 0, 0, 1.5, 0, 0, 0, 1.5], mode: '3d' },
+    { id: '3d-shear-xy', name: 'X-Y shear', matrix: [1, 1, 0, 0, 1, 0, 0, 0, 1], mode: '3d' },
+    { id: '3d-swap-xy', name: 'X/Y permutation', matrix: [0, 1, 0, 1, 0, 0, 0, 0, 1], mode: '3d' },
+    { id: '3d-compress-z', name: 'Compress Z', matrix: [1, 0, 0, 0, 1, 0, 0, 0, 0.35], mode: '3d' },
+    { id: '3d-project-xy', name: 'Project to XY plane', matrix: [1, 0, 0, 0, 1, 0, 0, 0, 0], mode: '3d' },
   ],
   '2d': [
-    { id: '2d-identity', name: '단위 행렬', matrix: [1, 0, 0, 1], mode: '2d' },
-    { id: '2d-permutation', name: '순열행렬', matrix: [0, 1, 1, 0], mode: '2d' },
-    { id: '2d-rotate', name: '90도 회전', matrix: [0, -1, 1, 0], mode: '2d' },
-    { id: '2d-reflect-x', name: 'X축 반사', matrix: [1, 0, 0, -1], mode: '2d' },
-    { id: '2d-reflect-y', name: 'Y축 반사', matrix: [-1, 0, 0, 1], mode: '2d' },
-    { id: '2d-scale-up', name: '2배 확대', matrix: [2, 0, 0, 2], mode: '2d' },
-    { id: '2d-scale-down', name: '1/2 축소', matrix: [0.5, 0, 0, 0.5], mode: '2d' },
-    { id: '2d-shear-x', name: 'X 전단', matrix: [1, 1, 0, 1], mode: '2d' },
-    { id: '2d-shear-y', name: 'Y 전단', matrix: [1, 0, 1, 1], mode: '2d' },
-    { id: '2d-project-x', name: 'X축 사영', matrix: [1, 0, 0, 0], mode: '2d' },
+    { id: '2d-identity', name: 'Identity matrix', matrix: [1, 0, 0, 1], mode: '2d' },
+    { id: '2d-permutation', name: 'Permutation matrix', matrix: [0, 1, 1, 0], mode: '2d' },
+    { id: '2d-rotate', name: 'Rotate 90', matrix: [0, -1, 1, 0], mode: '2d' },
+    { id: '2d-reflect-x', name: 'Reflect X axis', matrix: [1, 0, 0, -1], mode: '2d' },
+    { id: '2d-reflect-y', name: 'Reflect Y axis', matrix: [-1, 0, 0, 1], mode: '2d' },
+    { id: '2d-scale-up', name: 'Scale 2x', matrix: [2, 0, 0, 2], mode: '2d' },
+    { id: '2d-scale-down', name: 'Scale 1/2', matrix: [0.5, 0, 0, 0.5], mode: '2d' },
+    { id: '2d-shear-x', name: 'X shear', matrix: [1, 1, 0, 1], mode: '2d' },
+    { id: '2d-shear-y', name: 'Y shear', matrix: [1, 0, 1, 1], mode: '2d' },
+    { id: '2d-project-x', name: 'Project to X axis', matrix: [1, 0, 0, 0], mode: '2d' },
   ],
   '1d': [
-    { id: '1d-identity', name: '단위', matrix: [1], mode: '1d' },
-    { id: '1d-flip', name: '방향 반전', matrix: [-1], mode: '1d' },
-    { id: '1d-scale-up', name: '2배 확대', matrix: [2], mode: '1d' },
-    { id: '1d-scale-down', name: '1/2 축소', matrix: [0.5], mode: '1d' },
-    { id: '1d-zero', name: '원점 사영', matrix: [0], mode: '1d' },
+    { id: '1d-identity', name: 'Identity', matrix: [1], mode: '1d' },
+    { id: '1d-flip', name: 'Flip direction', matrix: [-1], mode: '1d' },
+    { id: '1d-scale-up', name: 'Scale 2x', matrix: [2], mode: '1d' },
+    { id: '1d-scale-down', name: 'Scale 1/2', matrix: [0.5], mode: '1d' },
+    { id: '1d-zero', name: 'Project to origin', matrix: [0], mode: '1d' },
   ],
 };
 
@@ -1498,9 +708,9 @@ function independentBasisKeysForMatrix(matrix) {
 }
 
 function dotRelationText(dotValue, lengthA, lengthB) {
-  if (lengthA < EPSILON || lengthB < EPSILON) return '영벡터';
-  if (Math.abs(dotValue) < EPSILON) return '직교';
-  return dotValue > 0 ? '예각' : '둔각';
+  if (lengthA < EPSILON || lengthB < EPSILON) return 'dotZeroVector';
+  if (Math.abs(dotValue) < EPSILON) return 'dotOrthogonal';
+  return dotValue > 0 ? 'dotAcute' : 'dotObtuse';
 }
 
 function hasScalarText(value) {
@@ -1807,11 +1017,11 @@ function matricesAlmostEqual(a, b) {
   return a.every((value, index) => Math.abs(value - b[index]) < EPSILON);
 }
 
-function dragHistoryName(key) {
-  if (key === 'i') return 'i′ 축 드래그';
-  if (key === 'j') return 'j′ 축 드래그';
-  if (key === 'k') return 'k′ 축 드래그';
-  return '축 드래그';
+function dragHistoryName(key, locale = 'ko') {
+  if (key === 'i') return t(locale, 'axisDragI');
+  if (key === 'j') return t(locale, 'axisDragJ');
+  if (key === 'k') return t(locale, 'axisDragK');
+  return t(locale, 'axisDrag');
 }
 
 function vectorIdFromDragKey(key) {
@@ -2231,18 +1441,18 @@ function analyzeEquationGeometry(equations) {
   };
 }
 
-function statusTextForLineSystem(status) {
-  if (status === 'single') return '선 1개';
-  if (status === 'unique') return '한 점에서 만남';
-  if (status === 'same') return '같은 선';
-  if (status === 'parallel') return '평행';
-  if (status === 'none') return '공통해 없음';
-  if (status === 'single3d') return '평면 1개';
-  if (status === 'unique3d') return '한 점에서 만남';
-  if (status === 'infinite3d') return '무한해';
-  if (status === 'none3d') return '공통해 없음';
-  if (status === 'invalid') return '형식 확인';
-  return '입력 대기';
+function statusKeyForLineSystem(status) {
+  if (status === 'single') return 'solutionStatusSingle';
+  if (status === 'unique') return 'solutionStatusUnique';
+  if (status === 'same') return 'solutionStatusSame';
+  if (status === 'parallel') return 'solutionStatusParallel';
+  if (status === 'none') return 'solutionStatusNone';
+  if (status === 'single3d') return 'solutionStatusSingle3d';
+  if (status === 'unique3d') return 'solutionStatusUnique';
+  if (status === 'infinite3d') return 'solutionStatusInfinite3d';
+  if (status === 'none3d') return 'solutionStatusNone';
+  if (status === 'invalid') return 'invalidFormat';
+  return 'waitingInput';
 }
 
 function relationText(relation, lines) {
@@ -2452,7 +1662,7 @@ function matrixToClipboardText(matrix, mode = '3d') {
   return rows.join('\n');
 }
 
-async function copyMatrixToClipboard(matrix, mode = '3d', label = '행렬') {
+async function copyMatrixToClipboard(matrix, mode = '3d', label = t('ko', 'matrix'), locale = 'ko') {
   const text = matrixToClipboardText(matrix, mode);
   if (typeof window !== 'undefined') {
     window.__linearAlgebraMatrixClipboard = text;
@@ -2460,7 +1670,7 @@ async function copyMatrixToClipboard(matrix, mode = '3d', label = '행렬') {
 
   try {
     await navigator.clipboard.writeText(text);
-    toast.success('복사되었습니다');
+    toast.success(t(locale, 'copied'));
     return;
   } catch {
     // Fall through to the legacy copy path for restricted browser contexts.
@@ -2472,31 +1682,31 @@ async function copyMatrixToClipboard(matrix, mode = '3d', label = '행렬') {
   textarea.style.position = 'fixed';
   textarea.style.left = '-9999px';
   document.body.appendChild(textarea);
-  textarea.select();
+    textarea.select();
   try {
     const copied = document.execCommand('copy');
     if (!copied) throw new Error('copy failed');
-    toast.success('복사되었습니다');
+    toast.success(t(locale, 'copied'));
   } finally {
     textarea.remove();
   }
 }
 
-function CopyableMatrix({ matrix, mode = '3d', className = '', label = '행렬' }) {
+function CopyableMatrix({ matrix, mode = '3d', className = '', label = t('ko', 'matrix'), locale = 'ko' }) {
   return (
     <span className="copyable-matrix">
       <MatrixMini matrix={matrix} mode={mode} className={className} />
       <button
-        aria-label={`${label} 복사`}
+        aria-label={t(locale, 'copyMatrix', { label })}
         className="detail-copy-button"
         onClick={(event) => {
           event.preventDefault();
           event.stopPropagation();
-          copyMatrixToClipboard(matrix, mode, label).catch(() => {
-            toast.error('복사하지 못했습니다');
+          copyMatrixToClipboard(matrix, mode, label, locale).catch(() => {
+            toast.error(t(locale, 'copyFailed'));
           });
         }}
-        title={`${label} 복사`}
+        title={t(locale, 'copyMatrix', { label })}
         type="button"
       >
         <Copy size={11} />
@@ -2505,14 +1715,14 @@ function CopyableMatrix({ matrix, mode = '3d', className = '', label = '행렬' 
   );
 }
 
-function MatrixInput({ values, columns, accent, onChange, onEnter }) {
+function MatrixInput({ values, columns, accent, locale = 'ko', onChange, onEnter }) {
   return (
     <div className="matrix-wrap" style={{ '--matrix-columns': columns }}>
       <div className="matrix-bracket left" />
       <div className="matrix-grid">
         {values.map((value, index) => (
           <input
-            aria-label={`행렬 값 ${index + 1}`}
+            aria-label={t(locale, 'matrixValueLabel', { index: index + 1 })}
             className={`matrix-cell ${accent}`}
             key={index}
             inputMode="text"
@@ -2535,7 +1745,7 @@ function MatrixInput({ values, columns, accent, onChange, onEnter }) {
   );
 }
 
-function HistoryDetail({ entry, index, isActive }) {
+function HistoryDetail({ entry, index, isActive, locale = 'ko' }) {
   const previousMatrix = entry.previousMatrix ?? entry.matrix;
   const stateMode = entry.stateMode ?? modeForMatrix(entry.matrix);
   const previousStateMode = entry.previousStateMode ?? modeForMatrix(previousMatrix);
@@ -2551,36 +1761,39 @@ function HistoryDetail({ entry, index, isActive }) {
   return (
     <div className={`history-detail ${isActive ? 'current' : 'preview'}`}>
       <div className="history-detail-head">
-        <span>#{index} {entry.name}</span>
-        <em>{isActive ? '현재' : '미리보기'}</em>
+        <span className="history-detail-title">
+          <strong>{entry.name}</strong>
+          <small>{t(locale, 'stepLabel', { index })}</small>
+        </span>
+        <em>{isActive ? t(locale, 'current') : t(locale, 'preview')}</em>
       </div>
       <div className="history-metrics-row">
         <div className="history-detail-grid">
           <span>
-            det
+            {t(locale, 'detLabel')}
             <strong>{formatNumber(previousDet)} → {formatNumber(det)}</strong>
           </span>
           <span>
-            rank
+            {t(locale, 'rankLabel')}
             <strong>{previousRank} → {rank}</strong>
           </span>
         </div>
         <div className={`inverse-panel mode-${operationMode} ${stepInverse ? '' : 'singular'}`}>
-          <span>역행렬</span>
+          <span>{t(locale, 'inverse')}</span>
           {stepInverse ? (
-            <CopyableMatrix matrix={stepInverse} mode={operationMode} className="large inverse" label="역행렬" />
+            <CopyableMatrix matrix={stepInverse} mode={operationMode} className="large inverse" label={t(locale, 'inverse')} locale={locale} />
           ) : (
-            <strong>없음</strong>
+            <strong>{t(locale, 'none')}</strong>
           )}
         </div>
       </div>
       <div className="history-step-flow">
         <div className="history-step-title">
-          <span>행렬</span>
+          <span>{t(locale, 'matrix')}</span>
         </div>
-        <CopyableMatrix matrix={previousMatrix} mode={previousStateMode} className="large" label="이전 행렬" />
+        <CopyableMatrix matrix={previousMatrix} mode={previousStateMode} className="large" label={t(locale, 'previousMatrix')} locale={locale} />
         <span className="matrix-arrow">→</span>
-        <CopyableMatrix matrix={entry.matrix} mode={stateMode} className="large" label="결과 행렬" />
+        <CopyableMatrix matrix={entry.matrix} mode={stateMode} className="large" label={t(locale, 'resultMatrix')} locale={locale} />
       </div>
     </div>
   );
@@ -2646,6 +1859,11 @@ export default function App() {
     initialShareRef.current = readSharedStateFromUrl() ?? false;
   }
   const initialShare = initialShareRef.current || {};
+  const urlLocale =
+    typeof window === 'undefined'
+      ? null
+      : new URLSearchParams(window.location.search).get('lang');
+  const initialLocale = urlLocale ? normalizeLocale(urlLocale) : initialShare.locale ?? detectLocale();
 
   const containerRef = useRef(null);
   const matrixPresetRefs = useRef({});
@@ -2723,6 +1941,7 @@ export default function App() {
   const nextMeasurementIndexRef = useRef(1);
   const measureModeRef = useRef(null);
   const measureDraftRef = useRef([]);
+  const vectorToolModeRef = useRef('vector');
   const timelineCloseTimerRef = useRef(null);
   const timelinePinnedRef = useRef(false);
   const uiStateRef = useRef({
@@ -2758,7 +1977,7 @@ export default function App() {
   const [equations, setEquations] = useState(equationExamples.infinite);
   const [history, setHistory] = useState([
     {
-      name: '초기 공간',
+      name: t(initialLocale, 'initialSpace'),
       matrix: [...(initialShare.displayMatrix ?? identity3)],
       previousMatrix: [...(initialShare.displayMatrix ?? identity3)],
       previousStateMode: '3d',
@@ -2774,7 +1993,7 @@ export default function App() {
   const [activeView, setActiveView] = useState(initialShare.camera ? null : '3d');
   const [cameraLocked, setCameraLocked] = useState(false);
   const [cameraState, setCameraState] = useState(initialShare.camera ?? null);
-  const [locale, setLocale] = useState(initialShare.locale ?? detectLocale());
+  const [locale, setLocale] = useState(initialLocale);
   const [showVolume, setShowVolume] = useState(initialShare.showVolume ?? false);
   const [showVector, setShowVector] = useState(initialShare.showVector ?? true);
   const [showBasis, setShowBasis] = useState(initialShare.showBasis ?? true);
@@ -2797,8 +2016,11 @@ export default function App() {
     return matrix3;
   }, [inputMode, matrix1, matrix2, matrix3]);
   const visibleMatrixPresets = useMemo(
-    () => matrixPresetGroups[inputMode] ?? matrixPresetGroups['3d'],
-    [inputMode]
+    () => (matrixPresetGroups[inputMode] ?? matrixPresetGroups['3d']).map((preset) => ({
+      ...preset,
+      name: presetLocaleNames[locale]?.[preset.id] ?? presetLocaleNames.ko?.[preset.id] ?? preset.name,
+    })),
+    [inputMode, locale]
   );
   const activeMatrixPresetId = useMemo(() => {
     const parsed = matrixInputValues.map(parseNumber);
@@ -3010,8 +2232,35 @@ export default function App() {
   const lineSystem = useMemo(() => analyzeEquationGeometry(equations), [equations]);
 
   useEffect(() => {
+    if (typeof window === 'undefined') return undefined;
+    const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
+    const applyTheme = () => {
+      const theme = mediaQuery.matches ? 'dark' : 'light';
+      document.documentElement.dataset.theme = theme;
+      document.documentElement.style.colorScheme = theme;
+      const themeColor = theme === 'dark' ? '#10110f' : '#f5f4ef';
+      let meta = document.querySelector('meta[name="theme-color"]');
+      if (!meta) {
+        meta = document.createElement('meta');
+        meta.setAttribute('name', 'theme-color');
+        document.head.appendChild(meta);
+      }
+      meta.setAttribute('content', themeColor);
+    };
+    applyTheme();
+    mediaQuery.addEventListener?.('change', applyTheme);
+    return () => {
+      mediaQuery.removeEventListener?.('change', applyTheme);
+    };
+  }, []);
+
+  useEffect(() => {
     systemDimensionRef.current = lineSystem.mode ?? '2d';
   }, [lineSystem.mode]);
+
+  useEffect(() => {
+    vectorToolModeRef.current = vectorToolMode;
+  }, [vectorToolMode]);
 
   useEffect(() => {
     workspaceModeRef.current = workspaceMode;
@@ -3382,7 +2631,7 @@ export default function App() {
           event.stopPropagation();
           startMeasurementFrom('dot', targetId, event);
         }}
-        title="내적 연결"
+        title={t(locale, 'dotConnect')}
         type="button"
       >
         <Sigma size={12} />
@@ -3394,7 +2643,7 @@ export default function App() {
           event.stopPropagation();
           startMeasurementFrom('volume', targetId, event);
         }}
-        title="면적/부피 연결"
+        title={t(locale, 'areaVolumeConnect')}
         type="button"
       >
         <Box size={12} />
@@ -3412,13 +2661,13 @@ export default function App() {
             toggleVectorVisible(targetId.slice(2));
           }
         }}
-        title="숨기기"
+        title={t(locale, 'hideTarget')}
         type="button"
       >
         <EyeOff size={12} />
       </button>
     </span>
-  ), [measureDraft, measureMode, startMeasurementFrom, toggleBasisVisible, toggleVectorVisible]);
+  ), [locale, measureDraft, measureMode, startMeasurementFrom, toggleBasisVisible, toggleVectorVisible]);
 
   const renderMeasurementLabelTools = useCallback((item) => {
     const targetIds = item?.targetIds ?? item?.targets ?? [];
@@ -3446,7 +2695,7 @@ export default function App() {
               event.stopPropagation();
               continueDotMeasurement(item, event);
             }}
-            title="이 내적에서 이어가기"
+            title={t(locale, 'continueDot')}
             type="button"
           >
             <span className="measurement-add-icon">
@@ -3463,7 +2712,7 @@ export default function App() {
               event.stopPropagation();
               reverseDotMeasurement(item.id);
             }}
-            title="방향 바꾸기"
+            title={t(locale, 'reverseDirection')}
             type="button"
           >
             <ArrowLeftRight size={12} />
@@ -3477,7 +2726,7 @@ export default function App() {
               event.stopPropagation();
               convertMeasurementType(item.id);
             }}
-            title={item.type === 'dot' ? '부피로 변환' : '내적으로 변환'}
+            title={item.type === 'dot' ? t(locale, 'convertToVolume') : t(locale, 'convertToDot')}
             type="button"
           >
             {item.type === 'dot' ? <Box size={12} /> : <Sigma size={12} />}
@@ -3491,7 +2740,7 @@ export default function App() {
               event.stopPropagation();
               continueMeasurement(item);
             }}
-            title="세 번째 벡터로 부피 이어가기"
+            title={t(locale, 'extendVolume')}
             type="button"
           >
             <span className="measurement-add-icon">
@@ -3507,14 +2756,14 @@ export default function App() {
             event.stopPropagation();
             removeMeasurement(item.id);
           }}
-          title="측정 삭제"
+          title={t(locale, 'deleteMeasurement')}
           type="button"
         >
           <X size={12} />
         </button>
       </span>
     );
-  }, [continueDotMeasurement, continueMeasurement, convertMeasurementType, displayMode, removeMeasurement, reverseDotMeasurement]);
+  }, [continueDotMeasurement, continueMeasurement, convertMeasurementType, displayMode, locale, removeMeasurement, reverseDotMeasurement]);
 
   const renderMeasurementChip = useCallback((item) => (
     <div
@@ -3523,7 +2772,7 @@ export default function App() {
     >
       <button
         onClick={() => toggleMeasurementVisible(item.id)}
-        title={`${item.type === 'dot' ? '내적' : '부피'} 표시 전환`}
+        title={t(locale, 'toggleMeasurement', { type: item.type === 'dot' ? t(locale, 'dot') : t(locale, 'volume') })}
         type="button"
       >
         <span>{item.type === 'dot' ? 'Σ' : '□'}</span>
@@ -3534,7 +2783,7 @@ export default function App() {
         <button
           className={`measure-convert ${item.type === 'dot' ? 'to-volume' : 'to-dot'}`}
           onClick={() => convertMeasurementType(item.id)}
-          title={item.type === 'dot' ? '부피로 변환' : '내적으로 변환'}
+          title={item.type === 'dot' ? t(locale, 'convertToVolume') : t(locale, 'convertToDot')}
           type="button"
         >
           {item.type === 'dot' ? <Box size={11} /> : <Sigma size={11} />}
@@ -3544,7 +2793,7 @@ export default function App() {
         <button
           className="measure-extend"
           onClick={() => continueMeasurement(item)}
-          title="세 번째 벡터로 부피 이어가기"
+          title={t(locale, 'extendVolume')}
           type="button"
         >
           <Plus size={11} />
@@ -3553,13 +2802,13 @@ export default function App() {
       <button
         className="measure-remove"
         onClick={() => removeMeasurement(item.id)}
-        title="측정 제거"
+        title={t(locale, 'removeMeasurement')}
         type="button"
       >
         <X size={11} />
       </button>
     </div>
-  ), [continueMeasurement, convertMeasurementType, displayMode, removeMeasurement, toggleMeasurementVisible]);
+  ), [continueMeasurement, convertMeasurementType, displayMode, locale, removeMeasurement, toggleMeasurementVisible]);
 
   const updateMeasurePointer = useCallback((event) => {
     if (!measureMode || measureDraft.length === 0) return;
@@ -3611,11 +2860,11 @@ export default function App() {
   }, []);
 
   const removeVector = useCallback((id) => {
+    setMeasurements((current) => current.filter((item) => !item.targets.includes(`v:${id}`)));
     setVectors((previous) => {
-      if (previous.length <= 1) return previous;
       const next = previous.filter((item) => item.id !== id);
       if (activeVectorIdRef.current === id) {
-        const fallback = next[0]?.id ?? 'v1';
+        const fallback = next[0]?.id ?? '';
         activeVectorIdRef.current = fallback;
         setActiveVectorId(fallback);
       }
@@ -3631,7 +2880,7 @@ export default function App() {
     refs.equationPoint.userData.visible = false;
     refs.equationPoint.visible = false;
 
-    if (workspaceMode !== 'system') {
+    if (workspaceMode !== 'system' && vectorToolMode !== 'system') {
       refs.equationGroup.visible = false;
       return undefined;
     }
@@ -3682,7 +2931,7 @@ export default function App() {
     return () => {
       clearEquationGroup(refs.equationGroup);
     };
-  }, [lineSystem, workspaceMode]);
+  }, [lineSystem, workspaceMode, vectorToolMode]);
 
   const previewDraggedMatrix = useCallback((matrix) => {
     const next = [...matrix];
@@ -3773,7 +3022,7 @@ export default function App() {
     const previousStateMode = modeForMatrix(startMatrix);
     const operation = operationBetweenMatrices(startMatrix, endMatrix);
     const entry = {
-      name: dragHistoryName(dragKey),
+      name: dragHistoryName(dragKey, locale),
       matrix: [...endMatrix],
       previousMatrix: [...startMatrix],
       previousStateMode,
@@ -3789,7 +3038,7 @@ export default function App() {
       setHoveredHistoryIndex(null);
       return next;
     });
-  }, []);
+  }, [locale]);
 
   const updateBasisVectorFromDrag = useCallback((dragKey, worldVector) => {
     if (!['i', 'j', 'k'].includes(dragKey)) return worldVector;
@@ -3994,11 +3243,7 @@ export default function App() {
     const refs = threeRef.current;
     const label = labelRef?.current ?? labelRef;
     const allowOrigin = options.allowOrigin ?? false;
-    const keepNameWhenCoordinatesHidden =
-      options.keepNameWhenCoordinatesHidden &&
-      uiStateRef.current.showCoordinateNumbers === false &&
-      label?.classList?.contains('measure-target-label');
-    if (!refs || !label || (!visible && !keepNameWhenCoordinatesHidden) || (!allowOrigin && vector3.length() < EPSILON)) {
+    if (!refs || !label || !visible || (!allowOrigin && vector3.length() < EPSILON)) {
       if (label) label.style.display = 'none';
       return;
     }
@@ -4082,7 +3327,7 @@ export default function App() {
 
     const matrix = currentMatrixRef.current;
     const coordMode = viewKeyForMatrix(matrix);
-    const isSystemMode = workspaceModeRef.current === 'system';
+    const isSystemMode = workspaceModeRef.current === 'system' || vectorToolModeRef.current === 'system';
     const isSystem3D = isSystemMode && systemDimensionRef.current === '3d';
     const kAxisBlend = clamp01(new THREE.Vector3(matrix[2], matrix[5], matrix[8]).length());
     const flatBlend = 1 - kAxisBlend;
@@ -4238,7 +3483,7 @@ export default function App() {
         refs.vectorVolumeMesh.visible = true;
         refs.vectorVolumeEdges.visible = true;
         vectorMeasureLabelPosition = a.clone().add(b).add(c).multiplyScalar(0.5);
-        vectorMeasureLabel = `부피 A${first.name},A${second.name},A${third.name} = ${formatNumber(volumeValue)}`;
+        vectorMeasureLabel = `${t(locale, 'volume')} A${first.name},A${second.name},A${third.name} = ${formatNumber(volumeValue)}`;
       } else {
         updateAreaGeometry(refs.vectorAreaMesh.geometry, refs.vectorAreaEdges.geometry, a, b);
         refs.vectorAreaMaterial.opacity = Math.min(0.28, Math.max(0.08, areaValue * 0.045));
@@ -4246,7 +3491,7 @@ export default function App() {
         refs.vectorAreaMesh.visible = true;
         refs.vectorAreaEdges.visible = true;
         vectorMeasureLabelPosition = a.clone().add(b).multiplyScalar(0.5);
-        vectorMeasureLabel = `면적 A${first.name},A${second.name} = ${formatNumber(areaValue)}`;
+        vectorMeasureLabel = `${t(locale, 'area')} A${first.name},A${second.name} = ${formatNumber(areaValue)}`;
       }
     }
     updateLabel(
@@ -4420,7 +3665,7 @@ export default function App() {
             const labelPosition = targets
               .reduce((sum, vector) => sum.add(vector), new THREE.Vector3())
               .multiplyScalar(1 / targets.length);
-            const labelPrefix = targets.length >= 3 ? '부피' : '면적';
+            const labelPrefix = targets.length >= 3 ? t(locale, 'volume') : t(locale, 'area');
             activeMeasurementLabels.add(item.id);
             updateLabel(
               measurementLabelRefs.current.get(item.id),
@@ -4555,7 +3800,7 @@ export default function App() {
     updateLabel(
       scalarSolutionLabelRef,
       scalarSolutionVector,
-      scalarSolution ? `해 x = ${formatCoord(scalarSolution, coordMode)}` : '',
+      scalarSolution ? `${t(locale, 'solution')} x = ${formatCoord(scalarSolution, coordMode)}` : '',
       scalarSolutionVisible && labelsVisible,
       [0, -30],
       { allowOrigin: true }
@@ -4611,7 +3856,7 @@ export default function App() {
       { keepNameWhenCoordinatesHidden: true }
     );
     refs.renderer.render(refs.scene, refs.camera);
-  }, [updateLabel]);
+  }, [locale, updateLabel]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -5348,18 +4593,18 @@ export default function App() {
     if (inputMode === '2d') {
       const [a, b, c, d] = matrix2.map(parseNumber);
       matrix = [a, b, 0, c, d, 0, 0, 0, 0];
-      name = activeMatrixPresetName ?? '2x2 사영 입력';
+      name = activeMatrixPresetName ?? t(locale, 'input2dDefaultName');
     } else if (inputMode === '1d') {
       const [a] = matrix1.map(parseNumber);
       matrix = [a, 0, 0, 0, 0, 0, 0, 0, 0];
-      name = activeMatrixPresetName ?? '1x1 축 입력';
+      name = activeMatrixPresetName ?? t(locale, 'input1dDefaultName');
     } else {
       matrix = matrix3.map(parseNumber);
-      name = activeMatrixPresetName ?? '직접 입력';
+      name = activeMatrixPresetName ?? t(locale, 'directInput');
     }
 
     applyTransformation(matrix, name, inputMode);
-  }, [activeMatrixPresetName, applyTransformation, inputMode, matrix1, matrix2, matrix3]);
+  }, [activeMatrixPresetName, applyTransformation, inputMode, locale, matrix1, matrix2, matrix3]);
 
   const loadPresetToMatrixInput = useCallback((preset) => {
     const values = matrixValuesForMode(preset.matrix, preset.mode).map(formatPresetInputValue);
@@ -5440,13 +4685,13 @@ export default function App() {
         window.__linearAlgebraMatrixClipboard = text;
       }
       await navigator.clipboard.writeText(text);
-      toast.success('복사되었습니다');
-      setClipboardStatus('복사됨');
+      toast.success(t(locale, 'copied'));
+      setClipboardStatus(t(locale, 'copied'));
     } catch {
-      setClipboardStatus('복사 실패');
+      setClipboardStatus(t(locale, 'copyFailed'));
     }
     window.setTimeout(() => setClipboardStatus(''), 1200);
-  }, [getMatrixInputValues]);
+  }, [getMatrixInputValues, locale]);
 
   const pasteMatrixInput = useCallback(async () => {
     try {
@@ -5480,17 +4725,17 @@ export default function App() {
       }
 
       if (numbers.length) {
-        toast.success('붙여넣었습니다');
+        toast.success(t(locale, 'pasted'));
       } else {
-        toast.warning('붙여넣을 숫자가 없습니다');
+        toast.warning(t(locale, 'pasteNoNumbers'));
       }
 
-      setClipboardStatus(numbers.length ? '붙여넣음' : '숫자 없음');
+      setClipboardStatus(numbers.length ? t(locale, 'pasted') : t(locale, 'pasteNoNumbers'));
     } catch {
-      setClipboardStatus('붙여넣기 실패');
+      setClipboardStatus(t(locale, 'pasteFailed'));
     }
     window.setTimeout(() => setClipboardStatus(''), 1200);
-  }, [inputMode]);
+  }, [inputMode, locale]);
 
   const updateEquation = useCallback((index, value) => {
     setEquations((previous) => previous.map((equation, equationIndex) =>
@@ -5666,7 +4911,7 @@ export default function App() {
   }, [buildShareState, locale]);
 
   const resetTransformation = useCallback(() => {
-    startAnimationTo([...identity3], '초기 공간', {
+    startAnimationTo([...identity3], t(locale, 'initialSpace'), {
       operationMatrix: [...identity3],
       operationMode: '3d',
       previousMatrix: [...identity3],
@@ -5699,7 +4944,7 @@ export default function App() {
     userVectorRef.current = [parseNumber(initialVector.x), parseNumber(initialVector.y), parseNumber(initialVector.z)];
     vectorRenderValuesRef.current = new Map([['v1', [...userVectorRef.current]]]);
     nextVectorIndexRef.current = 2;
-  }, [moveCameraToView, startAnimationTo]);
+  }, [locale, moveCameraToView, startAnimationTo]);
 
   return (
     <main className="app-shell">
@@ -5719,7 +4964,7 @@ export default function App() {
         {!isLoaded && (
           <div className="loader">
             <div className="spinner" />
-            <span>3D 엔진 준비 중</span>
+            <span>{t(locale, 'loader')}</span>
           </div>
         )}
 
@@ -5759,105 +5004,108 @@ export default function App() {
           </div>
           <div className="scene-actions">
             <div className="view-actions">
-              {Object.entries(viewPresets).map(([viewKey, preset]) => (
-                <button
-                  className={`view-button ${activeView === viewKey ? 'active' : ''}`}
-                  key={viewKey}
-                  onClick={() => moveCameraToView(viewKey)}
-                  title={`${preset.label}보기`}
-                >
-                  {preset.label}
-                </button>
-              ))}
+              {Object.entries(viewPresets).map(([viewKey, preset]) => {
+                const viewLabel = t(locale, preset.labelKey);
+                return (
+                  <button
+                    className={`view-button ${activeView === viewKey ? 'active' : ''}`}
+                    key={viewKey}
+                    onClick={() => moveCameraToView(viewKey)}
+                    title={t(locale, 'viewTitle', { label: viewLabel })}
+                  >
+                    {viewLabel}
+                  </button>
+                );
+              })}
               <button
                 aria-pressed={cameraLocked}
                 className={`camera-lock-button ${cameraLocked ? 'active' : ''}`}
                 onClick={() => setCameraLocked((value) => !value)}
-                title={cameraLocked ? '카메라 고정 해제' : '현재 카메라 시점 고정'}
+                title={cameraLocked ? t(locale, 'cameraUnlock') : t(locale, 'cameraLock')}
                 type="button"
               >
                 <Lock size={13} />
-                <span>{cameraLocked ? '고정됨' : '고정'}</span>
+                <span>{cameraLocked ? t(locale, 'locked') : t(locale, 'lock')}</span>
               </button>
             </div>
-            <div className="scene-control-dock" aria-label="그래프 컨트롤">
-              <div className="rank-chip" title="현재 공간의 행렬 랭크">
-                <span>rank</span>
+            <div className="scene-control-dock" aria-label={t(locale, 'graphControls')}>
+              <div className="rank-chip" title={t(locale, 'rankTitle')}>
+                <span>{t(locale, 'rankLabel')}</span>
                 <strong>{currentRank}</strong>
                 <em>{currentModeLabel}</em>
               </div>
               <div className="control-cluster space-cluster">
-                <span className="cluster-label">공간</span>
-                <div className="scene-display-toggles compact-group" aria-label="공간 표시">
-                  <label className={showGrid ? 'active' : ''} title="기본 격자 표시">
+                <span className="cluster-label">{t(locale, 'space')}</span>
+                <div className="scene-display-toggles compact-group" aria-label={t(locale, 'spaceDisplay')}>
+                  <label className={showGrid ? 'active' : ''} title={t(locale, 'baseGridTitle')}>
                     <input
                       checked={showGrid}
                       onChange={(event) => setShowGrid(event.target.checked)}
                       type="checkbox"
                     />
                     <Grid3X3 size={14} />
-                    <span>기본</span>
+                    <span>{t(locale, 'baseGrid')}</span>
                   </label>
-                  <label className={showRelativeGrid ? 'active' : ''} title="상대 격자 표시">
+                  <label className={showRelativeGrid ? 'active' : ''} title={t(locale, 'relativeGridTitle')}>
                     <input
                       checked={showRelativeGrid}
                       onChange={(event) => setShowRelativeGrid(event.target.checked)}
                       type="checkbox"
                     />
                     <Grid3X3 size={14} />
-                    <span>상대</span>
+                    <span>{t(locale, 'relativeGrid')}</span>
                   </label>
-                  <label className={showAxes ? 'active' : ''} title="축 표시">
+                  <label className={showAxes ? 'active' : ''} title={t(locale, 'axesTitle')}>
                     <input
                       checked={showAxes}
                       onChange={(event) => setShowAxes(event.target.checked)}
                       type="checkbox"
                     />
                     <VectorSquare size={14} />
-                    <span>축</span>
+                    <span>{t(locale, 'axes')}</span>
                   </label>
-                  <label className={showCoordinates ? 'active' : ''} title="좌표 표시">
+                  <label className={showCoordinates ? 'active' : ''} title={t(locale, 'coordinatesTitle')}>
                     <input
                       checked={showCoordinates}
                       onChange={(event) => setShowCoordinates(event.target.checked)}
                       type="checkbox"
                     />
                     <Braces size={14} />
-                    <span>좌표</span>
+                    <span>{t(locale, 'coordinates')}</span>
                   </label>
                 </div>
               </div>
 
               <div className="control-cluster vector-cluster">
-                <span className="cluster-label">벡터</span>
-                <div className="scene-display-toggles compact-group" aria-label="벡터 표시">
-                  <label className={showVector ? 'active' : ''} title="벡터 표시">
+                <span className="cluster-label">{t(locale, 'vector')}</span>
+                <div className="scene-display-toggles compact-group" aria-label={t(locale, 'vectorDisplay')}>
+                  <label className={showVector ? 'active' : ''} title={t(locale, 'vectorDisplay')}>
                     <input
                       checked={showVector}
                       onChange={(event) => setShowVector(event.target.checked)}
                       type="checkbox"
                     />
                     <VectorSquare size={14} />
-                    <span>벡터</span>
+                    <span>{t(locale, 'vector')}</span>
                   </label>
-                  <label className={showBasis ? 'active' : ''} title="기저 표시">
+                  <label className={showBasis ? 'active' : ''} title={t(locale, 'basisDisplay')}>
                     <input
                       checked={showBasis}
                       onChange={(event) => setShowBasis(event.target.checked)}
                       type="checkbox"
                     />
                     <Braces size={14} />
-                    <span>기저</span>
+                    <span>{t(locale, 'basis')}</span>
                   </label>
                 </div>
 
                 {workspaceMode === 'transform' && (
-                  <div className="scene-vector-legend vector-chip-row" aria-label="벡터 범례">
-                    <div className="legend-tools vector-visibility-tools" aria-label="벡터 전체 표시">
+                  <div className="scene-vector-legend vector-chip-row" aria-label={t(locale, 'vectorLegend')}>
+                    <div className="legend-tools vector-visibility-tools" aria-label={t(locale, 'vectorAllDisplay')}>
                       <button
                         className="legend-tool"
                         onClick={hideAllVectorTargets}
-                        title="전체 숨기기"
+                        title={t(locale, 'hideAll')}
                         type="button"
                       >
                         <EyeOff size={12} />
@@ -5865,7 +5113,7 @@ export default function App() {
                       <button
                         className="legend-tool"
                         onClick={showAllVectorTargets}
-                        title="전체 보이기"
+                        title={t(locale, 'showAll')}
                         type="button"
                       >
                         <Eye size={12} />
@@ -5888,7 +5136,7 @@ export default function App() {
                               event.stopPropagation();
                               handleBasisLegendClick(item.id);
                             }}
-                            title={`${item.name} ${measureMode ? '측정에 선택' : itemVisible ? '숨기기' : '보이기'}`}
+                            title={`${item.name} ${measureMode ? t(locale, 'chooseForMeasure') : itemVisible ? t(locale, 'hide') : t(locale, 'show')}`}
                             type="button"
                           >
                             <span className="legend-swatch" />
@@ -5913,7 +5161,7 @@ export default function App() {
                             event.stopPropagation();
                             handleVectorLegendClick(item.id);
                           }}
-                          title={`${item.name} ${measureMode ? '측정에 선택' : item.visible ? '숨기기' : '보이기'} · ${formatCompactCoord(item.transformed, displayMode, 1)}`}
+                          title={`${item.name} ${measureMode ? t(locale, 'chooseForMeasure') : item.visible ? t(locale, 'hide') : t(locale, 'show')} · ${formatCompactCoord(item.transformed, displayMode, 1)}`}
                           type="button"
                         >
                           <span className="legend-swatch" />
@@ -5927,13 +5175,13 @@ export default function App() {
 
               {workspaceMode === 'transform' && (
                 <div className="control-cluster measure-cluster">
-                  <span className="cluster-label">측정</span>
-                  <div className="scene-vector-legend measure-chip-row" aria-label="측정 만들기">
-                    <div className="legend-tools" aria-label="측정 만들기">
+                  <span className="cluster-label">{t(locale, 'measurement')}</span>
+                  <div className="scene-vector-legend measure-chip-row" aria-label={t(locale, 'makeMeasurement')}>
+                    <div className="legend-tools" aria-label={t(locale, 'makeMeasurement')}>
                       <button
                         className={`legend-tool ${measureMode === 'dot' ? 'active' : ''}`}
                         onClick={() => toggleMeasureMode('dot')}
-                        title="내적 만들기: 대상 2개 선택"
+                        title={t(locale, 'dotMakeTitle')}
                         type="button"
                       >
                         <Sigma size={12} />
@@ -5941,7 +5189,7 @@ export default function App() {
                       <button
                         className={`legend-tool ${measureMode === 'volume' ? 'active' : ''}`}
                         onClick={() => toggleMeasureMode('volume')}
-                        title="부피/면적 만들기: 대상 2~3개 선택"
+                        title={t(locale, 'volumeMakeTitle')}
                         type="button"
                       >
                         <Box size={12} />
@@ -5949,12 +5197,12 @@ export default function App() {
                     </div>
                     {measureMode && (
                       <span className="measure-draft-chip">
-                        {measureMode === 'dot' ? '내적' : displayMode === '3d' ? '부피' : '면적'}
+                        {measureMode === 'dot' ? t(locale, 'dot') : displayMode === '3d' ? t(locale, 'volume') : t(locale, 'area')}
                         <strong>
                           {measureDraft
                             .map((id) => measureTargetMap.get(id)?.name)
                             .filter(Boolean)
-                            .join(' → ') || '대상 선택'}
+                            .join(' → ') || t(locale, 'targetSelect')}
                         </strong>
                       </span>
                     )}
@@ -5965,37 +5213,17 @@ export default function App() {
                       >
                         <button
                           onClick={() => toggleMeasurementVisible(item.id)}
-                          title={`${item.type === 'dot' ? '내적' : '부피'} 표시 전환`}
+                          title={t(locale, 'toggleMeasurement', { type: item.type === 'dot' ? t(locale, 'dot') : t(locale, 'volume') })}
                           type="button"
                         >
                           <span>{item.type === 'dot' ? '∑' : '□'}</span>
                           <strong>{item.label}</strong>
                           {item.value !== null && <em>{formatNumber(item.value)}</em>}
                         </button>
-                        {(item.type === 'dot' || item.type === 'volume') && item.targetIds?.length >= 2 && (
-                          <button
-                            className={`measure-convert ${item.type === 'dot' ? 'to-volume' : 'to-dot'}`}
-                            onClick={() => convertMeasurementType(item.id)}
-                            title={item.type === 'dot' ? '부피로 변환' : '내적으로 변환'}
-                            type="button"
-                          >
-                            {item.type === 'dot' ? <Box size={11} /> : <Sigma size={11} />}
-                          </button>
-                        )}
-                        {item.type === 'volume' && item.targetIds?.length === 2 && displayMode === '3d' && (
-                          <button
-                            className="measure-extend"
-                            onClick={() => continueMeasurement(item)}
-                            title="세 번째 벡터로 부피 이어가기"
-                            type="button"
-                          >
-                            <Plus size={11} />
-                          </button>
-                        )}
                         <button
                           className="measure-remove"
                           onClick={() => removeMeasurement(item.id)}
-                          title="측정 제거"
+                          title={t(locale, 'removeMeasurement')}
                           type="button"
                         >
                           <X size={11} />
@@ -6010,10 +5238,10 @@ export default function App() {
               <button
                 className="icon-text-button dark"
                 onClick={() => setIsSidebarOpen(true)}
-                title="컨트롤 패널 열기"
+                title={t(locale, 'panelOpen')}
               >
                 <Menu size={18} />
-                <span>패널</span>
+                <span>{t(locale, 'panelButton')}</span>
               </button>
             )}
           </div>
@@ -6043,7 +5271,7 @@ export default function App() {
             </svg>
           )}
           <span ref={vectorVolumeLabelRef} className="axis-label vector-volume-label">
-            부피 = 0
+            {t(locale, 'volume')} = 0
           </span>
           <span
             ref={iLabelRef}
@@ -6150,12 +5378,12 @@ export default function App() {
                 else measurementLabelRefs.current.delete(item.id);
               }}
             >
-              <span className="axis-label-text">{item.type === 'dot' ? '내적' : '부피'}</span>
+              <span className="axis-label-text">{item.type === 'dot' ? t(locale, 'dot') : t(locale, 'volume')}</span>
               {renderMeasurementLabelTools(item)}
             </span>
           ))}
           <span ref={scalarSolutionLabelRef} className="axis-label scalar-solution-label">
-            해 x = (0, 0, 0)
+            {t(locale, 'solution')} x = (0, 0, 0)
           </span>
         </div>
 
@@ -6164,18 +5392,18 @@ export default function App() {
           <button
             className="icon-text-button danger"
             onClick={resetTransformation}
-            title="공간 초기화"
+            title={t(locale, 'resetSpace')}
           >
             <RotateCcw size={18} />
-            <span>초기화</span>
+            <span>{t(locale, 'reset')}</span>
           </button>
           <div className="progress-block">
             <div className="progress-meta">
-              <span>ANIMATION</span>
+              <span>{t(locale, 'animationLabel')}</span>
               <strong>{Math.round(progress * 100)}%</strong>
             </div>
             <div
-              aria-label="애니메이션 진행률"
+              aria-label={t(locale, 'animationProgress')}
               aria-valuemax="100"
               aria-valuemin="0"
               aria-valuenow={Math.round(progress * 100)}
@@ -6197,30 +5425,30 @@ export default function App() {
       <aside className={`control-panel ${isSidebarOpen ? 'open' : 'closed'}`}>
         <header className="panel-header">
           <div>
-            <p className="eyebrow">Control</p>
-            <h2>변환 패널</h2>
+            <p className="eyebrow">{t(locale, 'panelEyebrow')}</p>
+            <h2>{t(locale, 'panelTitle')}</h2>
           </div>
           <button
             className="icon-button"
             onClick={() => setIsSidebarOpen(false)}
-            title="컨트롤 패널 닫기"
+            title={t(locale, 'panelClose')}
           >
             <PanelRightClose size={20} />
           </button>
         </header>
 
-        <div className="workspace-tabs" role="tablist" aria-label="작업 모드">
+        <div className="workspace-tabs" role="tablist" aria-label={t(locale, 'workspaceMode')}>
           <button
             className={workspaceMode === 'transform' ? 'active' : ''}
             onClick={() => switchWorkspaceMode('transform')}
           >
-            변환
+            {t(locale, 'transform')}
           </button>
           <button
             className={workspaceMode === 'system' ? 'active' : ''}
             onClick={() => switchWorkspaceMode('system')}
           >
-            연립
+            {t(locale, 'system')}
           </button>
         </div>
 
@@ -6229,19 +5457,19 @@ export default function App() {
             <div className="section-heading spread">
               <span className="heading-left">
                 <Braces size={17} />
-                <h3>연립방정식</h3>
+                <h3>{t(locale, 'systemTitle')}</h3>
               </span>
-              <button className="tiny-add-button" onClick={addEquation} title="식 추가">
+              <button className="tiny-add-button" onClick={addEquation} title={t(locale, 'addEquation')}>
                 <Plus size={14} />
               </button>
             </div>
 
-            <div className="equation-presets line-presets" aria-label="연립방정식 예제">
-              <button onClick={() => setEquations(equationExamples.unique)}>교점</button>
-              <button onClick={() => setEquations(equationExamples.none)}>평행</button>
-              <button onClick={() => setEquations(equationExamples.infinite)}>겹침</button>
+            <div className="equation-presets line-presets" aria-label={t(locale, 'systemExamples')}>
+              <button onClick={() => setEquations(equationExamples.unique)}>{t(locale, 'intersection')}</button>
+              <button onClick={() => setEquations(equationExamples.none)}>{t(locale, 'parallel')}</button>
+              <button onClick={() => setEquations(equationExamples.infinite)}>{t(locale, 'overlap')}</button>
               <button onClick={() => setEquations(equationExamples.space3d)}>3D</button>
-              <button onClick={() => setEquations(equationExamples.overlap3d)}>3D 겹침</button>
+              <button onClick={() => setEquations(equationExamples.overlap3d)}>{t(locale, 'overlap3d')}</button>
             </div>
 
             <div className="equation-list line-equation-list">
@@ -6266,7 +5494,7 @@ export default function App() {
                       <button
                         className="line-remove"
                         onClick={() => removeEquation(index)}
-                        title="식 삭제"
+                        title={t(locale, 'deleteEquation')}
                         type="button"
                       >
                         <X size={13} />
@@ -6279,12 +5507,12 @@ export default function App() {
 
             <div className={`line-status-card ${lineSystem.status}`}>
               <div className="solver-topline">
-                <span>상태</span>
-                <strong>{statusTextForLineSystem(lineSystem.status)}</strong>
+                <span>{t(locale, 'status')}</span>
+                <strong>{t(locale, statusKeyForLineSystem(lineSystem.status))}</strong>
               </div>
               {lineSystem.point && (
                 <div className="line-solution">
-                  <span>교점</span>
+                  <span>{t(locale, 'linePoint')}</span>
                   <strong>{formatCoord(lineSystem.point, lineSystem.mode)}</strong>
                 </div>
               )}
@@ -6295,31 +5523,31 @@ export default function App() {
                 </div>
               )}
               {lineSystem.status === 'invalid' && (
-                <p className="solver-note">L{lineSystem.errors.join(', L')} 형식을 확인해줘.</p>
+                <p className="solver-note">{t(locale, 'invalidLineNote', { items: lineSystem.errors.join(', L') })}</p>
               )}
               {lineSystem.status === 'same' && (
-                <p className="line-note">모든 식이 같은 직선을 가리켜서 해가 직선 전체야.</p>
+                <p className="line-note">{t(locale, 'sameLineNote')}</p>
               )}
               {lineSystem.status === 'parallel' && (
-                <p className="line-note">기울기는 같고 위치가 달라서 서로 만나지 않아.</p>
+                <p className="line-note">{t(locale, 'parallelLineNote')}</p>
               )}
               {lineSystem.status === 'none' && (
-                <p className="line-note">일부 선은 만나지만 모든 식을 동시에 만족하는 점은 없어.</p>
+                <p className="line-note">{t(locale, 'noCommonLineNote')}</p>
               )}
               {lineSystem.status === 'single3d' && (
-                <p className="line-note">식 하나가 3D 공간의 평면 하나로 펼쳐져. 해는 그 평면 전체야.</p>
+                <p className="line-note">{t(locale, 'single3dNote')}</p>
               )}
               {lineSystem.status === 'infinite3d' && (
                 <>
-                  <p className="line-note">공통해만 노란 선으로 강조했어. 평면은 배경처럼 낮춰서 겹치는 축이 보이게 했어.</p>
+                  <p className="line-note">{t(locale, 'infinite3dNote')}</p>
                   <div className="line-solution solution-rail">
-                    <span>{lineSystem.solution?.nullspaceBasis?.length === 1 ? '교선' : '공통 평면'}</span>
+                    <span>{lineSystem.solution?.nullspaceBasis?.length === 1 ? t(locale, 'commonLine') : t(locale, 'commonPlane')}</span>
                     <strong>{formatGeneralSolution(lineSystem.solution)}</strong>
                   </div>
                 </>
               )}
               {lineSystem.status === 'none3d' && (
-                <p className="line-note">평면들이 한 점이나 한 선에서 동시에 만나지 않아.</p>
+                <p className="line-note">{t(locale, 'no3dNote')}</p>
               )}
               {!!lineSystem.relations.length && (
                 <div className="relation-list">
@@ -6330,7 +5558,7 @@ export default function App() {
               )}
               {lineSystem.point && (
                 <button className="secondary-action compact-action" onClick={applyLineSystemPointToVector}>
-                  교점을 {activeVector.name}에 넣기
+                  {t(locale, 'applyPointToVector', { name: activeVector.name })}
                 </button>
               )}
             </div>
@@ -6339,8 +5567,8 @@ export default function App() {
           <section className="panel current-space-panel">
             <div className="section-heading spread current-space-heading">
               <span className="heading-left">
-                <History size={17} />
-                <h3>현재 공간</h3>
+                <Grid3X3 size={17} />
+                <h3>{t(locale, 'currentSpace')}</h3>
               </span>
               <button
                 aria-expanded={isTimelineExpanded}
@@ -6348,7 +5576,7 @@ export default function App() {
                 onClick={toggleTimelineDrawer}
                 type="button"
               >
-                타임라인
+                {t(locale, 'timeline')}
                 <span>{history.length}</span>
               </button>
             </div>
@@ -6357,6 +5585,7 @@ export default function App() {
                 entry={previewHistory}
                 index={previewIndex}
                 isActive={previewIndex === activeHistoryIndex}
+                locale={locale}
               />
             )}
           </section>
@@ -6365,14 +5594,14 @@ export default function App() {
             <div className="section-heading spread timeline-heading">
               <span className="heading-left">
                 <History size={17} />
-                <h3>공간 타임라인</h3>
+                <h3>{t(locale, 'spaceTimeline')}</h3>
               </span>
               <span className="timeline-count">{history.length}</span>
             </div>
             <div className="timeline-body">
               <div
                 className="history-strip"
-                aria-label="변환 히스토리"
+                aria-label={t(locale, 'transformHistory')}
                 ref={historyStripRef}
               >
                 {history.map((step, index) => (
@@ -6409,7 +5638,7 @@ export default function App() {
                         className="history-delete"
                         onClick={(event) => deleteHistoryEntry(index, event)}
                         onPointerDown={(event) => event.stopPropagation()}
-                        title="히스토리 삭제"
+                        title={t(locale, 'deleteHistory')}
                       >
                         <X size={13} />
                       </button>
@@ -6423,6 +5652,7 @@ export default function App() {
                     entry={previewHistory}
                     index={previewIndex}
                     isActive={previewIndex === activeHistoryIndex}
+                    locale={locale}
                   />
                 )}
               </div>
@@ -6433,22 +5663,22 @@ export default function App() {
             <div className="section-heading spread">
               <span className="heading-left">
                 <Braces size={17} />
-                <h3>행렬 입력</h3>
+                <h3>{t(locale, 'matrixInput')}</h3>
               </span>
               <div className="matrix-header-tools">
                 <div className="matrix-clipboard">
-                  <button aria-label="행렬 복사" onClick={copyMatrixInput} title="행렬 복사">
+                  <button aria-label={t(locale, 'matrixCopy')} onClick={copyMatrixInput} title={t(locale, 'matrixCopy')}>
                     <Copy size={14} />
                   </button>
                   <button
-                    aria-label="행렬 붙여넣기"
+                    aria-label={t(locale, 'matrixPaste')}
                     onClick={pasteMatrixInput}
-                    title="행렬 붙여넣기"
+                    title={t(locale, 'matrixPaste')}
                   >
                     <ClipboardPaste size={14} />
                   </button>
                 </div>
-                <div className="segmented" role="tablist" aria-label="행렬 차원">
+                <div className="segmented" role="tablist" aria-label={t(locale, 'matrixDimension')}>
                   <button className={inputMode === '3d' ? 'active' : ''} onClick={() => setInputMode('3d')}>3x3</button>
                   <button className={inputMode === '2d' ? 'active' : ''} onClick={() => setInputMode('2d')}>2x2</button>
                   <button className={inputMode === '1d' ? 'active' : ''} onClick={() => setInputMode('1d')}>1x1</button>
@@ -6468,6 +5698,7 @@ export default function App() {
                     setMatrix3(values);
                   }}
                   onEnter={applyCurrentInput}
+                  locale={locale}
                 />
               )}
               {inputMode === '2d' && (
@@ -6480,6 +5711,7 @@ export default function App() {
                     setMatrix2(values);
                   }}
                   onEnter={applyCurrentInput}
+                  locale={locale}
                 />
               )}
               {inputMode === '1d' && (
@@ -6492,18 +5724,19 @@ export default function App() {
                     setMatrix1(values);
                   }}
                   onEnter={applyCurrentInput}
+                  locale={locale}
                 />
               )}
             </div>
 
                 <button className="primary-action" onClick={applyCurrentInput}>
-              현재 공간에 곱하기
+              {t(locale, 'applyMatrix')}
             </button>
               </div>
               <div className="matrix-preset-dock">
               <div className="preset-dock-head">
                 <RotateCcw size={14} />
-                <span>행렬 프리셋</span>
+                <span>{t(locale, 'matrixPresets')}</span>
               </div>
               <div className="matrix-presets">
                 {visibleMatrixPresets.map((preset) => (
@@ -6524,13 +5757,13 @@ export default function App() {
                         delete matrixPresetRefs.current[preset.id];
                       }
                     }}
-                    title={`${preset.name} 행렬을 입력칸에 불러오기`}
+                    title={t(locale, 'presetLoadTitle', { name: preset.name })}
                     type="button"
                   >
                     <strong>{preset.name}</strong>
                   </button>
                   <button
-                    aria-label={`${preset.name} apply now`}
+                    aria-label={t(locale, 'presetApplyTitle', { name: preset.name })}
                     className="matrix-preset-apply"
                     onBlur={() => setHoveredMatrixPresetId(null)}
                     onClick={(event) => applyMatrixPresetDirectly(preset, event)}
@@ -6539,7 +5772,7 @@ export default function App() {
                     onMouseLeave={() => setHoveredMatrixPresetId(null)}
                     onPointerEnter={() => setHoveredMatrixPresetId(preset.id)}
                     onPointerLeave={() => setHoveredMatrixPresetId(null)}
-                    title="Apply now"
+                    title={t(locale, 'presetApplyNow')}
                     type="button"
                   >
                     <Play size={12} />
@@ -6555,25 +5788,25 @@ export default function App() {
             <div className="section-heading spread">
               <span className="heading-left">
                 <VectorSquare size={17} />
-                <h3>벡터 추적</h3>
+                <h3>{t(locale, 'vectorTracking')}</h3>
               </span>
               <div className="vector-heading-tools">
-                <button className="tiny-add-button" onClick={addVector} title="벡터 추가" type="button">
+                <button className="tiny-add-button" onClick={addVector} title={t(locale, 'addVector')} type="button">
                   <Plus size={14} />
                 </button>
               </div>
-              <div className="segmented compact" role="tablist" aria-label="벡터 도구">
+              <div className="segmented compact" role="tablist" aria-label={t(locale, 'vectorTools')}>
                 <button
                   className={vectorToolMode === 'vector' ? 'active' : ''}
                   onClick={() => setVectorToolMode('vector')}
                 >
-                  벡터
+                  {t(locale, 'vector')}
                 </button>
                 <button
                   className={vectorToolMode === 'system' ? 'active' : ''}
                   onClick={() => setVectorToolMode('system')}
                 >
-                  연립
+                  {t(locale, 'system')}
                 </button>
               </div>
             </div>
@@ -6582,8 +5815,8 @@ export default function App() {
               <div className="vector-stack">
                 <div className={`basis-stack mode-${displayMode}`}>
                   <div className="vector-subhead">
-                    <strong>기본 기저</strong>
-                    <span>고정</span>
+                    <strong>{t(locale, 'baseBasis')}</strong>
+                    <span>{t(locale, 'fixed')}</span>
                   </div>
                   <div className="basis-compact-card">
                     {visibleBasisItems.map((item) => (
@@ -6614,10 +5847,10 @@ export default function App() {
                           {formatCompactCoord(item.values, '3d', 1)} · {formatNumber(item.lengthSquared, 1)}
                         </span>
                         <button
-                          aria-label={`${item.name} 기본 기저로 초기화`}
+                          aria-label={t(locale, 'resetBasisAria', { name: item.name })}
                           className="basis-reset-button"
                           onClick={() => resetBasisVector(item.id)}
-                          title={`${item.name} 기본 기저로`}
+                          title={t(locale, 'resetBasis', { name: item.name })}
                           type="button"
                         >
                           <RotateCcw size={12} />
@@ -6647,7 +5880,7 @@ export default function App() {
                             <span className="vector-swatch" />
                             {item.name}
                           </button>
-                          <div className="vector-measure-menu" aria-label={`${item.name} 측정`}>
+                          <div className="vector-measure-menu" aria-label={t(locale, 'vectorMeasureMenu', { name: item.name })}>
                             <button
                               className={measureMode === 'dot' && measureDraft.includes(`v:${item.id}`) ? 'active' : ''}
                               onClick={(event) => {
@@ -6655,11 +5888,11 @@ export default function App() {
                                 event.stopPropagation();
                                 startMeasurementFrom('dot', `v:${item.id}`);
                               }}
-                              title={`${item.name} 내적 측정 시작`}
+                              title={t(locale, 'dotStartTitle', { name: item.name })}
                               type="button"
                             >
                               <Sigma size={11} />
-                              <span>내적</span>
+                              <span>{t(locale, 'dot')}</span>
                             </button>
                             <button
                               className={measureMode === 'volume' && measureDraft.includes(`v:${item.id}`) ? 'active' : ''}
@@ -6668,11 +5901,11 @@ export default function App() {
                                 event.stopPropagation();
                                 startMeasurementFrom('volume', `v:${item.id}`);
                               }}
-                              title={`${item.name} 면적/부피 측정 시작`}
+                              title={t(locale, 'volumeStartTitle', { name: item.name })}
                               type="button"
                             >
                               <Box size={11} />
-                              <span>{displayMode === '3d' ? '부피' : '면적'}</span>
+                              <span>{displayMode === '3d' ? t(locale, 'volume') : t(locale, 'area')}</span>
                             </button>
                           </div>
                         </div>
@@ -6692,9 +5925,9 @@ export default function App() {
                             <label className="vector-inline-field scalar-inline-field">
                               <span>=</span>
                               <input
-                                aria-label={`${item.name} 스칼라 값`}
+                                aria-label={t(locale, 'scalarValue', { name: item.name })}
                                 inputMode="decimal"
-                                placeholder="auto"
+                                placeholder={t(locale, 'auto')}
                                 value={item.scalar}
                                 onChange={(event) => updateVectorScalar(item.id, event.target.value)}
                                 onFocus={() => setActiveVectorId(item.id)}
@@ -6702,24 +5935,22 @@ export default function App() {
                             </label>
                           )}
                         </div>
-                        <label className={`scalar-mini-toggle ${item.scalarEnabled ? 'active' : ''}`} title="스칼라 제약">
+                        <label className={`scalar-mini-toggle ${item.scalarEnabled ? 'active' : ''}`} title={t(locale, 'scalarConstraint')}>
                           <input
                             checked={item.scalarEnabled}
                             onChange={(event) => toggleVectorScalar(item.id, event.target.checked)}
                             type="checkbox"
                           />
-                          <span>스칼라</span>
+                          <span>{t(locale, 'scalar')}</span>
                         </label>
-                        {vectors.length > 1 && (
-                          <button
-                            className="line-remove"
-                            onClick={() => removeVector(item.id)}
-                            title="벡터 삭제"
-                            type="button"
-                          >
-                            <X size={13} />
-                          </button>
-                        )}
+                        <button
+                          className="line-remove"
+                          onClick={() => removeVector(item.id)}
+                          title={t(locale, 'vectorDelete')}
+                          type="button"
+                        >
+                          <X size={13} />
+                        </button>
                       </div>
                       <div className={`scalar-control ${item.scalarEnabled ? 'active' : ''}`}>
                         <label className="compact-check scalar-toggle">
@@ -6728,14 +5959,14 @@ export default function App() {
                             onChange={(event) => toggleVectorScalar(item.id, event.target.checked)}
                             type="checkbox"
                           />
-                          스칼라
+                          {t(locale, 'scalar')}
                         </label>
                         <input
-                          aria-label={`${item.name} 스칼라 값`}
+                          aria-label={t(locale, 'scalarValue', { name: item.name })}
                           className="scalar-input"
                           disabled={!item.scalarEnabled}
                           inputMode="decimal"
-                          placeholder="auto"
+                          placeholder={t(locale, 'auto')}
                           value={item.scalar}
                           onChange={(event) => updateVectorScalar(item.id, event.target.value)}
                         />
@@ -6743,10 +5974,10 @@ export default function App() {
                           A{item.name} · x =
                         </span>
                         <span className="scalar-auto">
-                          {item.scalarAuto ? `auto ${formatNumber(item.scalarResolved)}` : formatNumber(item.scalarResolved)}
+                          {item.scalarAuto ? `${t(locale, 'auto')} ${formatNumber(item.scalarResolved)}` : formatNumber(item.scalarResolved)}
                         </span>
                         <input
-                          aria-label={`${item.name} 스칼라 드래그`}
+                          aria-label={t(locale, 'scalarDrag', { name: item.name })}
                           className="scalar-slider"
                           disabled={!item.scalarEnabled}
                           max="20"
@@ -6760,30 +5991,10 @@ export default function App() {
                     </div>
                   );
                 })}
-                {vectorScalarConstraints.length > 0 && (
-                  <div className="dot-matrix-card scalar-summary-card">
-                    <div className="dot-card-head">
-                      <strong>스칼라 제약</strong>
-                      <span>{vectorScalarConstraints.length}개 · 드래그</span>
-                    </div>
-                    <div className="dot-pair-list">
-                      {vectorScalarConstraints.map((constraint) => (
-                        <div className="dot-pair-row scalar-row" key={constraint.id}>
-                          <span style={{ '--vector-color': constraint.colorHex }}>A{constraint.name} · x</span>
-                          <strong>{formatNumber(constraint.scalar)}</strong>
-                          <em>
-                            {constraint.scalarAuto ? 'auto · ' : ''}
-                            {displayMode === '3d' ? '평면' : displayMode === '2d' ? '직선' : '점'}
-                          </em>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
                 {showDot && dotVectorItems.length > 1 && (
                   <div className="dot-matrix-card">
                     <div className="dot-card-head">
-                      <strong><span className="dot-badge">내적</span> 벡터끼리</strong>
+                      <strong><span className="dot-badge">{t(locale, 'dot')}</span> {t(locale, 'dotBetweenVectors')}</strong>
                       <span>{dotVectorItems.length}×{dotVectorItems.length}</span>
                     </div>
                     {dotVectorItems.length > 0 ? (
@@ -6811,16 +6022,16 @@ export default function App() {
                         ))}
                       </div>
                     ) : (
-                      <div className="dot-empty">내적을 볼 일반 벡터가 없습니다.</div>
+                      <div className="dot-empty">{t(locale, 'noDotVectors')}</div>
                     )}
                     {vectorDotPairs.length > 0 && (
                       <div className="dot-pair-list">
                         {vectorDotPairs.map((pair) => (
                           <div className="dot-pair-row" key={pair.id}>
-                            <span><span className="dot-badge subtle">내적</span> A{pair.left.name} · A{pair.right.name}</span>
+                            <span><span className="dot-badge subtle">{t(locale, 'dot')}</span> A{pair.left.name} · A{pair.right.name}</span>
                             <strong>{formatNumber(pair.value)}</strong>
                             <em>
-                              {pair.relation}
+                              {t(locale, pair.relation)}
                               {pair.cosine !== null ? ` / cos ${formatNumber(pair.cosine)}` : ''}
                             </em>
                           </div>
@@ -6833,15 +6044,15 @@ export default function App() {
                   <div className="dot-matrix-card vector-volume-card">
                     <div className="dot-card-head">
                       <strong>
-                        <span className="dot-badge subtle">부피</span>
-                        {vectorVolumeMeasure.type === 'volume' ? ' 벡터 부피' : ' 벡터 면적'}
+                        <span className="dot-badge subtle">{t(locale, 'volume')}</span>
+                        {vectorVolumeMeasure.type === 'volume' ? ` ${t(locale, 'vectorVolume')}` : ` ${t(locale, 'vectorArea')}`}
                       </strong>
                       <span>{vectorVolumeMeasure.names.map((name) => `A${name}`).join(' · ')}</span>
                     </div>
                     <div className="dot-pair-row">
-                      <span>{vectorVolumeMeasure.type === 'volume' ? '평행육면체' : '평행사변형'}</span>
+                      <span>{vectorVolumeMeasure.type === 'volume' ? t(locale, 'parallelepiped') : t(locale, 'parallelogram')}</span>
                       <strong>{formatNumber(vectorVolumeMeasure.value)}</strong>
-                      <em>{vectorVolumeMeasure.type === 'volume' ? 'triple product' : 'cross length'}</em>
+                      <em>{vectorVolumeMeasure.type === 'volume' ? t(locale, 'tripleProduct') : t(locale, 'crossLength')}</em>
                     </div>
                   </div>
                 )}
@@ -6850,10 +6061,10 @@ export default function App() {
 
             {vectorToolMode === 'system' && (
               <div className="system-solver">
-                <div className="equation-presets" aria-label="연립방정식 예제">
-                  <button onClick={() => setEquations(equationExamples.unique)}>유일해</button>
-                  <button onClick={() => setEquations(equationExamples.infinite)}>무한해</button>
-                  <button onClick={() => setEquations(equationExamples.none)}>해 없음</button>
+                <div className="equation-presets" aria-label={t(locale, 'systemExamples')}>
+                  <button onClick={() => setEquations(equationExamples.unique)}>{t(locale, 'unique')}</button>
+                  <button onClick={() => setEquations(equationExamples.infinite)}>{t(locale, 'infinite')}</button>
+                  <button onClick={() => setEquations(equationExamples.none)}>{t(locale, 'noSolution')}</button>
                 </div>
 
                 <div className="equation-list">
@@ -6871,13 +6082,13 @@ export default function App() {
 
                 <div className={`solver-card ${equationSolution.status}`}>
                   <div className="solver-topline">
-                    <span>상태</span>
+                    <span>{t(locale, 'status')}</span>
                     <strong>
-                      {equationSolution.status === 'unique' && '유일해'}
-                      {equationSolution.status === 'infinite' && '무한히 많음'}
-                      {equationSolution.status === 'none' && '해 없음'}
-                      {equationSolution.status === 'invalid' && '형식 확인'}
-                      {equationSolution.status === 'empty' && '입력 대기'}
+                      {equationSolution.status === 'unique' && t(locale, 'unique')}
+                      {equationSolution.status === 'infinite' && t(locale, 'infiniteMany')}
+                      {equationSolution.status === 'none' && t(locale, 'noSolution')}
+                      {equationSolution.status === 'invalid' && t(locale, 'invalidFormat')}
+                      {equationSolution.status === 'empty' && t(locale, 'waitingInput')}
                     </strong>
                   </div>
 
@@ -6889,12 +6100,12 @@ export default function App() {
                   )}
 
                   {equationSolution.status === 'invalid' && (
-                    <p className="solver-note">E{equationSolution.errors.join(', E')} 형식을 확인해줘.</p>
+                    <p className="solver-note">{t(locale, 'invalidEquationNote', { items: equationSolution.errors.join(', E') })}</p>
                   )}
 
                   {equationSolution.status === 'unique' && (
                     <div className="solution-stack">
-                      <span>해</span>
+                      <span>{t(locale, 'solution')}</span>
                       <strong>{formatSolutionTuple(equationSolution.solution)}</strong>
                       <small>
                         x={formatNumber(equationSolution.solution[0])}, y={formatNumber(equationSolution.solution[1])}, z={formatNumber(equationSolution.solution[2])}
@@ -6904,14 +6115,14 @@ export default function App() {
 
                   {equationSolution.status === 'infinite' && (
                     <div className="solution-stack">
-                      <span>일반해</span>
+                      <span>{t(locale, 'generalSolution')}</span>
                       <strong>{formatGeneralSolution(equationSolution)}</strong>
                       <small>Null(A): {equationSolution.nullspaceBasis.map(formatSolutionTuple).join(', ')}</small>
                     </div>
                   )}
 
                   {equationSolution.status === 'none' && (
-                    <p className="solver-note">계수행렬과 확장행렬의 rank가 달라서 모순이 생김.</p>
+                    <p className="solver-note">{t(locale, 'contradictionNote')}</p>
                   )}
                 </div>
 
@@ -6920,7 +6131,7 @@ export default function App() {
                   disabled={!equationSolution.solution}
                   onClick={applyEquationSolutionToVector}
                 >
-                  해를 추적 벡터에 넣기
+                  {t(locale, 'applySolutionToVector')}
                 </button>
               </div>
             )}
@@ -6929,7 +6140,7 @@ export default function App() {
           <section className="panel vector-panel legacy-vector-panel" aria-hidden="true">
             <div className="section-heading">
               <VectorSquare size={17} />
-              <h3>벡터 추적</h3>
+              <h3>{t(locale, 'vectorTracking')}</h3>
             </div>
             <div
               className={`vector-inputs mode-${displayMode} ${showVector ? '' : 'muted'}`}
@@ -6958,19 +6169,19 @@ export default function App() {
       </aside>
 
       <button
-        aria-label="타임라인 닫기"
+        aria-label={t(locale, 'timelineClose')}
         className={`timeline-drawer-backdrop ${isTimelineExpanded ? 'open' : ''}`}
         onClick={closeTimelineDrawerNow}
         type="button"
       />
       <aside
         aria-expanded={isTimelineExpanded}
-        aria-label="공간 타임라인"
+        aria-label={t(locale, 'spaceTimeline')}
         className={`timeline-drawer ${isTimelineExpanded ? 'open' : ''} ${isTimelinePinned ? 'pinned' : ''}`}
       >
         <div className="timeline-drawer-head">
           <button
-            aria-label="타임라인 닫기"
+            aria-label={t(locale, 'timelineClose')}
             className="icon-button timeline-drawer-close"
             onClick={(event) => {
               event.preventDefault();
@@ -7026,7 +6237,7 @@ export default function App() {
                     className="history-delete"
                     onClick={(event) => deleteHistoryEntry(index, event)}
                     onPointerDown={(event) => event.stopPropagation()}
-                    title="히스토리 삭제"
+                    title={t(locale, 'deleteHistory')}
                     type="button"
                   >
                     <X size={13} />
@@ -7041,6 +6252,7 @@ export default function App() {
                 entry={previewHistory}
                 index={previewIndex}
                 isActive={previewIndex === activeHistoryIndex}
+                locale={locale}
               />
             )}
           </div>
