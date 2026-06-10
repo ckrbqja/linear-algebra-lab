@@ -51,8 +51,8 @@ const MEASURE_VOLUME_EDGE_HEX = 0xffb199;
 const monetizationConfig = {
   adProvider: import.meta.env.VITE_AD_PROVIDER || 'adsense',
   adClient: import.meta.env.VITE_AD_CLIENT || '',
-  topAdSlot: import.meta.env.VITE_AD_TOP_SLOT || '',
-  bottomAdSlot: import.meta.env.VITE_AD_BOTTOM_SLOT || '',
+  topAdSlot: import.meta.env.VITE_AD_TOP_SLOT || import.meta.env.VITE_AD_SLOT_TOP || '',
+  bottomAdSlot: import.meta.env.VITE_AD_BOTTOM_SLOT || import.meta.env.VITE_AD_SLOT_BOTTOM || '',
   admobAppId: import.meta.env.VITE_ADMOB_APP_ID || '',
   donationUrl: import.meta.env.VITE_DONATION_URL || '',
   donationLabel: import.meta.env.VITE_DONATION_LABEL || '',
@@ -925,6 +925,63 @@ function matrixValuesForMode(matrix, mode = '3d') {
   if (mode === '1d') return [matrix[0]];
   if (mode === '2d') return matrix.length === 4 ? matrix : [matrix[0], matrix[1], matrix[3], matrix[4]];
   return matrix;
+}
+
+function dimensionForMode(mode = '3d') {
+  if (mode === '1d') return 1;
+  if (mode === '2d') return 2;
+  return 3;
+}
+
+function modeForDimension(dimension = 3) {
+  if (dimension <= 1) return '1d';
+  if (dimension === 2) return '2d';
+  return '3d';
+}
+
+function operationMatrixFromPreset(preset) {
+  const values = matrixValuesForMode(preset.matrix, preset.mode);
+  if (preset.mode === '1d') return [values[0], 0, 0, 0, 0, 0, 0, 0, 0];
+  if (preset.mode === '2d') return [values[0], values[1], 0, values[2], values[3], 0, 0, 0, 0];
+  return values;
+}
+
+function matrixInputValuesForShape(matrix, rows, columns) {
+  const values = [];
+  for (let row = 0; row < rows; row += 1) {
+    for (let column = 0; column < columns; column += 1) {
+      values.push(matrix[row * 3 + column] ?? '0');
+    }
+  }
+  return values;
+}
+
+function patchMatrixInputShape(matrix, rows, columns, values) {
+  const next = [...matrix];
+  let valueIndex = 0;
+  for (let row = 0; row < rows; row += 1) {
+    for (let column = 0; column < columns; column += 1) {
+      next[row * 3 + column] = values[valueIndex] ?? next[row * 3 + column] ?? '0';
+      valueIndex += 1;
+    }
+  }
+  return next;
+}
+
+function operationMatrixFromInputValues(values, rows, columns) {
+  const matrix = Array.from({ length: 9 }, () => 0);
+  let valueIndex = 0;
+  for (let row = 0; row < rows; row += 1) {
+    for (let column = 0; column < columns; column += 1) {
+      matrix[row * 3 + column] = parseNumber(values[valueIndex]);
+      valueIndex += 1;
+    }
+  }
+  return matrix;
+}
+
+function operationModeForShape(rows, columns) {
+  return rows === columns ? modeForDimension(rows) : '3d';
 }
 
 function inverseForStep(matrix, mode = '3d') {
@@ -1801,11 +1858,12 @@ function HistoryDetail({ entry, index, isActive, locale = 'ko' }) {
 
 function AdSlot({ placement, locale }) {
   const slotId = placement === 'top' ? monetizationConfig.topAdSlot : monetizationConfig.bottomAdSlot;
-  const hasWebAd = !!monetizationConfig.adClient && !!slotId;
+  const hasAdClient = !!monetizationConfig.adClient;
+  const hasWebAd = hasAdClient && !!slotId;
   const label = placement === 'top' ? t(locale, 'adTop') : t(locale, 'adBottom');
 
   useEffect(() => {
-    if (!hasWebAd || typeof document === 'undefined') return;
+    if (!hasAdClient || typeof document === 'undefined') return;
     const src = `https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=${encodeURIComponent(monetizationConfig.adClient)}`;
     if (!document.querySelector(`script[src="${src}"]`)) {
       const script = document.createElement('script');
@@ -1814,7 +1872,7 @@ function AdSlot({ placement, locale }) {
       script.src = src;
       document.head.appendChild(script);
     }
-  }, [hasWebAd]);
+  }, [hasAdClient]);
 
   useEffect(() => {
     if (!hasWebAd || typeof window === 'undefined') return;
@@ -1853,6 +1911,70 @@ function AdSlot({ placement, locale }) {
   );
 }
 
+function AdBlockGate({ locale }) {
+  const [isBlocked, setIsBlocked] = useState(false);
+
+  useEffect(() => {
+    if (typeof document === 'undefined') return undefined;
+
+    const bait = document.createElement('div');
+    bait.className = 'pub_300x250 pub_300x250m ad ads ad-banner ad-container ad-wrapper ad-unit adsbox adsbygoogle banner-ads text-ad textads';
+    bait.setAttribute('aria-hidden', 'true');
+    bait.style.cssText = [
+      'position:absolute !important',
+      'left:-10000px !important',
+      'top:-10000px !important',
+      'width:1px !important',
+      'height:1px !important',
+      'min-width:1px !important',
+      'min-height:1px !important',
+      'pointer-events:none !important',
+    ].join(';');
+    document.body.appendChild(bait);
+
+    const check = () => {
+      const style = window.getComputedStyle(bait);
+      const rect = bait.getBoundingClientRect();
+      const blocked =
+        !document.body.contains(bait) ||
+        style.display === 'none' ||
+        style.visibility === 'hidden' ||
+        Number(style.opacity) === 0 ||
+        rect.width === 0 ||
+        rect.height === 0 ||
+        bait.offsetHeight === 0 ||
+        bait.clientHeight === 0;
+      if (blocked) setIsBlocked(true);
+    };
+
+    const timers = [120, 650, 1400].map((delay) => window.setTimeout(check, delay));
+    check();
+
+    return () => {
+      timers.forEach((timer) => window.clearTimeout(timer));
+      bait.remove();
+    };
+  }, []);
+
+  if (!isBlocked) return null;
+
+  return (
+    <div className="access-wall" role="dialog" aria-modal="true" aria-labelledby="access-wall-title">
+      <div className="access-wall-panel">
+        <span className="access-wall-icon">
+          <Lock size={24} />
+        </span>
+        <h2 id="access-wall-title">{t(locale, 'adBlockTitle')}</h2>
+        <p>{t(locale, 'adBlockMessage')}</p>
+        <button type="button" onClick={() => window.location.reload()}>
+          <RotateCcw size={16} />
+          <span>{t(locale, 'adBlockReload')}</span>
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   const initialShareRef = useRef(null);
   if (initialShareRef.current === null) {
@@ -1877,6 +1999,7 @@ export default function App() {
   const vectorVolumeLabelRef = useRef(null);
   const scrubTrackRef = useRef(null);
   const historyStripRef = useRef(null);
+  const panelScrollRef = useRef(null);
   const arrowDragRef = useRef({
     active: false,
     hovered: null,
@@ -2013,24 +2136,32 @@ export default function App() {
   const [measurements, setMeasurements] = useState([]);
   const [hoveredMatrixPresetId, setHoveredMatrixPresetId] = useState(null);
 
-  const matrixInputValues = useMemo(() => {
-    if (inputMode === '2d') return matrix2;
-    if (inputMode === '1d') return matrix1;
-    return matrix3;
-  }, [inputMode, matrix1, matrix2, matrix3]);
+  const displayMode = viewKeyForMatrix(displayMatrix);
+  const inputColumns = dimensionForMode(displayMode);
+  const outputRows = dimensionForMode(inputMode);
+  const matrixInputValues = useMemo(
+    () => matrixInputValuesForShape(matrix3, outputRows, inputColumns),
+    [inputColumns, matrix3, outputRows]
+  );
   const visibleMatrixPresets = useMemo(
-    () => (matrixPresetGroups[inputMode] ?? matrixPresetGroups['3d']).map((preset) => ({
-      ...preset,
-      name: presetLocaleNames[locale]?.[preset.id] ?? presetLocaleNames.ko?.[preset.id] ?? preset.name,
-    })),
-    [inputMode, locale]
+    () =>
+      inputMode === displayMode
+        ? (matrixPresetGroups[inputMode] ?? matrixPresetGroups['3d']).map((preset) => ({
+            ...preset,
+            name: presetLocaleNames[locale]?.[preset.id] ?? presetLocaleNames.ko?.[preset.id] ?? preset.name,
+          }))
+        : [],
+    [displayMode, inputMode, locale]
   );
   const activeMatrixPresetId = useMemo(() => {
     const parsed = matrixInputValues.map(parseNumber);
     return visibleMatrixPresets.find((preset) =>
-      matricesAlmostEqual(matrixValuesForMode(preset.matrix, preset.mode), parsed)
+      matricesAlmostEqual(
+        matrixInputValuesForShape(operationMatrixFromPreset(preset), outputRows, inputColumns),
+        parsed
+      )
     )?.id ?? null;
-  }, [matrixInputValues, visibleMatrixPresets]);
+  }, [inputColumns, matrixInputValues, outputRows, visibleMatrixPresets]);
   const activeMatrixPresetName = useMemo(() => (
     visibleMatrixPresets.find((preset) => preset.id === activeMatrixPresetId)?.name ?? null
   ), [activeMatrixPresetId, visibleMatrixPresets]);
@@ -2041,9 +2172,9 @@ export default function App() {
   const previewMatrixInputValues = useMemo(
     () =>
       hoveredMatrixPreset
-        ? matrixValuesForMode(hoveredMatrixPreset.matrix, hoveredMatrixPreset.mode).map(formatPresetInputValue)
+        ? matrixInputValuesForShape(operationMatrixFromPreset(hoveredMatrixPreset), outputRows, inputColumns).map(formatPresetInputValue)
         : matrixInputValues,
-    [hoveredMatrixPreset, matrixInputValues]
+    [hoveredMatrixPreset, inputColumns, matrixInputValues, outputRows]
   );
 
   const previewIndex = hoveredHistoryIndex ?? activeHistoryIndex;
@@ -2229,7 +2360,6 @@ export default function App() {
     () => transformVector3(displayMatrix, parsedVector),
     [displayMatrix, parsedVector]
   );
-  const displayMode = viewKeyForMatrix(displayMatrix);
   const currentModeLabel = displayMode.toUpperCase();
   const equationSolution = useMemo(() => solveEquationSystem(equations), [equations]);
   const lineSystem = useMemo(() => analyzeEquationGeometry(equations), [equations]);
@@ -2437,11 +2567,48 @@ export default function App() {
     );
   }, []);
 
+  const restorePanelScrollTop = useCallback((scrollTop, vectorId = null) => {
+    if (!Number.isFinite(scrollTop) || typeof window === 'undefined') return;
+
+    const restore = () => {
+      if (panelScrollRef.current) panelScrollRef.current.scrollTop = scrollTop;
+    };
+    const keepVectorBottomVisible = () => {
+      const scroller = panelScrollRef.current;
+      if (!scroller || !vectorId) return;
+      const escapedId = window.CSS?.escape ? window.CSS.escape(vectorId) : vectorId.replace(/"/g, '\\"');
+      const card = scroller.querySelector(`[data-vector-id="${escapedId}"]`);
+      if (!card) return;
+      const nextCard = card.nextElementSibling?.classList.contains('vector-card')
+        ? card.nextElementSibling
+        : null;
+      const scrollerRect = scroller.getBoundingClientRect();
+      const bottomRect = (nextCard ?? card).getBoundingClientRect();
+      const bottomOverflow = bottomRect.bottom - scrollerRect.bottom + 8;
+      if (bottomOverflow > 0) scroller.scrollTop += bottomOverflow;
+    };
+
+    window.requestAnimationFrame(() => {
+      restore();
+      keepVectorBottomVisible();
+      window.requestAnimationFrame(() => {
+        restore();
+        keepVectorBottomVisible();
+      });
+    });
+    window.setTimeout(() => {
+      restore();
+      keepVectorBottomVisible();
+    }, 120);
+  }, []);
+
   const toggleVectorScalar = useCallback((id, checked) => {
+    const scrollTop = panelScrollRef.current?.scrollTop;
     setVectors((previous) =>
       previous.map((item) => (item.id === id ? { ...item, scalarEnabled: checked } : item))
     );
-  }, []);
+    restorePanelScrollTop(scrollTop, id);
+  }, [restorePanelScrollTop]);
 
   const toggleVectorVisible = useCallback((id) => {
     setVectors((previous) =>
@@ -4589,37 +4756,30 @@ export default function App() {
     moveCameraForMatrix(next);
   }, [moveCameraForMatrix, startAnimationTo]);
 
+  const updateMatrixInputValues = useCallback((values) => {
+    setHoveredMatrixPresetId(null);
+    setMatrix3((previous) => patchMatrixInputShape(previous, outputRows, inputColumns, values));
+    if (outputRows === 2 && inputColumns === 2) setMatrix2(values);
+    if (outputRows === 1 && inputColumns === 1) setMatrix1(values);
+  }, [inputColumns, outputRows]);
+
   const applyCurrentInput = useCallback(() => {
-    let matrix;
-    let name;
+    const matrix = operationMatrixFromInputValues(matrixInputValues, outputRows, inputColumns);
+    const operationMode = operationModeForShape(outputRows, inputColumns);
+    const name = activeMatrixPresetName ?? `${outputRows}x${inputColumns} ${t(locale, 'matrix')}`;
 
-    if (inputMode === '2d') {
-      const [a, b, c, d] = matrix2.map(parseNumber);
-      matrix = [a, b, 0, c, d, 0, 0, 0, 0];
-      name = activeMatrixPresetName ?? t(locale, 'input2dDefaultName');
-    } else if (inputMode === '1d') {
-      const [a] = matrix1.map(parseNumber);
-      matrix = [a, 0, 0, 0, 0, 0, 0, 0, 0];
-      name = activeMatrixPresetName ?? t(locale, 'input1dDefaultName');
-    } else {
-      matrix = matrix3.map(parseNumber);
-      name = activeMatrixPresetName ?? t(locale, 'directInput');
-    }
-
-    applyTransformation(matrix, name, inputMode);
-  }, [activeMatrixPresetName, applyTransformation, inputMode, locale, matrix1, matrix2, matrix3]);
+    applyTransformation(matrix, name, operationMode);
+  }, [activeMatrixPresetName, applyTransformation, inputColumns, locale, matrixInputValues, outputRows]);
 
   const loadPresetToMatrixInput = useCallback((preset) => {
-    const values = matrixValuesForMode(preset.matrix, preset.mode).map(formatPresetInputValue);
+    const rows = dimensionForMode(preset.mode);
+    const columns = rows;
+    const values = matrixInputValuesForShape(operationMatrixFromPreset(preset), rows, columns).map(formatPresetInputValue);
     setHoveredMatrixPresetId(null);
     setInputMode(preset.mode);
-    if (preset.mode === '2d') {
-      setMatrix2(values);
-    } else if (preset.mode === '1d') {
-      setMatrix1(values);
-    } else {
-      setMatrix3(values);
-    }
+    setMatrix3((previous) => patchMatrixInputShape(previous, rows, columns, values));
+    if (preset.mode === '2d') setMatrix2(values);
+    if (preset.mode === '1d') setMatrix1(values);
   }, []);
 
   const applyMatrixPresetDirectly = useCallback((preset, event) => {
@@ -4670,10 +4830,8 @@ export default function App() {
   }, [activeHistoryIndex, history, moveCameraForMatrix, startAnimationTo]);
 
   const getMatrixInputValues = useCallback(() => {
-    if (inputMode === '2d') return { values: matrix2, columns: 2 };
-    if (inputMode === '1d') return { values: matrix1, columns: 1 };
-    return { values: matrix3, columns: 3 };
-  }, [inputMode, matrix1, matrix2, matrix3]);
+    return { values: matrixInputValues, columns: inputColumns };
+  }, [inputColumns, matrixInputValues]);
 
   const copyMatrixInput = useCallback(async () => {
     try {
@@ -4710,21 +4868,17 @@ export default function App() {
       const numbers = text.match(/[+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?(?:\s*\/\s*[+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?)?/gi) ?? [];
       const normalized = numbers.map((value) => value.replace(/\s+/g, ''));
 
-      if (normalized.length >= 9) {
-        setInputMode('3d');
-        setMatrix3((previous) => previous.map((value, index) => normalized[index] ?? value));
-      } else if (normalized.length === 4) {
-        setInputMode('2d');
-        setMatrix2((previous) => previous.map((value, index) => normalized[index] ?? value));
-      } else if (normalized.length === 1) {
-        setInputMode('1d');
-        setMatrix1((previous) => previous.map((value, index) => normalized[index] ?? value));
-      } else if (inputMode === '2d') {
-        setMatrix2((previous) => previous.map((value, index) => normalized[index] ?? value));
-      } else if (inputMode === '1d') {
-        setMatrix1((previous) => previous.map((value, index) => normalized[index] ?? value));
-      } else {
-        setMatrix3((previous) => previous.map((value, index) => normalized[index] ?? value));
+      if (normalized.length) {
+        const rows = Math.min(3, Math.max(1, Math.ceil(normalized.length / inputColumns)));
+        const nextValues = Array.from(
+          { length: rows * inputColumns },
+          (_, index) => normalized[index] ?? matrixInputValues[index] ?? '0'
+        );
+        setHoveredMatrixPresetId(null);
+        setInputMode(modeForDimension(rows));
+        setMatrix3((previous) => patchMatrixInputShape(previous, rows, inputColumns, nextValues));
+        if (rows === 2 && inputColumns === 2) setMatrix2(nextValues);
+        if (rows === 1 && inputColumns === 1) setMatrix1(nextValues);
       }
 
       if (numbers.length) {
@@ -4738,7 +4892,7 @@ export default function App() {
       setClipboardStatus(t(locale, 'pasteFailed'));
     }
     window.setTimeout(() => setClipboardStatus(''), 1200);
-  }, [inputMode, locale]);
+  }, [inputColumns, locale, matrixInputValues]);
 
   const updateEquation = useCallback((index, value) => {
     setEquations((previous) => previous.map((equation, equationIndex) =>
@@ -4961,6 +5115,7 @@ export default function App() {
           className: 'app-toast',
         }}
       />
+      <AdBlockGate locale={locale} />
       <AdSlot placement="top" locale={locale} />
       <div className={`workspace-shell ${isTimelineExpanded ? 'timeline-open' : ''}`}>
       <section className="scene-area" aria-label={t(locale, 'title')}>
@@ -5468,7 +5623,7 @@ export default function App() {
           </button>
         </div>
 
-        <div className={`panel-scroll mode-${workspaceMode}`}>
+        <div className={`panel-scroll mode-${workspaceMode}`} ref={panelScrollRef}>
           <section className="panel system-main-panel">
             <div className="section-heading spread">
               <span className="heading-left">
@@ -5695,55 +5850,32 @@ export default function App() {
                   </button>
                 </div>
                 <div className="segmented" role="tablist" aria-label={t(locale, 'matrixDimension')}>
-                  <button className={inputMode === '3d' ? 'active' : ''} onClick={() => setInputMode('3d')}>3x3</button>
-                  <button className={inputMode === '2d' ? 'active' : ''} onClick={() => setInputMode('2d')}>2x2</button>
-                  <button className={inputMode === '1d' ? 'active' : ''} onClick={() => setInputMode('1d')}>1x1</button>
+                  <button className={inputMode === '3d' ? 'active' : ''} onClick={() => setInputMode('3d')}>3x{inputColumns}</button>
+                  <button className={inputMode === '2d' ? 'active' : ''} onClick={() => setInputMode('2d')}>2x{inputColumns}</button>
+                  <button className={inputMode === '1d' ? 'active' : ''} onClick={() => setInputMode('1d')}>1x{inputColumns}</button>
                 </div>
               </div>
             </div>
             <div className="matrix-workspace">
               <div className="matrix-input-column">
                 <div className="matrix-input-zone">
-              {inputMode === '3d' && (
-                <MatrixInput
-                  values={previewMatrixInputValues}
-                  columns={3}
-                  accent={hoveredMatrixPreset ? 'preview' : 'teal'}
-                  onChange={(values) => {
-                    setHoveredMatrixPresetId(null);
-                    setMatrix3(values);
-                  }}
-                  onEnter={applyCurrentInput}
-                  locale={locale}
-                />
-              )}
-              {inputMode === '2d' && (
-                <MatrixInput
-                  values={previewMatrixInputValues}
-                  columns={2}
-                  accent={hoveredMatrixPreset ? 'preview' : 'red'}
-                  onChange={(values) => {
-                    setHoveredMatrixPresetId(null);
-                    setMatrix2(values);
-                  }}
-                  onEnter={applyCurrentInput}
-                  locale={locale}
-                />
-              )}
-              {inputMode === '1d' && (
-                <MatrixInput
-                  values={previewMatrixInputValues}
-                  columns={1}
-                  accent={hoveredMatrixPreset ? 'preview' : 'gold'}
-                  onChange={(values) => {
-                    setHoveredMatrixPresetId(null);
-                    setMatrix1(values);
-                  }}
-                  onEnter={applyCurrentInput}
-                  locale={locale}
-                />
-              )}
-            </div>
+                  <MatrixInput
+                    values={previewMatrixInputValues}
+                    columns={inputColumns}
+                    accent={
+                      hoveredMatrixPreset
+                        ? 'preview'
+                        : inputMode === '3d'
+                          ? 'teal'
+                          : inputMode === '2d'
+                            ? 'red'
+                            : 'gold'
+                    }
+                    onChange={updateMatrixInputValues}
+                    onEnter={applyCurrentInput}
+                    locale={locale}
+                  />
+                </div>
 
                 <button className="primary-action" onClick={applyCurrentInput}>
               {t(locale, 'applyMatrix')}
@@ -5880,6 +6012,7 @@ export default function App() {
                   return (
                     <div
                       className={`vector-card ${item.id === activeVectorId ? 'active' : ''} ${measureDraft.includes(`v:${item.id}`) ? 'measuring' : ''} ${showVector ? '' : 'muted'} ${item.visible ? '' : 'scene-hidden'} ${item.scalarEnabled ? 'scalar-active' : ''}`}
+                      data-vector-id={item.id}
                       key={item.id}
                       style={{ '--vector-color': item.colorHex }}
                     >

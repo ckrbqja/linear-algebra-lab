@@ -396,6 +396,76 @@ button {
   min-height: 46px;
 }
 
+.access-wall {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: #10110f;
+  color: #fffaf0;
+}
+
+.access-wall-panel {
+  display: grid;
+  justify-items: center;
+  gap: 12px;
+  width: min(420px, 100%);
+  padding: 28px;
+  border: 1px solid rgba(241, 180, 52, 0.36);
+  border-radius: 8px;
+  background: #181815;
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.45);
+  text-align: center;
+}
+
+.access-wall-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 48px;
+  height: 48px;
+  border: 1px solid rgba(241, 180, 52, 0.5);
+  border-radius: 999px;
+  background: rgba(241, 180, 52, 0.12);
+  color: #f1b434;
+}
+
+.access-wall h2 {
+  margin: 0;
+  color: #fffaf0;
+  font-size: 1.25rem;
+  line-height: 1.2;
+}
+
+.access-wall p {
+  margin: 0;
+  color: #d7d1c4;
+  font-size: 0.95rem;
+  line-height: 1.55;
+}
+
+.access-wall button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 40px;
+  margin-top: 4px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 8px;
+  background: #f1b434;
+  color: #141310;
+  font-size: 0.9rem;
+  font-weight: 900;
+}
+
+.access-wall button:hover {
+  background: #ffd66b;
+}
+
 .scene-actions {
   display: flex;
   align-items: flex-end;
@@ -1634,6 +1704,7 @@ button {
   min-height: 0;
   padding: 8px;
   overflow-y: auto;
+  overflow-anchor: none;
   scrollbar-gutter: stable;
 }
 
