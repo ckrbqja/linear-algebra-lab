@@ -1,0 +1,9 @@
+node_modules/
+dist/
+vite-dev.log
+.codex-vite*.log
+qa-*.png
+
+.idea/
+.DS_Store
+Thumbs.db
