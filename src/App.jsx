@@ -3472,6 +3472,46 @@ export default function App() {
     </div>
   ), [continueMeasurement, convertMeasurementType, displayMode, locale, removeMeasurement, toggleMeasurementVisible]);
 
+  const getNearestMeasureTargetId = useCallback((event) => {
+    const sceneNode = containerRef.current;
+    if (!sceneNode || !measureMode || measureDraft.length === 0) return null;
+
+    let best = null;
+    const maxDistance = measureDraft.length >= 2 ? 58 : 42;
+    measureTargetMap.forEach((target, targetId) => {
+      if (measureDraft.includes(targetId)) return;
+      if (target.visible === false) return;
+      const node = getMeasureTargetLabelNode(targetId);
+      if (!node) return;
+      const style = window.getComputedStyle(node);
+      if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) <= 0.01) return;
+
+      const rect = node.getBoundingClientRect();
+      if (rect.width <= 0 || rect.height <= 0) return;
+
+      const dx =
+        event.clientX < rect.left
+          ? rect.left - event.clientX
+          : event.clientX > rect.right
+            ? event.clientX - rect.right
+            : 0;
+      const dy =
+        event.clientY < rect.top
+          ? rect.top - event.clientY
+          : event.clientY > rect.bottom
+            ? event.clientY - rect.bottom
+            : 0;
+      const distance = Math.hypot(dx, dy);
+      if (distance > maxDistance) return;
+
+      if (!best || distance < best.distance) {
+        best = { id: targetId, distance };
+      }
+    });
+
+    return best?.id ?? null;
+  }, [getMeasureTargetLabelNode, measureDraft, measureMode, measureTargetMap]);
+
   const updateMeasurePointer = useCallback((event) => {
     if (!measureMode || measureDraft.length === 0) return;
     const rect = containerRef.current?.getBoundingClientRect();
@@ -3480,7 +3520,21 @@ export default function App() {
       x: event.clientX - rect.left,
       y: event.clientY - rect.top,
     });
-  }, [measureDraft.length, measureMode]);
+    setHoveredMeasureTargetId(getNearestMeasureTargetId(event));
+  }, [getNearestMeasureTargetId, measureDraft.length, measureMode]);
+
+  const handleMeasurePointerDownCapture = useCallback((event) => {
+    if (!measureMode || measureDraft.length === 0) return;
+    if (event.target instanceof Element && event.target.closest('.label-measure-menu, .measurement-label-menu')) {
+      return;
+    }
+    const targetId = getNearestMeasureTargetId(event);
+    if (!targetId) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.nativeEvent?.stopImmediatePropagation?.();
+    pickMeasureTarget(targetId);
+  }, [getNearestMeasureTargetId, measureDraft.length, measureMode, pickMeasureTarget]);
 
   const measureDraftGuide = useMemo(() => {
     if (!measureMode || measureDraft.length === 0 || !measurePointer) return null;
@@ -6229,11 +6283,12 @@ export default function App() {
         </div>
 
         <div
-          className="scene-canvas"
+          className={`scene-canvas ${measureMode && measureDraft.length > 0 ? 'measuring' : ''}`}
           onPointerLeave={() => {
             setMeasurePointer(null);
             setHoveredMeasureTargetId(null);
           }}
+          onPointerDownCapture={handleMeasurePointerDownCapture}
           onPointerMove={updateMeasurePointer}
           ref={containerRef}
         >

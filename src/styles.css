@@ -1329,6 +1329,14 @@ button {
     0 0 18px color-mix(in srgb, var(--measure-color, #e8edf7) 16%, transparent);
 }
 
+.scene-canvas.measuring .measurement-label {
+  pointer-events: none;
+}
+
+.scene-canvas.measuring .measurement-label-menu {
+  display: none;
+}
+
 .measurement-symbol,
 .measurement-operator {
   color: color-mix(in srgb, var(--measure-color, #e8edf7) 78%, #fffaf0);
