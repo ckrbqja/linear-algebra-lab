@@ -3,6 +3,7 @@ import {
   ArrowLeftRight,
   Box,
   Braces,
+  Camera,
   ClipboardPaste,
   Copy,
   Eye,
@@ -10,6 +11,7 @@ import {
   Grid3X3,
   History,
   Lock,
+  Magnet,
   Menu,
   PanelRightClose,
   Play,
@@ -18,6 +20,7 @@ import {
   Sigma,
   VectorSquare,
   X,
+  ZoomIn,
 } from 'lucide-react';
 import { Toaster, toast } from 'sonner';
 import * as THREE from 'three';
@@ -38,16 +41,19 @@ const ANIMATION_MS = 1001;
 const CAMERA_MOVE_MS = 850;
 const UI_SYNC_MS = 16;
 const SNAP_DISTANCE = 0.08;
+const DRAG_SNAP_DISTANCE = 0.12;
 const AXIS_LOCK_RATIO_3D = 0.045;
 const PLANE_LOCK_RATIO_3D = 0.018;
 const AXIS_LOCK_MAX_3D = 0.14;
 const PLANE_LOCK_MAX_3D = 0.07;
+const SHIFT_AXIS_LOCK_PX = 22;
 const MEASURE_DOT_HEX = 0xf1b434;
 const MEASURE_DOT_GUIDE_HEX = 0xffd66b;
 const MEASURE_AREA_HEX = 0xff4fd8;
 const MEASURE_AREA_EDGE_HEX = 0xff9bea;
 const MEASURE_VOLUME_HEX = 0xff7a59;
 const MEASURE_VOLUME_EDGE_HEX = 0xffb199;
+const SCALAR_CONSTRAINT_LINE_RANGE = 5.6;
 const monetizationConfig = {
   adProvider: import.meta.env.VITE_AD_PROVIDER || 'adsense',
   adClient: import.meta.env.VITE_AD_CLIENT || '',
@@ -79,6 +85,26 @@ const viewPresets = {
     target: new THREE.Vector3(0, 0, 0),
   },
 };
+
+function viewDirectionForKey(viewKey) {
+  const preset = viewPresets[viewKey] ?? viewPresets['3d'];
+  const direction = preset.position.clone().sub(preset.target);
+  if (direction.lengthSq() < EPSILON) return new THREE.Vector3(0, 0, 1);
+  return direction.normalize();
+}
+
+function cameraStateForView(viewKey, positionFrom, targetFrom) {
+  const preset = viewPresets[viewKey] ?? viewPresets['3d'];
+  const target = targetFrom?.clone?.() ?? preset.target.clone();
+  const currentDistance =
+    positionFrom && targetFrom
+      ? Math.max(positionFrom.distanceTo(targetFrom), EPSILON)
+      : 0;
+  const presetDistance = preset.position.distanceTo(preset.target);
+  const distance = currentDistance > EPSILON ? currentDistance : presetDistance;
+  const position = target.clone().addScaledVector(viewDirectionForKey(viewKey), distance);
+  return { position, target };
+}
 
 const localeMessages = Object.fromEntries(
   Object.entries(managedLocaleMessages).map(([localeKey, messages]) => [
@@ -203,6 +229,7 @@ function readSharedStateFromUrl() {
           z: String(item.z ?? '0'),
           scalar: String(item.scalar ?? ''),
           scalarEnabled: !!item.scalarEnabled,
+          scalarSpace: item.scalarSpace === 'output' ? 'output' : 'input',
           visible: item.visible !== false,
         })
       )
@@ -225,6 +252,7 @@ function readSharedStateFromUrl() {
     showCoordinates: decoded.showCoordinates !== false,
     showDot: !!decoded.showDot,
     showAxes: decoded.showAxes !== false,
+    snapToInteger: decoded.snapToInteger !== false,
     camera: normalizeCameraState(decoded.camera),
   };
 }
@@ -323,15 +351,82 @@ function applySeo(locale) {
   }, JSON.stringify(schema));
 }
 
-function configureControlsForView(controls, viewKey, locked = false) {
+function normalizeControlLocks(locks = {}) {
+  if (typeof locks === 'boolean') {
+    return { camera: locks, zoom: false };
+  }
+  return {
+    camera: !!locks.camera,
+    zoom: !!locks.zoom,
+  };
+}
+
+function configureControlsForView(controls, viewKey, locks = {}) {
   if (!controls) return;
+  const lockState = normalizeControlLocks(locks);
   controls.enabled = true;
-  controls.enableRotate = !locked;
-  controls.enablePan = !locked;
-  controls.enableZoom = true;
+  controls.enableRotate = !lockState.camera;
+  controls.enablePan = !lockState.camera;
+  controls.enableZoom = !lockState.zoom;
   controls.screenSpacePanning = false;
   controls.mouseButtons.LEFT = THREE.MOUSE.ROTATE;
   controls.touches.ONE = THREE.TOUCH.ROTATE;
+}
+
+function labelRectOverlaps(a, b, padding = 4) {
+  return !(
+    a.right + padding < b.left ||
+    a.left - padding > b.right ||
+    a.bottom + padding < b.top ||
+    a.top - padding > b.bottom
+  );
+}
+
+function estimatedLabelRect(label, x, y) {
+  const text = label.querySelector('.axis-label-text')?.textContent ?? label.textContent ?? '';
+  const width = Math.max(42, Math.min(280, text.length * 8.2 + 18));
+  const height = label.classList.contains('measurement-label') ? 27 : 24;
+  return {
+    left: x - width / 2,
+    right: x + width / 2,
+    top: y - height / 2,
+    bottom: y + height / 2,
+  };
+}
+
+function resolveSceneLabelOverlaps(container) {
+  if (!container) return;
+  const labels = [...container.querySelectorAll('.axis-label')]
+    .filter((label) => label.style.display !== 'none' && label.dataset.labelX && label.dataset.labelY);
+  const placed = [];
+
+  labels.forEach((label) => {
+    const baseX = Number(label.dataset.labelX);
+    const baseY = Number(label.dataset.labelY);
+    if (!Number.isFinite(baseX) || !Number.isFinite(baseY)) return;
+
+    const isScalarLabel = label.dataset.dragKey?.startsWith('s:');
+    const isSolutionLabel = label.classList.contains('scalar-solution-label');
+    const preferredXOffset = isSolutionLabel ? 18 : 0;
+    const preferredYOffset = isScalarLabel ? -20 : isSolutionLabel ? 6 : 0;
+
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      const direction = attempt % 2 === 0 ? 1 : -1;
+      const step = Math.ceil(attempt / 2);
+      const dy = preferredYOffset + direction * step * 22;
+      const dx = preferredXOffset + (attempt > 4 ? (attempt % 2 === 0 ? 18 : -18) : 0);
+      const x = baseX + dx;
+      const y = baseY + dy;
+      label.style.transform = `translate(-50%, -50%) translate(${x}px, ${y}px)`;
+      const rect = estimatedLabelRect(label, x, y);
+      if (!placed.some((placedRect) => labelRectOverlaps(rect, placedRect))) {
+        placed.push(rect);
+        return;
+      }
+    }
+
+    placed.push(estimatedLabelRect(label, baseX, baseY));
+  });
 }
 
 const matrixPresetGroups = {
@@ -731,13 +826,13 @@ function formatVectorInputValue(value) {
   return formatInputValue(value);
 }
 
-function snapValue(value) {
+function snapValue(value, distance = SNAP_DISTANCE) {
   const rounded = Math.round(value);
-  return Math.abs(value - rounded) < SNAP_DISTANCE ? rounded : value;
+  return Math.abs(value - rounded) < distance ? rounded : value;
 }
 
-function snapValuesFor3D(values) {
-  const snapped = values.map(snapValue);
+function snapValuesFor3D(values, distance = SNAP_DISTANCE) {
+  const snapped = values.map((value) => snapValue(value, distance));
   const absValues = snapped.map((value) => Math.abs(value));
   const maxAbs = Math.max(...absValues);
   if (maxAbs < EPSILON) return snapped;
@@ -749,7 +844,7 @@ function snapValuesFor3D(values) {
   const second = ranked[1]?.value ?? 0;
   const axisLockDistance = Math.min(
     AXIS_LOCK_MAX_3D,
-    Math.max(SNAP_DISTANCE * 0.55, maxAbs * AXIS_LOCK_RATIO_3D)
+    Math.max(distance * 0.55, maxAbs * AXIS_LOCK_RATIO_3D)
   );
   if (dominant.value > EPSILON && second <= axisLockDistance) {
     return snapped.map((value, index) => (index === dominant.index ? value : 0));
@@ -757,12 +852,14 @@ function snapValuesFor3D(values) {
 
   const planeLockDistance = Math.min(
     PLANE_LOCK_MAX_3D,
-    Math.max(SNAP_DISTANCE * 0.38, maxAbs * PLANE_LOCK_RATIO_3D)
+    Math.max(distance * 0.38, maxAbs * PLANE_LOCK_RATIO_3D)
   );
   return snapped.map((value) => (Math.abs(value) <= planeLockDistance ? 0 : value));
 }
 
-function constrainVectorForMode(vector, mode) {
+function constrainVectorForMode(vector, mode, options = {}) {
+  const shouldSnap = options.snap !== false;
+  const snapDistance = options.drag ? DRAG_SNAP_DISTANCE : SNAP_DISTANCE;
   const next = vector.clone();
   if (mode === '1d') {
     next.y = 0;
@@ -770,16 +867,21 @@ function constrainVectorForMode(vector, mode) {
   } else if (mode === '2d') {
     next.z = 0;
   }
+  if (!shouldSnap) return next;
   if (mode === '3d') {
-    const [x, y, z] = snapValuesFor3D([next.x, next.y, next.z]);
+    const [x, y, z] = snapValuesFor3D([next.x, next.y, next.z], snapDistance);
     next.set(x, y, z);
   } else {
-    next.set(snapValue(next.x), snapValue(next.y), snapValue(next.z));
+    next.set(
+      snapValue(next.x, snapDistance),
+      snapValue(next.y, snapDistance),
+      snapValue(next.z, snapDistance)
+    );
   }
   return next;
 }
 
-function constrainInputValuesForMode(values, mode, shouldSnap = true) {
+function constrainInputValuesForMode(values, mode, shouldSnap = true, options = {}) {
   const next = [...values];
   if (mode === '1d') {
     next[1] = 0;
@@ -788,8 +890,31 @@ function constrainInputValuesForMode(values, mode, shouldSnap = true) {
     next[2] = 0;
   }
   if (!shouldSnap) return next;
-  if (mode === '3d') return snapValuesFor3D(next);
-  return next.map(snapValue);
+  const snapDistance = options.drag ? DRAG_SNAP_DISTANCE : SNAP_DISTANCE;
+  if (mode === '3d') return snapValuesFor3D(next, snapDistance);
+  return next.map((value) => snapValue(value, snapDistance));
+}
+
+function snapGuideLabelForVectors(rawVector, snappedVector, mode) {
+  const axes = mode === '1d' ? ['x'] : mode === '2d' ? ['x', 'y'] : ['x', 'y', 'z'];
+  const rawValues = [rawVector.x, rawVector.y, rawVector.z];
+  const snappedValues = [snappedVector.x, snappedVector.y, snappedVector.z];
+  const labels = axes
+    .map((axis, index) => ({
+      axis,
+      value: snappedValues[index],
+      delta: Math.abs(rawValues[index] - snappedValues[index]),
+    }))
+    .filter((item) => item.delta > 0.002)
+    .sort((a, b) => {
+      const aNonZero = Math.abs(a.value) > EPSILON ? 1 : 0;
+      const bNonZero = Math.abs(b.value) > EPSILON ? 1 : 0;
+      return bNonZero - aNonZero || b.delta - a.delta;
+    })
+    .slice(0, 3)
+    .map((item) => `${item.axis} = ${formatNumber(item.value)}`);
+
+  return labels.join(' · ');
 }
 
 function solveVectorInputForWorld(matrix, worldVector, mode, options = {}) {
@@ -1116,6 +1241,7 @@ function createVectorState(index, overrides = {}) {
     visible: overrides.visible ?? true,
     scalarEnabled: overrides.scalarEnabled ?? false,
     scalar: overrides.scalar ?? '1',
+    scalarSpace: overrides.scalarSpace === 'output' ? 'output' : 'input',
   };
 }
 
@@ -1371,6 +1497,21 @@ function lineSegmentForEquation(line, range = 9) {
   return points.slice(0, 2);
 }
 
+function scalarLineSegmentForEquation(line, range = SCALAR_CONSTRAINT_LINE_RANGE) {
+  const normalLengthSquared = line.a * line.a + line.b * line.b;
+  if (normalLengthSquared < EPSILON) return [];
+  const anchorX = (line.a * line.value) / normalLengthSquared;
+  const anchorY = (line.b * line.value) / normalLengthSquared;
+  const tangentLength = Math.hypot(line.a, line.b);
+  if (tangentLength < EPSILON) return [];
+  const tangentX = -line.b / tangentLength;
+  const tangentY = line.a / tangentLength;
+  return [
+    [anchorX - tangentX * range, anchorY - tangentY * range],
+    [anchorX + tangentX * range, anchorY + tangentY * range],
+  ];
+}
+
 function clearEquationGroup(group) {
   if (!group) return;
   group.children.forEach((child) => {
@@ -1574,8 +1715,68 @@ function createPlaneObjects(plane, size = 6.5, muted = false) {
   return [mesh, edges];
 }
 
-function createLineObjects(line, range = 9) {
-  const segment = lineSegmentForEquation(line, range);
+function transformedPointForMatrix(matrix, point) {
+  const [x, y, z] = transformVector3(matrix, [point.x, point.y, point.z]);
+  return new THREE.Vector3(x, y, z);
+}
+
+function createTransformedPlaneObjects(plane, matrix, size = 5.8, muted = false) {
+  const normal = new THREE.Vector3(plane.a, plane.b, plane.c);
+  const normalLengthSquared = normal.lengthSq();
+  if (normalLengthSquared < EPSILON) return [];
+
+  const anchor = normal.clone().multiplyScalar(plane.value / normalLengthSquared);
+  const helper = Math.abs(normal.z) < 0.9 ? new THREE.Vector3(0, 0, 1) : new THREE.Vector3(0, 1, 0);
+  const tangentA = new THREE.Vector3().crossVectors(normal, helper).normalize();
+  const tangentB = new THREE.Vector3().crossVectors(normal, tangentA).normalize();
+  const inputCorners = [
+    anchor.clone().addScaledVector(tangentA, -size).addScaledVector(tangentB, -size),
+    anchor.clone().addScaledVector(tangentA, size).addScaledVector(tangentB, -size),
+    anchor.clone().addScaledVector(tangentA, size).addScaledVector(tangentB, size),
+    anchor.clone().addScaledVector(tangentA, -size).addScaledVector(tangentB, size),
+  ];
+  const corners = inputCorners.map((point) => transformedPointForMatrix(matrix, point));
+  const positions = corners.flatMap((point) => [point.x, point.y, point.z]);
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geometry.setIndex([0, 1, 2, 0, 2, 3]);
+  geometry.computeVertexNormals();
+
+  const mesh = new THREE.Mesh(
+    geometry,
+    new THREE.MeshBasicMaterial({
+      color: plane.color,
+      transparent: true,
+      opacity: muted ? 0.07 : 0.18,
+      side: THREE.DoubleSide,
+      depthWrite: false,
+    })
+  );
+  mesh.renderOrder = 30;
+
+  const edgeGeometry = new THREE.BufferGeometry().setFromPoints([
+    corners[0], corners[1],
+    corners[1], corners[2],
+    corners[2], corners[3],
+    corners[3], corners[0],
+  ]);
+  const edges = new THREE.LineSegments(
+    edgeGeometry,
+    new THREE.LineBasicMaterial({
+      color: plane.color,
+      transparent: true,
+      opacity: muted ? 0.42 : 0.88,
+      depthTest: false,
+      depthWrite: false,
+    })
+  );
+  edges.renderOrder = 31;
+
+  return [mesh, edges];
+}
+
+function createLineObjects(line, range = SCALAR_CONSTRAINT_LINE_RANGE) {
+  const segment = scalarLineSegmentForEquation(line, range);
   if (segment.length < 2) return [];
   const start = new THREE.Vector3(segment[0][0], segment[0][1], 0.024);
   const end = new THREE.Vector3(segment[1][0], segment[1][1], 0.024);
@@ -1605,6 +1806,88 @@ function createLineObjects(line, range = 9) {
   );
   glow.renderOrder = 33;
   return [glow, lineMesh];
+}
+
+function createTransformedLineObjects(line, matrix, range = SCALAR_CONSTRAINT_LINE_RANGE) {
+  const segment = scalarLineSegmentForEquation(line, range);
+  if (segment.length < 2) return [];
+
+  const start = transformedPointForMatrix(matrix, new THREE.Vector3(segment[0][0], segment[0][1], 0.024));
+  const end = transformedPointForMatrix(matrix, new THREE.Vector3(segment[1][0], segment[1][1], 0.024));
+
+  if (start.distanceToSquared(end) < EPSILON) {
+    const point = new THREE.Mesh(
+      new THREE.SphereGeometry(0.13, 18, 12),
+      new THREE.MeshBasicMaterial({
+        color: line.color,
+        transparent: true,
+        opacity: 0.92,
+        depthTest: false,
+        depthWrite: false,
+      })
+    );
+    point.position.copy(start);
+    point.renderOrder = 35;
+    return [point];
+  }
+
+  const geometry = new THREE.BufferGeometry().setFromPoints([start, end]);
+  const lineMesh = new THREE.Line(
+    geometry,
+    new THREE.LineBasicMaterial({
+      color: line.color,
+      transparent: true,
+      opacity: 0.96,
+      depthTest: false,
+      depthWrite: false,
+    })
+  );
+  lineMesh.renderOrder = 34;
+
+  const glowCurve = new THREE.LineCurve3(start, end);
+  const glow = new THREE.Mesh(
+    new THREE.TubeGeometry(glowCurve, 28, 0.045, 10, false),
+    new THREE.MeshBasicMaterial({
+      color: line.color,
+      transparent: true,
+      opacity: 0.18,
+      depthTest: false,
+      depthWrite: false,
+    })
+  );
+  glow.renderOrder = 33;
+  return [glow, lineMesh];
+}
+
+function createScalarPointObjects(point, color) {
+  const tickStart = point.clone().add(new THREE.Vector3(0, -0.38, 0.024));
+  const tickEnd = point.clone().add(new THREE.Vector3(0, 0.38, 0.024));
+  const tickGeometry = new THREE.BufferGeometry().setFromPoints([tickStart, tickEnd]);
+  const tick = new THREE.Line(
+    tickGeometry,
+    new THREE.LineBasicMaterial({
+      color,
+      transparent: true,
+      opacity: 0.94,
+      depthTest: false,
+      depthWrite: false,
+    })
+  );
+  tick.renderOrder = 34;
+
+  const pointMesh = new THREE.Mesh(
+    new THREE.SphereGeometry(0.12, 20, 14),
+    new THREE.MeshBasicMaterial({
+      color,
+      transparent: true,
+      opacity: 0.94,
+      depthTest: false,
+      depthWrite: false,
+    })
+  );
+  pointMesh.position.copy(point);
+  pointMesh.renderOrder = 35;
+  return [tick, pointMesh];
 }
 
 function closestSolutionCenter(particular, basisVectors) {
@@ -2037,6 +2320,7 @@ export default function App() {
   const startMatrixRef = useRef([...(initialShare.displayMatrix ?? identity3)]);
   const targetMatrixRef = useRef([...(initialShare.displayMatrix ?? identity3)]);
   const vectorRenderValuesRef = useRef(new Map());
+  const dragSnapEnabledRef = useRef(initialShare.snapToInteger !== false);
   const animationViewFromRef = useRef('3d');
   const animationViewToRef = useRef('3d');
   const animationStartRef = useRef(null);
@@ -2051,6 +2335,7 @@ export default function App() {
     targetTo: initialCameraTargetRef.current.clone(),
   });
   const cameraLockedRef = useRef(false);
+  const zoomLockedRef = useRef(false);
   const userVectorRef = useRef(
     initialShare.vectors?.[0]
       ? [parseNumber(initialShare.vectors[0].x), parseNumber(initialShare.vectors[0].y), parseNumber(initialShare.vectors[0].z)]
@@ -2118,6 +2403,7 @@ export default function App() {
   const [progress, setProgress] = useState(1);
   const [activeView, setActiveView] = useState(initialShare.camera ? null : '3d');
   const [cameraLocked, setCameraLocked] = useState(false);
+  const [zoomLocked, setZoomLocked] = useState(false);
   const [cameraState, setCameraState] = useState(initialShare.camera ?? null);
   const [locale, setLocale] = useState(initialLocale);
   const [showVolume, setShowVolume] = useState(initialShare.showVolume ?? false);
@@ -2129,13 +2415,16 @@ export default function App() {
   const [showCoordinates, setShowCoordinates] = useState(initialShare.showCoordinates ?? true);
   const [showDot, setShowDot] = useState(initialShare.showDot ?? false);
   const [showAxes, setShowAxes] = useState(initialShare.showAxes ?? true);
+  const [snapToInteger, setSnapToInteger] = useState(initialShare.snapToInteger ?? true);
   const [measureMode, setMeasureMode] = useState(null);
   const [measureDraft, setMeasureDraft] = useState([]);
   const [measurePointer, setMeasurePointer] = useState(null);
+  const [dragSnapGuide, setDragSnapGuide] = useState(null);
   const [hoveredMeasureTargetId, setHoveredMeasureTargetId] = useState(null);
   const [measurements, setMeasurements] = useState([]);
   const [hoveredMatrixPresetId, setHoveredMatrixPresetId] = useState(null);
 
+  const allLocked = cameraLocked && zoomLocked;
   const displayMode = viewKeyForMatrix(displayMatrix);
   const inputColumns = dimensionForMode(displayMode);
   const outputRows = dimensionForMode(inputMode);
@@ -2201,14 +2490,22 @@ export default function App() {
         const transformed = transformVector3(displayMatrix, item.values);
         const length = vectorLength(transformed);
         const lengthSquared = dotValues(transformed, transformed);
+        const scalarSpace = item.scalarSpace === 'input' ? 'input' : 'output';
+        const scalarNormal = scalarSpace === 'input' ? item.values : transformed;
+        const scalarLength = vectorLength(scalarNormal);
+        const scalarLengthSquared = dotValues(scalarNormal, scalarNormal);
         const scalarAuto = !hasScalarText(item.scalar);
         return {
           ...item,
+          scalarSpace,
+          scalarNormal,
+          scalarLength,
+          scalarLengthSquared,
           transformed,
           length,
           lengthSquared,
           scalarAuto,
-          scalarResolved: scalarAuto ? lengthSquared : item.scalarValue,
+          scalarResolved: scalarAuto ? scalarLengthSquared : item.scalarValue,
         };
       }),
     [displayMatrix, vectorItems]
@@ -2335,13 +2632,14 @@ export default function App() {
   const vectorScalarConstraints = useMemo(
     () =>
       transformedVectorItems
-        .filter((item) => item.visible && item.scalarEnabled && item.length > EPSILON)
+        .filter((item) => item.visible && item.scalarEnabled && item.scalarLength > EPSILON)
         .map((item, index) => ({
           id: item.id,
           name: item.name,
+          scalarSpace: item.scalarSpace,
           color: item.color,
           colorHex: item.colorHex,
-          normal: item.transformed,
+          normal: item.scalarNormal,
           scalar: item.scalarResolved,
           scalarAuto: item.scalarAuto,
           index,
@@ -2432,6 +2730,11 @@ export default function App() {
   }, [measureDraft]);
 
   useEffect(() => {
+    dragSnapEnabledRef.current = snapToInteger;
+    if (!snapToInteger) setDragSnapGuide(null);
+  }, [snapToInteger]);
+
+  useEffect(() => {
     uiStateRef.current = {
       showVolume,
       showVector,
@@ -2484,13 +2787,15 @@ export default function App() {
       const label = vectorLabelRefs.current.get(item.id);
       const values = [parseNumber(item.x), parseNumber(item.y), parseNumber(item.z)];
       const transformed = transformVector3(displayMatrix, values);
+      const scalarSpace = item.scalarSpace === 'input' ? 'input' : 'output';
+      const scalarNormal = scalarSpace === 'input' ? values : transformed;
       const scalarValue = hasScalarText(item.scalar)
         ? parseNumber(item.scalar)
-        : dotValues(transformed, transformed);
+        : dotValues(scalarNormal, scalarNormal);
       showLabel(
         label,
         item.scalarEnabled
-          ? `A${item.name}·x = ${formatNumber(scalarValue)}`
+          ? `${scalarSpace === 'input' ? '' : 'A'}${item.name}·x = ${formatNumber(scalarValue)}`
           : labelWithCoord(item.name, transformed),
         showVector && item.visible !== false
       );
@@ -2499,59 +2804,20 @@ export default function App() {
 
   useEffect(() => {
     cameraLockedRef.current = cameraLocked;
+    zoomLockedRef.current = zoomLocked;
     if (cameraLocked) {
       cameraMoveRef.current.active = false;
     }
 
     const refs = threeRef.current;
     if (refs?.controls) {
-      configureControlsForView(refs.controls, activeView ?? displayMode, cameraLocked);
+      configureControlsForView(refs.controls, activeView ?? displayMode, {
+        camera: cameraLocked,
+        zoom: zoomLocked,
+      });
       refs.controls.update();
     }
-  }, [activeView, cameraLocked, displayMode]);
-
-  useEffect(() => {
-    const refs = threeRef.current;
-    if (!refs?.vectorScalarGroup) return undefined;
-
-    clearEquationGroup(refs.vectorScalarGroup);
-    refs.vectorScalarGroup.visible = workspaceMode === 'transform' && showVector;
-
-    if (workspaceMode !== 'transform' || !showVector) return undefined;
-
-    const mode = viewKeyForMatrix(displayMatrix);
-    vectorScalarConstraints.forEach((constraint) => {
-      if (mode === '1d') return;
-      if (mode === '2d') {
-        createLineObjects(
-          {
-            a: constraint.normal[0],
-            b: constraint.normal[1],
-            value: constraint.scalar,
-            color: constraint.color,
-          },
-          9
-        ).forEach((object) => refs.vectorScalarGroup.add(object));
-        return;
-      }
-
-      createPlaneObjects(
-        {
-          a: constraint.normal[0],
-          b: constraint.normal[1],
-          c: constraint.normal[2],
-          value: constraint.scalar,
-          color: constraint.color,
-        },
-        5.8,
-        vectorScalarConstraints.length > 1
-      ).forEach((object) => refs.vectorScalarGroup.add(object));
-    });
-
-    return () => {
-      clearEquationGroup(refs.vectorScalarGroup);
-    };
-  }, [displayMatrix, showVector, vectorScalarConstraints, workspaceMode]);
+  }, [activeView, cameraLocked, displayMode, zoomLocked]);
 
   const updateVectorValue = useCallback((id, axis, value) => {
     setVectors((previous) =>
@@ -2564,6 +2830,12 @@ export default function App() {
   const updateVectorScalar = useCallback((id, value) => {
     setVectors((previous) =>
       previous.map((item) => (item.id === id ? { ...item, scalar: value.replace(/^0+(?=\d)/, '') } : item))
+    );
+  }, []);
+
+  const updateVectorScalarSpace = useCallback((id, scalarSpace) => {
+    setVectors((previous) =>
+      previous.map((item) => (item.id === id ? { ...item, scalarSpace } : item))
     );
   }, []);
 
@@ -3129,7 +3401,6 @@ export default function App() {
     isAnimatingRef.current = true;
     setProgress(0);
     const nextView = viewKeyForMatrix(next);
-    const preset = viewPresets[nextView] ?? viewPresets['3d'];
     const refs = threeRef.current;
     if (cameraLockedRef.current) {
       cameraMoveRef.current.active = false;
@@ -3137,14 +3408,15 @@ export default function App() {
     }
     setActiveView(nextView);
     if (refs) {
-      configureControlsForView(refs.controls, nextView, cameraLockedRef.current);
+      configureControlsForView(refs.controls, nextView, controlLocksFromRefs());
+      const destination = cameraStateForView(nextView, refs.camera.position, refs.controls.target);
       cameraMoveRef.current = {
         active: true,
         startTime: null,
         positionFrom: refs.camera.position.clone(),
         targetFrom: refs.controls.target.clone(),
-        positionTo: preset.position.clone(),
-        targetTo: preset.target.clone(),
+        positionTo: destination.position,
+        targetTo: destination.target,
       };
     }
   }, []);
@@ -3165,7 +3437,6 @@ export default function App() {
     isAnimatingRef.current = true;
     setProgress(0);
     const nextView = viewKeyForMatrix(next);
-    const preset = viewPresets[nextView] ?? viewPresets['3d'];
     const refs = threeRef.current;
     if (cameraLockedRef.current) {
       cameraMoveRef.current.active = false;
@@ -3173,14 +3444,15 @@ export default function App() {
     }
     setActiveView(nextView);
     if (refs) {
-      configureControlsForView(refs.controls, nextView, cameraLockedRef.current);
+      configureControlsForView(refs.controls, nextView, controlLocksFromRefs());
+      const destination = cameraStateForView(nextView, refs.camera.position, refs.controls.target);
       cameraMoveRef.current = {
         active: true,
         startTime: null,
         positionFrom: refs.camera.position.clone(),
         targetFrom: refs.controls.target.clone(),
-        positionTo: preset.position.clone(),
-        targetTo: preset.target.clone(),
+        positionTo: destination.position,
+        targetTo: destination.target,
       };
     }
   }, []);
@@ -3213,7 +3485,11 @@ export default function App() {
   const updateBasisVectorFromDrag = useCallback((dragKey, worldVector) => {
     if (!['i', 'j', 'k'].includes(dragKey)) return worldVector;
     const mode = viewKeyForMatrix(currentMatrixRef.current);
-    const adjusted = constrainVectorForMode(worldVector, mode);
+    const adjusted = constrainVectorForMode(
+      worldVector,
+      mode,
+      snapToInteger ? { drag: true } : { snap: false }
+    );
     const next = [...currentMatrixRef.current];
     const columnIndex = dragKey === 'i' ? 0 : dragKey === 'j' ? 1 : 2;
     next[columnIndex] = adjusted.x;
@@ -3243,7 +3519,8 @@ export default function App() {
       ? constrainInputValuesForMode(
           startInput.map((value, index) => value + inputDelta[index]),
           mode,
-          true
+          snapToInteger,
+          { drag: true }
         )
       : solveVectorInputForWorld(currentMatrixRef.current, constrainVectorForMode(worldVector, mode), mode);
     const adjustedWorld = transformVector3(currentMatrixRef.current, solved);
@@ -3259,15 +3536,26 @@ export default function App() {
       previous.map((item) => (item.id === vectorId ? { ...item, ...nextVector } : item))
     );
     return new THREE.Vector3(adjustedWorld[0], adjustedWorld[1], adjustedWorld[2]);
-  }, []);
+  }, [snapToInteger]);
 
   const updateScalarConstraintFromDrag = useCallback((worldVector, dragState = null) => {
     const vectorId = scalarIdFromDragKey(dragState?.key);
     const normal = dragState?.scalarNormal;
     if (!vectorId || !normal || normal.lengthSq() < EPSILON) return worldVector;
 
-    const scalarValue = normal.dot(worldVector);
-    const anchor = normal.clone().multiplyScalar(scalarValue / normal.lengthSq());
+    const scalarSpace = dragState?.scalarSpace === 'input' ? 'input' : 'output';
+    const mode = viewKeyForMatrix(dragState?.startMatrix ?? currentMatrixRef.current);
+    const inputVector =
+      scalarSpace === 'input'
+        ? solveVectorInputForWorld(dragState?.startMatrix ?? currentMatrixRef.current, worldVector, mode, { snap: false })
+        : null;
+    const scalarValue = scalarSpace === 'input'
+      ? normal.dot(inputVector)
+      : normal.dot(worldVector);
+    const anchorInput = normal.clone().multiplyScalar(scalarValue / normal.lengthSq());
+    const anchor = scalarSpace === 'input'
+      ? new THREE.Vector3(...transformVector3(dragState?.startMatrix ?? currentMatrixRef.current, [anchorInput.x, anchorInput.y, anchorInput.z]))
+      : anchorInput;
     setVectors((previous) =>
       previous.map((item) =>
         item.id === vectorId ? { ...item, scalar: formatInputValue(scalarValue), scalarEnabled: true } : item
@@ -3284,6 +3572,11 @@ export default function App() {
       updateUserVectorFromDrag,
     };
   }, [commitBasisDrag, updateBasisVectorFromDrag, updateScalarConstraintFromDrag, updateUserVectorFromDrag]);
+
+  const controlLocksFromRefs = useCallback(() => ({
+    camera: cameraLockedRef.current,
+    zoom: zoomLockedRef.current,
+  }), []);
 
   useEffect(() => {
     const strip = historyStripRef.current;
@@ -3315,12 +3608,15 @@ export default function App() {
     const eased = easeInOut(clamped);
     const fromKey = animationViewFromRef.current;
     const toKey = animationViewToRef.current;
-    const fromPreset = viewPresets[fromKey] ?? viewPresets['3d'];
-    const toPreset = viewPresets[toKey] ?? viewPresets['3d'];
-    refs.camera.position.lerpVectors(fromPreset.position, toPreset.position, eased);
-    refs.controls.target.lerpVectors(fromPreset.target, toPreset.target, eased);
-    if (clamped <= 0.001) configureControlsForView(refs.controls, fromKey, cameraLockedRef.current);
-    if (clamped >= 0.999) configureControlsForView(refs.controls, toKey, cameraLockedRef.current);
+    const target = refs.controls.target.clone();
+    const distance = Math.max(refs.camera.position.distanceTo(refs.controls.target), EPSILON);
+    const direction = viewDirectionForKey(fromKey).lerp(viewDirectionForKey(toKey), eased);
+    if (direction.lengthSq() < EPSILON) direction.copy(viewDirectionForKey(toKey));
+    direction.normalize();
+    refs.controls.target.copy(target);
+    refs.camera.position.copy(target).addScaledVector(direction, distance);
+    if (clamped <= 0.001) configureControlsForView(refs.controls, fromKey, controlLocksFromRefs());
+    if (clamped >= 0.999) configureControlsForView(refs.controls, toKey, controlLocksFromRefs());
     refs.controls.update();
 
     const nextActiveView = clamped <= 0.001 ? fromKey : clamped >= 0.999 ? toKey : null;
@@ -3428,10 +3724,14 @@ export default function App() {
     const height = refs.renderer.domElement.clientHeight;
     const x = (projected.x * 0.5 + 0.5) * width;
     const y = (projected.y * -0.5 + 0.5) * height;
+    const labelX = x + offset[0];
+    const labelY = y + offset[1];
     setAxisLabelText(label, text);
+    label.dataset.labelX = String(labelX);
+    label.dataset.labelY = String(labelY);
     label.style.display = 'block';
     label.style.transform =
-      `translate(-50%, -50%) translate(${x + offset[0]}px, ${y + offset[1]}px)`;
+      `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)`;
   }, []);
 
   const queueCameraShareUpdate = useCallback((delay = 180) => {
@@ -3586,7 +3886,7 @@ export default function App() {
     vectorsRef.current.forEach((vectorItem) => {
       const targetValues = vectorItem.values;
       const previousValues = vectorRenderValues.get(vectorItem.id) ?? targetValues;
-      const shouldSnap = activeDragVectorId === vectorItem.id;
+      const shouldSnap = activeDragVectorId === vectorItem.id || vectorItem.scalarEnabled;
       const nextValues = shouldSnap
         ? [...targetValues]
         : previousValues.map((value, index) => {
@@ -3602,6 +3902,78 @@ export default function App() {
         vectorRenderValues.delete(id);
       }
     });
+
+    let frameScalarSolution = null;
+    if (refs.vectorScalarGroup) {
+      clearEquationGroup(refs.vectorScalarGroup);
+      const scalarGroupVisible = !isSystemMode && uiStateRef.current.showVector;
+      refs.vectorScalarGroup.visible = scalarGroupVisible;
+      if (scalarGroupVisible) {
+        const scalarConstraints = vectorsRef.current
+          .filter((item) => item.visible !== false && item.scalarEnabled)
+          .map((item) => {
+            const values = renderedVectorValues.get(item.id) ?? item.values;
+            const transformed = transformVector3(matrix, values);
+            const scalarSpace = item.scalarSpace === 'input' ? 'input' : 'output';
+            const normal = scalarSpace === 'input' ? values : transformed;
+            const lengthSquared = dotValues(normal, normal);
+            return {
+              color: item.color,
+              lengthSquared,
+              normal,
+              scalar: hasScalarText(item.scalar) ? parseNumber(item.scalar) : lengthSquared,
+              scalarSpace,
+            };
+          })
+          .filter((constraint) => constraint.lengthSquared > EPSILON);
+
+        const rawScalarSolution = solveScalarConstraintPoint(scalarConstraints, coordMode);
+        frameScalarSolution =
+          rawScalarSolution && scalarConstraints.every((constraint) => constraint.scalarSpace === 'input')
+            ? transformVector3(matrix, rawScalarSolution)
+            : rawScalarSolution;
+        scalarConstraints.forEach((constraint) => {
+          if (coordMode === '1d') {
+            if (Math.abs(constraint.normal[0]) < EPSILON) return;
+            const anchorInput = new THREE.Vector3(constraint.scalar / constraint.normal[0], 0, 0);
+            const anchor =
+              constraint.scalarSpace === 'input'
+                ? transformedPointForMatrix(matrix, anchorInput)
+                : anchorInput;
+            createScalarPointObjects(anchor, constraint.color).forEach((object) => refs.vectorScalarGroup.add(object));
+            return;
+          }
+
+          if (coordMode === '2d') {
+            const line = {
+              a: constraint.normal[0],
+              b: constraint.normal[1],
+              value: constraint.scalar,
+              color: constraint.color,
+            };
+            const objects =
+              constraint.scalarSpace === 'input'
+                ? createTransformedLineObjects(line, matrix, SCALAR_CONSTRAINT_LINE_RANGE)
+                : createLineObjects(line, SCALAR_CONSTRAINT_LINE_RANGE);
+            objects.forEach((object) => refs.vectorScalarGroup.add(object));
+            return;
+          }
+
+          const plane = {
+            a: constraint.normal[0],
+            b: constraint.normal[1],
+            c: constraint.normal[2],
+            value: constraint.scalar,
+            color: constraint.color,
+          };
+          const objects =
+            constraint.scalarSpace === 'input'
+              ? createTransformedPlaneObjects(plane, matrix, 5.8, scalarConstraints.length > 1)
+              : createPlaneObjects(plane, 5.8, scalarConstraints.length > 1);
+          objects.forEach((object) => refs.vectorScalarGroup.add(object));
+        });
+      }
+    }
 
     const activeVectorItem = vectorsRef.current.find(
       (item) => item.id === activeVectorIdRef.current && item.visible !== false && !item.scalarEnabled
@@ -3886,13 +4258,21 @@ export default function App() {
       const isActiveVector = vectorItem.id === activeVectorIdRef.current;
       const baseLengthSquared = userVector.lengthSq();
       const activeLengthSquared = activeVectorWorld?.lengthSq() ?? 0;
+      const scalarSpace = vectorItem.scalarSpace === 'input' ? 'input' : 'output';
+      const scalarNormal = scalarSpace === 'input'
+        ? new THREE.Vector3(renderValues[0], renderValues[1], renderValues[2])
+        : userVector;
+      const scalarBaseLengthSquared = scalarNormal.lengthSq();
       const scalarValue = hasScalarText(vectorItem.scalar)
         ? parseNumber(vectorItem.scalar)
-        : baseLengthSquared;
-      const scalarAnchor =
-        baseLengthSquared > EPSILON
-          ? userVector.clone().multiplyScalar(scalarValue / baseLengthSquared)
+        : scalarBaseLengthSquared;
+      const scalarAnchorInput =
+        scalarBaseLengthSquared > EPSILON
+          ? scalarNormal.clone().multiplyScalar(scalarValue / scalarBaseLengthSquared)
           : new THREE.Vector3(0, 0, 0);
+      const scalarAnchor = scalarSpace === 'input'
+        ? new THREE.Vector3(...transformVector3(matrix, [scalarAnchorInput.x, scalarAnchorInput.y, scalarAnchorInput.z]))
+        : scalarAnchorInput;
       const projection =
         activeVectorWorld && baseLengthSquared > EPSILON
           ? userVector.clone().multiplyScalar(activeVectorWorld.dot(userVector) / baseLengthSquared)
@@ -3927,7 +4307,7 @@ export default function App() {
           ? scalarAnchor.clone()
           : new THREE.Vector3(vx * 1.06, vy * 1.06, vz * 1.06),
         scalarEnabled
-          ? `A${vectorItem.name}·x = ${formatNumber(scalarValue)}`
+          ? `${scalarSpace === 'input' ? '' : 'A'}${vectorItem.name}·x = ${formatNumber(scalarValue)}`
           : `${vectorItem.name}′${coordinatesVisible ? ` ${formatCoord([vx, vy, vz], coordMode)}` : ''}`,
         vectorLabelsVisible && vectorVisible,
         scalarEnabled ? [0, -20] : [0, -18],
@@ -3958,7 +4338,7 @@ export default function App() {
       if (dotLabel) dotLabel.style.display = 'none';
     });
 
-    const scalarSolution = scalarSolutionRef.current;
+    const scalarSolution = frameScalarSolution ?? scalarSolutionRef.current;
     const scalarSolutionVisible = !!scalarSolution && uiStateRef.current.showVector && !isSystemMode;
     const scalarSolutionVector = scalarSolution
       ? new THREE.Vector3(scalarSolution[0], scalarSolution[1], scalarSolution[2])
@@ -3972,7 +4352,7 @@ export default function App() {
       scalarSolutionVector,
       scalarSolution ? `${t(locale, 'solution')} x = ${formatCoord(scalarSolution, coordMode)}` : '',
       scalarSolutionVisible && labelsVisible,
-      [0, -30],
+      [30, -10],
       { allowOrigin: true }
     );
 
@@ -4025,6 +4405,7 @@ export default function App() {
       [10, -18],
       { keepNameWhenCoordinatesHidden: true }
     );
+    resolveSceneLabelOverlaps(containerRef.current);
     refs.renderer.render(refs.scene, refs.camera);
   }, [locale, updateLabel]);
 
@@ -4053,7 +4434,7 @@ export default function App() {
     controls.enableDamping = true;
     controls.dampingFactor = 0.06;
     controls.target.copy(initialCameraTargetRef.current);
-    configureControlsForView(controls, '3d', cameraLockedRef.current);
+    configureControlsForView(controls, '3d', controlLocksFromRefs());
     controls.update();
     const handleControlsStart = () => {
       cameraMoveRef.current.active = false;
@@ -4444,6 +4825,79 @@ export default function App() {
       renderer.domElement.style.cursor = value;
     };
 
+    const projectDragPoint = (vector) => {
+      const projected = vector.clone().project(camera);
+      if (projected.z > 1 || projected.z < -1) return null;
+      return {
+        x: (projected.x * 0.5 + 0.5) * renderer.domElement.clientWidth,
+        y: (projected.y * -0.5 + 0.5) * renderer.domElement.clientHeight,
+      };
+    };
+
+    const updateDragSnapGuide = (rawWorld, snappedWorld, mode) => {
+      const distance = rawWorld.distanceTo(snappedWorld);
+      if (distance <= 0.002) {
+        setDragSnapGuide(null);
+        return;
+      }
+      const rawPoint = projectDragPoint(rawWorld);
+      const snappedPoint = projectDragPoint(snappedWorld);
+      if (!rawPoint || !snappedPoint) {
+        setDragSnapGuide(null);
+        return;
+      }
+      const label = snapGuideLabelForVectors(rawWorld, snappedWorld, mode);
+      setDragSnapGuide({
+        x1: rawPoint.x,
+        y1: rawPoint.y,
+        x2: snappedPoint.x,
+        y2: snappedPoint.y,
+        label,
+      });
+    };
+
+    const distanceToScreenLine = (point, start, end) => {
+      const vx = end.x - start.x;
+      const vy = end.y - start.y;
+      const wx = point.x - start.x;
+      const wy = point.y - start.y;
+      const lengthSquared = vx * vx + vy * vy;
+      if (lengthSquared < EPSILON) return Infinity;
+      return Math.abs(vx * wy - vy * wx) / Math.sqrt(lengthSquared);
+    };
+
+    const shiftAxisLockedWorld = (rawWorld, mode) => {
+      if (mode === '1d') {
+        return new THREE.Vector3(rawWorld.x, 0, 0);
+      }
+
+      const rawPoint = projectDragPoint(rawWorld);
+      const originPoint = projectDragPoint(new THREE.Vector3(0, 0, 0));
+      if (!rawPoint || !originPoint) return null;
+
+      const axisItems = [
+        { key: 'x', axis: new THREE.Vector3(1, 0, 0) },
+        { key: 'y', axis: new THREE.Vector3(0, 1, 0) },
+        ...(mode === '3d' ? [{ key: 'z', axis: new THREE.Vector3(0, 0, 1) }] : []),
+      ];
+
+      let best = null;
+      axisItems.forEach((item) => {
+        const plus = projectDragPoint(item.axis.clone().multiplyScalar(8));
+        const minus = projectDragPoint(item.axis.clone().multiplyScalar(-8));
+        const start = minus ?? originPoint;
+        const end = plus ?? originPoint;
+        if (!plus && !minus) return;
+        const distance = distanceToScreenLine(rawPoint, start, end);
+        if (!best || distance < best.distance) {
+          best = { ...item, distance };
+        }
+      });
+
+      if (!best || best.distance > SHIFT_AXIS_LOCK_PX) return null;
+      return best.axis.multiplyScalar(rawWorld.dot(best.axis));
+    };
+
     const setHoveredDragKey = (key, isDragging = false) => {
       arrowDragRef.current.hovered = key;
       container.querySelectorAll('[data-drag-key]').forEach((label) => {
@@ -4472,13 +4926,19 @@ export default function App() {
       if (scalarId) {
         const sourceVector = vectorsRef.current.find((item) => item.id === scalarId);
         if (!sourceVector) return new THREE.Vector3(0, 0, 0);
-        const normal = new THREE.Vector3(...transformVector3(matrix, sourceVector.values));
+        const scalarSpace = sourceVector.scalarSpace === 'input' ? 'input' : 'output';
+        const normal = scalarSpace === 'input'
+          ? new THREE.Vector3(...sourceVector.values)
+          : new THREE.Vector3(...transformVector3(matrix, sourceVector.values));
         const lengthSquared = normal.lengthSq();
         if (lengthSquared < EPSILON) return new THREE.Vector3(0, 0, 0);
         const scalarValue = hasScalarText(sourceVector.scalar)
           ? parseNumber(sourceVector.scalar)
           : lengthSquared;
-        return normal.multiplyScalar(scalarValue / lengthSquared);
+        const anchor = normal.multiplyScalar(scalarValue / lengthSquared);
+        return scalarSpace === 'input'
+          ? new THREE.Vector3(...transformVector3(matrix, [anchor.x, anchor.y, anchor.z]))
+          : anchor;
       }
       const vectorId = vectorIdFromDragKey(key);
       const sourceVector =
@@ -4518,19 +4978,34 @@ export default function App() {
           .addScaledVector(dragState.screenRight, dx)
           .addScaledVector(dragState.screenDown, dy);
         const mode = viewKeyForMatrix(currentMatrixRef.current);
-        const snappedWorld = constrainVectorForMode(nextWorld, mode);
+        const snapEnabled = dragSnapEnabledRef.current;
+        const shiftLockedWorld =
+          event.shiftKey && !scalarIdFromDragKey(dragState.key)
+            ? shiftAxisLockedWorld(nextWorld, mode)
+            : null;
+        const dragWorld = shiftLockedWorld ?? nextWorld;
+        const snappedWorld = constrainVectorForMode(
+          dragWorld,
+          mode,
+          snapEnabled ? { drag: true } : { snap: false }
+        );
         let adjustedWorld = snappedWorld;
         if (scalarIdFromDragKey(dragState.key)) {
           adjustedWorld =
-            dragActionsRef.current.updateScalarConstraintFromDrag?.(nextWorld, dragState) ?? snappedWorld;
+            dragActionsRef.current.updateScalarConstraintFromDrag?.(dragWorld, dragState) ?? snappedWorld;
         } else if (vectorIdFromDragKey(dragState.key)) {
           adjustedWorld =
-            dragActionsRef.current.updateUserVectorFromDrag?.(nextWorld, dragState) ?? snappedWorld;
+            dragActionsRef.current.updateUserVectorFromDrag?.(dragWorld, dragState) ?? snappedWorld;
         } else {
           adjustedWorld =
-            dragActionsRef.current.updateBasisVectorFromDrag?.(dragState.key, nextWorld) ?? snappedWorld;
+            dragActionsRef.current.updateBasisVectorFromDrag?.(dragState.key, dragWorld) ?? snappedWorld;
         }
         dragState.snapped = adjustedWorld.distanceTo(nextWorld) > EPSILON;
+        if ((snapEnabled || shiftLockedWorld) && dragState.snapped && !scalarIdFromDragKey(dragState.key)) {
+          updateDragSnapGuide(nextWorld, adjustedWorld, mode);
+        } else {
+          setDragSnapGuide(null);
+        }
         setHoveredDragKey(dragState.key, true);
         return;
       }
@@ -4541,6 +5016,7 @@ export default function App() {
       if (arrowDragRef.current.hovered !== nextHovered) {
         setHoveredDragKey(nextHovered);
       }
+      setDragSnapGuide(null);
     };
 
     const handleArrowPointerDown = (event) => {
@@ -4550,6 +5026,7 @@ export default function App() {
       if (!dragKey) return;
       event.preventDefault();
       event.stopPropagation();
+      setDragSnapGuide(null);
       cameraMoveRef.current.active = false;
       isAnimatingRef.current = false;
       setActiveView(null);
@@ -4565,9 +5042,17 @@ export default function App() {
       const startInputVector =
         vectorsRef.current.find((item) => item.id === draggedAnyVectorId)?.values ??
         userVectorRef.current;
+      const draggedScalarSpace =
+        draggedScalarId
+          ? vectorsRef.current.find((item) => item.id === draggedScalarId)?.scalarSpace ?? 'input'
+          : null;
       const scalarNormal =
         draggedScalarId
-          ? new THREE.Vector3(...transformVector3(currentMatrixRef.current, startInputVector))
+          ? (
+              draggedScalarSpace === 'input'
+                ? new THREE.Vector3(...startInputVector)
+                : new THREE.Vector3(...transformVector3(currentMatrixRef.current, startInputVector))
+            )
           : null;
       const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(normal.normalize(), startVector);
       const startIntersection = new THREE.Vector3();
@@ -4599,6 +5084,7 @@ export default function App() {
         startInputVector: [...startInputVector],
         startVector: startVector.clone(),
         scalarNormal,
+        scalarSpace: draggedScalarSpace,
         screenDown: downIntersection.sub(startIntersection),
         screenRight: rightIntersection.sub(startIntersection),
         plane,
@@ -4622,11 +5108,13 @@ export default function App() {
       arrowDragRef.current.active = false;
       arrowDragRef.current.key = null;
       arrowDragRef.current.snapped = false;
+      setDragSnapGuide(null);
       setHoveredDragKey(arrowDragRef.current.hovered);
     };
 
     const clearArrowHover = () => {
       if (arrowDragRef.current.active) return;
+      setDragSnapGuide(null);
       setHoveredDragKey(null);
     };
 
@@ -4670,19 +5158,22 @@ export default function App() {
       return;
     }
     setActiveView(viewKey);
+    const destination = refs
+      ? cameraStateForView(viewKey, refs.camera.position, refs.controls.target)
+      : cameraStateForView(viewKey);
     setCameraState({
-      position: cameraVectorToShareArray(preset.position),
-      target: cameraVectorToShareArray(preset.target),
+      position: cameraVectorToShareArray(destination.position),
+      target: cameraVectorToShareArray(destination.target),
     });
     if (!refs) return;
-    configureControlsForView(refs.controls, viewKey, cameraLockedRef.current);
+    configureControlsForView(refs.controls, viewKey, controlLocksFromRefs());
     cameraMoveRef.current = {
       active: true,
       startTime: null,
       positionFrom: refs.camera.position.clone(),
       targetFrom: refs.controls.target.clone(),
-      positionTo: preset.position.clone(),
-      targetTo: preset.target.clone(),
+      positionTo: destination.position,
+      targetTo: destination.target,
     };
   }, []);
 
@@ -4958,6 +5449,7 @@ export default function App() {
       z: item.z,
       scalar: item.scalar,
       scalarEnabled: !!item.scalarEnabled,
+      scalarSpace: item.scalarSpace === 'input' ? 'input' : 'output',
       visible: item.visible !== false,
     })),
     showVolume,
@@ -4968,6 +5460,7 @@ export default function App() {
     showCoordinates,
     showDot,
     showAxes,
+    snapToInteger,
     camera: cameraState,
   }), [
     cameraState,
@@ -4984,6 +5477,7 @@ export default function App() {
     showRelativeGrid,
     showVector,
     showVolume,
+    snapToInteger,
     vectors,
     workspaceMode,
   ]);
@@ -5089,6 +5583,7 @@ export default function App() {
     setBasisVisibility({ i: true, j: true, k: true });
     setShowDot(false);
     setShowAxes(true);
+    setSnapToInteger(true);
     setMeasureMode(null);
     setMeasureDraft([]);
     setMeasurements([]);
@@ -5175,16 +5670,42 @@ export default function App() {
                   </button>
                 );
               })}
-              <button
-                aria-pressed={cameraLocked}
-                className={`camera-lock-button ${cameraLocked ? 'active' : ''}`}
-                onClick={() => setCameraLocked((value) => !value)}
-                title={cameraLocked ? t(locale, 'cameraUnlock') : t(locale, 'cameraLock')}
-                type="button"
-              >
-                <Lock size={13} />
-                <span>{cameraLocked ? t(locale, 'locked') : t(locale, 'lock')}</span>
-              </button>
+              <div className="camera-lock-group" aria-label={t(locale, 'lockControls')}>
+                <button
+                  aria-pressed={allLocked}
+                  className={`camera-lock-button ${allLocked ? 'active' : ''}`}
+                  onClick={() => {
+                    const next = !allLocked;
+                    setCameraLocked(next);
+                    setZoomLocked(next);
+                  }}
+                  title={allLocked ? t(locale, 'unlockAllTitle') : t(locale, 'lockAllTitle')}
+                  type="button"
+                >
+                  <Lock size={13} />
+                  <span>{t(locale, 'lockAll')}</span>
+                </button>
+                <button
+                  aria-pressed={zoomLocked}
+                  className={`camera-lock-button ${zoomLocked ? 'active' : ''}`}
+                  onClick={() => setZoomLocked((value) => !value)}
+                  title={zoomLocked ? t(locale, 'unlockZoomTitle') : t(locale, 'lockZoomTitle')}
+                  type="button"
+                >
+                  <ZoomIn size={13} />
+                  <span>{t(locale, 'lockZoom')}</span>
+                </button>
+                <button
+                  aria-pressed={cameraLocked}
+                  className={`camera-lock-button ${cameraLocked ? 'active' : ''}`}
+                  onClick={() => setCameraLocked((value) => !value)}
+                  title={cameraLocked ? t(locale, 'unlockCameraTitle') : t(locale, 'lockCameraTitle')}
+                  type="button"
+                >
+                  <Camera size={13} />
+                  <span>{t(locale, 'lockCamera')}</span>
+                </button>
+              </div>
               {!isSidebarOpen && (
                 <button
                   className="icon-text-button dark panel-open-inline"
@@ -5241,6 +5762,15 @@ export default function App() {
                     />
                     <Braces size={14} />
                     <span>{t(locale, 'coordinates')}</span>
+                  </label>
+                  <label className={snapToInteger ? 'active' : ''} title={t(locale, 'snapDragTitle')}>
+                    <input
+                      checked={snapToInteger}
+                      onChange={(event) => setSnapToInteger(event.target.checked)}
+                      type="checkbox"
+                    />
+                    <Magnet size={14} />
+                    <span>{t(locale, 'snapDrag')}</span>
                   </label>
                 </div>
               </div>
@@ -5428,6 +5958,29 @@ export default function App() {
               />
               <circle cx={measureDraftGuide.x2} cy={measureDraftGuide.y2} r="4" />
             </svg>
+          )}
+          {dragSnapGuide && (
+            <>
+              <svg aria-hidden="true" className="drag-snap-guide">
+                <line
+                  x1={dragSnapGuide.x1}
+                  y1={dragSnapGuide.y1}
+                  x2={dragSnapGuide.x2}
+                  y2={dragSnapGuide.y2}
+                />
+                <circle cx={dragSnapGuide.x2} cy={dragSnapGuide.y2} r="4" />
+              </svg>
+              {dragSnapGuide.label && (
+                <span
+                  className="drag-snap-badge"
+                  style={{
+                    transform: `translate(-50%, -100%) translate(${dragSnapGuide.x2}px, ${dragSnapGuide.y2 - 12}px)`,
+                  }}
+                >
+                  {dragSnapGuide.label}
+                </span>
+              )}
+            </>
           )}
           <span ref={vectorVolumeLabelRef} className="axis-label vector-volume-label">
             {t(locale, 'volume')} = 0
@@ -5967,9 +6520,11 @@ export default function App() {
                     <span>{t(locale, 'fixed')}</span>
                   </div>
                   <div className="basis-compact-card">
-                    {visibleBasisItems.map((item) => (
+                    {visibleBasisItems.map((item) => {
+                      const itemVisible = basisVisibility[item.id] !== false;
+                      return (
                       <div
-                        className="basis-compact-row"
+                        className={`basis-compact-row ${itemVisible ? '' : 'scene-hidden'}`}
                         key={item.id}
                         style={{ '--vector-color': item.colorHex }}
                       >
@@ -5995,6 +6550,15 @@ export default function App() {
                           {formatCompactCoord(item.values, '3d', 1)} · {formatNumber(item.lengthSquared, 1)}
                         </span>
                         <button
+                          aria-label={`${item.name} ${itemVisible ? t(locale, 'hide') : t(locale, 'show')}`}
+                          className={`visibility-toggle-button ${itemVisible ? '' : 'muted'}`}
+                          onClick={() => toggleBasisVisible(item.id)}
+                          title={`${item.name} ${itemVisible ? t(locale, 'hide') : t(locale, 'show')}`}
+                          type="button"
+                        >
+                          {itemVisible ? <Eye size={12} /> : <EyeOff size={12} />}
+                        </button>
+                        <button
                           aria-label={t(locale, 'resetBasisAria', { name: item.name })}
                           className="basis-reset-button"
                           onClick={() => resetBasisVector(item.id)}
@@ -6004,7 +6568,8 @@ export default function App() {
                           <RotateCcw size={12} />
                         </button>
                       </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 </div>
                 {transformedVectorItems.map((item) => {
@@ -6020,43 +6585,17 @@ export default function App() {
                         <div className="vector-chip-wrap">
                           <button
                             className="vector-chip"
+                            aria-pressed={item.visible}
                             onClick={() => {
-                              if (pickMeasureTarget(`v:${item.id}`)) return;
                               setActiveVectorId(item.id);
+                              toggleVectorVisible(item.id);
                             }}
+                            title={`${item.name} ${item.visible ? t(locale, 'hide') : t(locale, 'show')}`}
                             type="button"
                           >
                             <span className="vector-swatch" />
                             {item.name}
                           </button>
-                          <div className="vector-measure-menu" aria-label={t(locale, 'vectorMeasureMenu', { name: item.name })}>
-                            <button
-                              className={measureMode === 'dot' && measureDraft.includes(`v:${item.id}`) ? 'active' : ''}
-                              onClick={(event) => {
-                                event.preventDefault();
-                                event.stopPropagation();
-                                startMeasurementFrom('dot', `v:${item.id}`);
-                              }}
-                              title={t(locale, 'dotStartTitle', { name: item.name })}
-                              type="button"
-                            >
-                              <Sigma size={11} />
-                              <span>{t(locale, 'dot')}</span>
-                            </button>
-                            <button
-                              className={measureMode === 'volume' && measureDraft.includes(`v:${item.id}`) ? 'active' : ''}
-                              onClick={(event) => {
-                                event.preventDefault();
-                                event.stopPropagation();
-                                startMeasurementFrom('volume', `v:${item.id}`);
-                              }}
-                              title={t(locale, 'volumeStartTitle', { name: item.name })}
-                              type="button"
-                            >
-                              <Box size={11} />
-                              <span>{displayMode === '3d' ? t(locale, 'volume') : t(locale, 'area')}</span>
-                            </button>
-                          </div>
                         </div>
                         <div className={`vector-inline-inputs mode-${displayMode} has-scalar ${item.scalarEnabled ? '' : 'scalar-off'}`}>
                           {axes.map((axis) => (
@@ -6093,6 +6632,15 @@ export default function App() {
                           <span>{t(locale, 'scalar')}</span>
                         </label>
                         <button
+                          aria-label={`${item.name} ${item.visible ? t(locale, 'hide') : t(locale, 'show')}`}
+                          className={`visibility-toggle-button ${item.visible ? '' : 'muted'}`}
+                          onClick={() => toggleVectorVisible(item.id)}
+                          title={`${item.name} ${item.visible ? t(locale, 'hide') : t(locale, 'show')}`}
+                          type="button"
+                        >
+                          {item.visible ? <Eye size={12} /> : <EyeOff size={12} />}
+                        </button>
+                        <button
                           className="line-remove"
                           onClick={() => removeVector(item.id)}
                           title={t(locale, 'vectorDelete')}
@@ -6120,11 +6668,29 @@ export default function App() {
                           onChange={(event) => updateVectorScalar(item.id, event.target.value)}
                         />
                         <span className="scalar-equation">
-                          A{item.name} · x =
+                          {item.scalarSpace === 'input' ? '' : 'A'}{item.name} · x =
                         </span>
                         <span className="scalar-auto">
                           {item.scalarAuto ? `${t(locale, 'auto')} ${formatNumber(item.scalarResolved)}` : formatNumber(item.scalarResolved)}
                         </span>
+                        <div className="scalar-space-toggle" aria-label={t(locale, 'scalarSpace')}>
+                          <button
+                            className={item.scalarSpace === 'input' ? 'active' : ''}
+                            onClick={() => updateVectorScalarSpace(item.id, 'input')}
+                            title={t(locale, 'scalarInputTitle')}
+                            type="button"
+                          >
+                            {t(locale, 'inputSpaceShort')}
+                          </button>
+                          <button
+                            className={item.scalarSpace === 'output' ? 'active' : ''}
+                            onClick={() => updateVectorScalarSpace(item.id, 'output')}
+                            title={t(locale, 'scalarOutputTitle')}
+                            type="button"
+                          >
+                            {t(locale, 'outputSpaceShort')}
+                          </button>
+                        </div>
                         <input
                           aria-label={t(locale, 'scalarDrag', { name: item.name })}
                           className="scalar-slider"
@@ -6324,9 +6890,9 @@ export default function App() {
         type="button"
       />
       <aside
-        aria-expanded={isTimelineExpanded}
+        aria-expanded="true"
         aria-label={t(locale, 'spaceTimeline')}
-        className={`timeline-drawer ${isTimelineExpanded ? 'open' : ''} ${isTimelinePinned ? 'pinned' : ''}`}
+        className="timeline-drawer open pinned"
       >
         <div className="timeline-drawer-head">
           <button
