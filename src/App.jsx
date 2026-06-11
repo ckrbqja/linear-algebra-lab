@@ -28,12 +28,19 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import {
   EPSILON,
   determinant3,
+  determinantN,
   identity3,
+  identity4,
   inverse3,
+  inverseN,
+  matrixDimension,
   multiplyMatrix3,
+  multiplyMatrixN,
   parseNumber,
   rank3,
+  rankN,
   transformVector3,
+  transformVectorN,
 } from './linearAlgebra.js';
 import { managedLocaleMessages, managedPresetLocaleNames } from './i18n.js';
 
@@ -69,6 +76,11 @@ const CAMERA_HOME_POSITION = new THREE.Vector3(5.25, 4.05, 6.45);
 const CAMERA_HOME_TARGET = new THREE.Vector3(0.35, 0.35, 0.35);
 
 const viewPresets = {
+  '4d': {
+    labelKey: 'view4d',
+    position: CAMERA_HOME_POSITION,
+    target: CAMERA_HOME_TARGET,
+  },
   '3d': {
     labelKey: 'view3d',
     position: CAMERA_HOME_POSITION,
@@ -113,6 +125,16 @@ const localeMessages = Object.fromEntries(
   ])
 );
 const localeOrder = ['ko', 'en', 'ja', 'zh'];
+const axisNames = ['x', 'y', 'z', 'w'];
+const basisDefinitions = [
+  { id: 'i', name: 'i′', color: 0xe05263 },
+  { id: 'j', name: 'j′', color: 0x1f9d55 },
+  { id: 'k', name: 'k′', color: 0x3f7ee8 },
+  { id: 'l', name: 'l′', color: 0xff8a3d },
+];
+const basisIndexById = Object.fromEntries(basisDefinitions.map((basis, index) => [basis.id, index]));
+const basisById = Object.fromEntries(basisDefinitions.map((basis) => [basis.id, basis]));
+const wProjectionVector = new THREE.Vector3(0.58, 0.32, 0.46);
 
 const presetLocaleNames = Object.fromEntries(
   Object.entries(managedPresetLocaleNames).map(([localeKey, messages]) => [
@@ -120,6 +142,60 @@ const presetLocaleNames = Object.fromEntries(
     { ...messages },
   ])
 );
+
+const fourDLocaleMessages = {
+  ko: { view4d: '4D 시점' },
+  en: { view4d: '4D view' },
+  ja: { view4d: '4D視点' },
+  zh: { view4d: '4D 视角' },
+};
+
+const fourDPresetLocaleNames = {
+  ko: {
+    '4d-identity': '단위 행렬',
+    '4d-rotate-xw': 'X-W 90도 회전',
+    '4d-rotate-yw': 'Y-W 90도 회전',
+    '4d-rotate-zw': 'Z-W 90도 회전',
+    '4d-scale-up': '1.5배 확대',
+    '4d-compress-w': 'W 압축',
+    '4d-project-xyz': 'XYZ 사영',
+  },
+  en: {
+    '4d-identity': 'Identity matrix',
+    '4d-rotate-xw': 'Rotate X-W 90°',
+    '4d-rotate-yw': 'Rotate Y-W 90°',
+    '4d-rotate-zw': 'Rotate Z-W 90°',
+    '4d-scale-up': 'Scale 1.5x',
+    '4d-compress-w': 'Compress W',
+    '4d-project-xyz': 'Project to XYZ',
+  },
+  ja: {
+    '4d-identity': '単位行列',
+    '4d-rotate-xw': 'X-W 90度回転',
+    '4d-rotate-yw': 'Y-W 90度回転',
+    '4d-rotate-zw': 'Z-W 90度回転',
+    '4d-scale-up': '1.5倍拡大',
+    '4d-compress-w': 'W圧縮',
+    '4d-project-xyz': 'XYZ射影',
+  },
+  zh: {
+    '4d-identity': '单位矩阵',
+    '4d-rotate-xw': 'X-W 90度旋转',
+    '4d-rotate-yw': 'Y-W 90度旋转',
+    '4d-rotate-zw': 'Z-W 90度旋转',
+    '4d-scale-up': '放大 1.5 倍',
+    '4d-compress-w': '压缩 W',
+    '4d-project-xyz': '投影到 XYZ',
+  },
+};
+
+Object.entries(fourDLocaleMessages).forEach(([localeKey, messages]) => {
+  localeMessages[localeKey] = { ...localeMessages[localeKey], ...messages };
+});
+
+Object.entries(fourDPresetLocaleNames).forEach(([localeKey, messages]) => {
+  presetLocaleNames[localeKey] = { ...presetLocaleNames[localeKey], ...messages };
+});
 
 function normalizeLocale(value) {
   const raw = String(value ?? '').toLowerCase();
@@ -227,6 +303,7 @@ function readSharedStateFromUrl() {
           x: String(item.x ?? '0'),
           y: String(item.y ?? '0'),
           z: String(item.z ?? '0'),
+          w: String(item.w ?? '0'),
           scalar: String(item.scalar ?? ''),
           scalarEnabled: !!item.scalarEnabled,
           scalarSpace: item.scalarSpace === 'output' ? 'output' : 'input',
@@ -238,8 +315,9 @@ function readSharedStateFromUrl() {
   return {
     locale: normalizeLocale(decoded.locale),
     workspaceMode: decoded.workspaceMode === 'system' ? 'system' : 'transform',
-    inputMode: ['3d', '2d', '1d'].includes(decoded.inputMode) ? decoded.inputMode : '3d',
-    displayMatrix: arrayOfNumbers(decoded.displayMatrix, identity3, 9),
+    inputMode: ['4d', '3d', '2d', '1d'].includes(decoded.inputMode) ? decoded.inputMode : '3d',
+    displayMatrix: arrayOfNumbers(decoded.displayMatrix, decoded.displayMatrix?.length === 16 ? identity4 : identity3, decoded.displayMatrix?.length === 16 ? 16 : 9),
+    matrix4: arrayOfStrings(decoded.matrix4, ['1', '0', '0', '0', '0', '1', '0', '0', '0', '0', '1', '0', '0', '0', '0', '1'], 16),
     matrix3: arrayOfStrings(decoded.matrix3, ['1', '0', '0', '0', '1', '0', '0', '0', '1'], 9),
     matrix2: arrayOfStrings(decoded.matrix2, ['1', '0', '0', '1'], 4),
     matrix1: arrayOfStrings(decoded.matrix1, ['1'], 1),
@@ -430,6 +508,15 @@ function resolveSceneLabelOverlaps(container) {
 }
 
 const matrixPresetGroups = {
+  '4d': [
+    { id: '4d-identity', name: 'Identity matrix', matrix: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1], mode: '4d' },
+    { id: '4d-rotate-xw', name: 'Rotate X-W 90', matrix: [0, 0, 0, -1, 0, 1, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0], mode: '4d' },
+    { id: '4d-rotate-yw', name: 'Rotate Y-W 90', matrix: [1, 0, 0, 0, 0, 0, 0, -1, 0, 0, 1, 0, 0, 1, 0, 0], mode: '4d' },
+    { id: '4d-rotate-zw', name: 'Rotate Z-W 90', matrix: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, -1, 0, 0, 1, 0], mode: '4d' },
+    { id: '4d-scale-up', name: 'Scale 1.5x', matrix: [1.5, 0, 0, 0, 0, 1.5, 0, 0, 0, 0, 1.5, 0, 0, 0, 0, 1.5], mode: '4d' },
+    { id: '4d-compress-w', name: 'Compress W', matrix: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0.35], mode: '4d' },
+    { id: '4d-project-xyz', name: 'Project to XYZ', matrix: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0], mode: '4d' },
+  ],
   '3d': [
     { id: '3d-identity', name: 'Identity matrix', matrix: [1, 0, 0, 0, 1, 0, 0, 0, 1], mode: '3d' },
     { id: '3d-rotate-x', name: 'Rotate X 90', matrix: [1, 0, 0, 0, 0, -1, 0, 1, 0], mode: '3d' },
@@ -692,6 +779,20 @@ function disposeVectorVisual(scene, visual) {
 }
 
 function toMatrix4(m) {
+  if (m.length === 16) {
+    const columns = [0, 1, 2].map((column) => projectVectorToScene([
+      m[column] ?? 0,
+      m[4 + column] ?? 0,
+      m[8 + column] ?? 0,
+      m[12 + column] ?? 0,
+    ]));
+    return new THREE.Matrix4().set(
+      columns[0].x, columns[1].x, columns[2].x, 0,
+      columns[0].y, columns[1].y, columns[2].y, 0,
+      columns[0].z, columns[1].z, columns[2].z, 0,
+      0, 0, 0, 1
+    );
+  }
   return new THREE.Matrix4().set(
     m[0], m[1], m[2], 0,
     m[3], m[4], m[5], 0,
@@ -745,12 +846,12 @@ function shortNumber(value) {
 }
 
 function formatCoord(values, mode = '3d') {
-  const size = mode === '1d' ? 1 : mode === '2d' ? 2 : 3;
+  const size = mode === '1d' ? 1 : mode === '2d' ? 2 : mode === '4d' ? 4 : 3;
   return `(${values.slice(0, size).map((value) => formatMatrixNumber(value, 2)).join(', ')})`;
 }
 
 function formatCompactCoord(values, mode = '3d', digits = 1) {
-  const size = mode === '1d' ? 1 : mode === '2d' ? 2 : 3;
+  const size = mode === '1d' ? 1 : mode === '2d' ? 2 : mode === '4d' ? 4 : 3;
   return `(${values.slice(0, size).map((value) => formatMatrixNumber(value, digits)).join(', ')})`;
 }
 
@@ -760,6 +861,42 @@ function dotValues(a, b) {
 
 function vectorLength(values) {
   return Math.sqrt(dotValues(values, values));
+}
+
+function vectorForMode(values, mode = '3d') {
+  const size = mode === '1d' ? 1 : mode === '2d' ? 2 : mode === '4d' ? 4 : 3;
+  return Array.from({ length: size }, (_, index) => values[index] ?? 0);
+}
+
+function axesForMode(mode = '3d') {
+  return axisNames.slice(0, dimensionForMode(mode));
+}
+
+function basisNameForId(id) {
+  return basisById[id]?.name ?? id;
+}
+
+function projectVectorToScene(values) {
+  const [x = 0, y = 0, z = 0, w = 0] = values;
+  return new THREE.Vector3(
+    x + wProjectionVector.x * w,
+    y + wProjectionVector.y * w,
+    z + wProjectionVector.z * w
+  );
+}
+
+function transformVectorForMatrix(matrix, values) {
+  const size = matrixDimension(matrix);
+  return transformVectorN(matrix, vectorForMode(values, modeForDimension(size)), size);
+}
+
+function basisColumnValues(matrix, column) {
+  const size = matrixDimension(matrix);
+  return Array.from({ length: size }, (_, row) => matrix[row * size + column] ?? 0);
+}
+
+function basisColumnSceneVector(matrix, column) {
+  return projectVectorToScene(basisColumnValues(matrix, column));
 }
 
 function crossLengthValues(a, b) {
@@ -779,11 +916,10 @@ function determinantFromColumns(a, b, c) {
 }
 
 function independentBasisKeysForMatrix(matrix) {
-  const candidates = [
-    ['i', [matrix[0], matrix[3], matrix[6]]],
-    ['j', [matrix[1], matrix[4], matrix[7]]],
-    ['k', [matrix[2], matrix[5], matrix[8]]],
-  ];
+  const candidates = basisDefinitions.map((basis, column) => [
+    basis.id,
+    projectVectorToScene(basisColumnValues(matrix, column)).toArray(),
+  ]);
   const selected = [];
   const keys = new Set();
 
@@ -919,8 +1055,9 @@ function snapGuideLabelForVectors(rawVector, snappedVector, mode) {
 
 function solveVectorInputForWorld(matrix, worldVector, mode, options = {}) {
   const { snap = true } = options;
+  const ambientDimension = matrixDimension(matrix);
 
-  if (mode === '2d') {
+  if (mode === '2d' && ambientDimension < 4) {
     const [a, b, c, d] = [matrix[0], matrix[1], matrix[3], matrix[4]];
     const det = a * d - b * c;
     if (Math.abs(det) > EPSILON) {
@@ -936,7 +1073,7 @@ function solveVectorInputForWorld(matrix, worldVector, mode, options = {}) {
     }
   }
 
-  if (mode === '1d') {
+  if (mode === '1d' && ambientDimension < 4) {
     const axis = new THREE.Vector3(matrix[0], matrix[3], matrix[6]);
     const lengthSquared = axis.lengthSq();
     if (lengthSquared > EPSILON) {
@@ -948,22 +1085,28 @@ function solveVectorInputForWorld(matrix, worldVector, mode, options = {}) {
     }
   }
 
+  const columns = [0, 1, 2].map((column) => (
+    ambientDimension >= 4
+      ? basisColumnSceneVector(matrix, column)
+      : new THREE.Vector3(matrix[column] ?? 0, matrix[3 + column] ?? 0, matrix[6 + column] ?? 0)
+  ));
+  const world = new THREE.Vector3(worldVector.x, worldVector.y, worldVector.z);
   const lambda = 1e-5;
   const ata = [
-    matrix[0] * matrix[0] + matrix[3] * matrix[3] + matrix[6] * matrix[6] + lambda,
-    matrix[0] * matrix[1] + matrix[3] * matrix[4] + matrix[6] * matrix[7],
-    matrix[0] * matrix[2] + matrix[3] * matrix[5] + matrix[6] * matrix[8],
-    matrix[1] * matrix[0] + matrix[4] * matrix[3] + matrix[7] * matrix[6],
-    matrix[1] * matrix[1] + matrix[4] * matrix[4] + matrix[7] * matrix[7] + lambda,
-    matrix[1] * matrix[2] + matrix[4] * matrix[5] + matrix[7] * matrix[8],
-    matrix[2] * matrix[0] + matrix[5] * matrix[3] + matrix[8] * matrix[6],
-    matrix[2] * matrix[1] + matrix[5] * matrix[4] + matrix[8] * matrix[7],
-    matrix[2] * matrix[2] + matrix[5] * matrix[5] + matrix[8] * matrix[8] + lambda,
+    columns[0].dot(columns[0]) + lambda,
+    columns[0].dot(columns[1]),
+    columns[0].dot(columns[2]),
+    columns[1].dot(columns[0]),
+    columns[1].dot(columns[1]) + lambda,
+    columns[1].dot(columns[2]),
+    columns[2].dot(columns[0]),
+    columns[2].dot(columns[1]),
+    columns[2].dot(columns[2]) + lambda,
   ];
   const atb = [
-    matrix[0] * worldVector.x + matrix[3] * worldVector.y + matrix[6] * worldVector.z,
-    matrix[1] * worldVector.x + matrix[4] * worldVector.y + matrix[7] * worldVector.z,
-    matrix[2] * worldVector.x + matrix[5] * worldVector.y + matrix[8] * worldVector.z,
+    columns[0].dot(world),
+    columns[1].dot(world),
+    columns[2].dot(world),
   ];
   const inverse = inverse3(ata);
   const solved = inverse ? transformVector3(inverse, atb) : [worldVector.x, worldVector.y, worldVector.z];
@@ -971,7 +1114,9 @@ function solveVectorInputForWorld(matrix, worldVector, mode, options = {}) {
 }
 
 function viewKeyForMatrix(matrix) {
-  const matrixRank = rank3(matrix);
+  const ambientDimension = matrixDimension(matrix);
+  const matrixRank = rankN(matrix, ambientDimension);
+  if (ambientDimension >= 4 && matrixRank > 3) return '4d';
   if (matrixRank <= 1) return '1d';
   if (matrixRank === 2) return '2d';
   return '3d';
@@ -1019,6 +1164,25 @@ function solveScalarConstraintPoint(constraints, mode) {
     return null;
   }
 
+  if (mode === '4d') {
+    const usable = constraints.filter((constraint) => vectorLength(vectorForMode(constraint.normal, '4d')) > EPSILON);
+    for (let aIndex = 0; aIndex < usable.length; aIndex += 1) {
+      for (let bIndex = aIndex + 1; bIndex < usable.length; bIndex += 1) {
+        for (let cIndex = bIndex + 1; cIndex < usable.length; cIndex += 1) {
+          for (let dIndex = cIndex + 1; dIndex < usable.length; dIndex += 1) {
+            const rows = [usable[aIndex], usable[bIndex], usable[cIndex], usable[dIndex]];
+            const matrix = rows.flatMap((constraint) => vectorForMode(constraint.normal, '4d'));
+            const inverse = inverseN(matrix, 4);
+            if (!inverse) continue;
+            const point = transformVectorN(inverse, rows.map((constraint) => constraint.scalar), 4);
+            if (isScalarConstraintSolution(usable, point)) return point;
+          }
+        }
+      }
+    }
+    return null;
+  }
+
   const usable = constraints.filter((constraint) => vectorLength(constraint.normal) > EPSILON);
   for (let aIndex = 0; aIndex < usable.length; aIndex += 1) {
     for (let bIndex = aIndex + 1; bIndex < usable.length; bIndex += 1) {
@@ -1049,23 +1213,32 @@ function modeForMatrix(matrix) {
 function matrixValuesForMode(matrix, mode = '3d') {
   if (mode === '1d') return [matrix[0]];
   if (mode === '2d') return matrix.length === 4 ? matrix : [matrix[0], matrix[1], matrix[3], matrix[4]];
+  if (mode === '4d') return matrix.length === 16 ? matrix : [
+    matrix[0] ?? 0, matrix[1] ?? 0, matrix[2] ?? 0, 0,
+    matrix[3] ?? 0, matrix[4] ?? 0, matrix[5] ?? 0, 0,
+    matrix[6] ?? 0, matrix[7] ?? 0, matrix[8] ?? 0, 0,
+    0, 0, 0, 1,
+  ];
   return matrix;
 }
 
 function dimensionForMode(mode = '3d') {
   if (mode === '1d') return 1;
   if (mode === '2d') return 2;
+  if (mode === '4d') return 4;
   return 3;
 }
 
 function modeForDimension(dimension = 3) {
   if (dimension <= 1) return '1d';
   if (dimension === 2) return '2d';
+  if (dimension >= 4) return '4d';
   return '3d';
 }
 
 function operationMatrixFromPreset(preset) {
   const values = matrixValuesForMode(preset.matrix, preset.mode);
+  if (preset.mode === '4d') return values;
   if (preset.mode === '1d') return [values[0], 0, 0, 0, 0, 0, 0, 0, 0];
   if (preset.mode === '2d') return [values[0], values[1], 0, values[2], values[3], 0, 0, 0, 0];
   return values;
@@ -1073,20 +1246,22 @@ function operationMatrixFromPreset(preset) {
 
 function matrixInputValuesForShape(matrix, rows, columns) {
   const values = [];
+  const stride = Math.max(matrixDimension(matrix), rows, columns);
   for (let row = 0; row < rows; row += 1) {
     for (let column = 0; column < columns; column += 1) {
-      values.push(matrix[row * 3 + column] ?? '0');
+      values.push(matrix[row * stride + column] ?? '0');
     }
   }
   return values;
 }
 
 function patchMatrixInputShape(matrix, rows, columns, values) {
-  const next = [...matrix];
+  const stride = Math.max(matrixDimension(matrix), rows, columns);
+  const next = matrix.length === stride * stride ? [...matrix] : Array.from({ length: stride * stride }, (_, index) => matrix[index] ?? '0');
   let valueIndex = 0;
   for (let row = 0; row < rows; row += 1) {
     for (let column = 0; column < columns; column += 1) {
-      next[row * 3 + column] = values[valueIndex] ?? next[row * 3 + column] ?? '0';
+      next[row * stride + column] = values[valueIndex] ?? next[row * stride + column] ?? '0';
       valueIndex += 1;
     }
   }
@@ -1094,11 +1269,12 @@ function patchMatrixInputShape(matrix, rows, columns, values) {
 }
 
 function operationMatrixFromInputValues(values, rows, columns) {
-  const matrix = Array.from({ length: 9 }, () => 0);
+  const dimension = Math.max(3, rows, columns);
+  const matrix = Array.from({ length: dimension * dimension }, () => 0);
   let valueIndex = 0;
   for (let row = 0; row < rows; row += 1) {
     for (let column = 0; column < columns; column += 1) {
-      matrix[row * 3 + column] = parseNumber(values[valueIndex]);
+      matrix[row * dimension + column] = parseNumber(values[valueIndex]);
       valueIndex += 1;
     }
   }
@@ -1122,6 +1298,7 @@ function inverseForStep(matrix, mode = '3d') {
     return [d / det, -b / det, -c / det, a / det];
   }
 
+  if (mode === '4d') return inverseN(matrixValuesForMode(matrix, '4d'), 4);
   return inverse3(matrix);
 }
 
@@ -1131,6 +1308,7 @@ function determinantForStep(matrix, mode = '3d') {
     const [a, b, c, d] = matrixValuesForMode(matrix, '2d');
     return a * d - b * c;
   }
+  if (mode === '4d') return determinantN(matrixValuesForMode(matrix, '4d'), 4);
   return determinant3(matrix);
 }
 
@@ -1141,6 +1319,7 @@ function rankForStep(matrix, mode = '3d') {
     if (Math.abs(determinantForStep(matrix, '2d')) > EPSILON) return 2;
     return values.some((value) => Math.abs(value) > EPSILON) ? 1 : 0;
   }
+  if (mode === '4d') return rankN(matrixValuesForMode(matrix, '4d'), 4);
   return rank3(matrix);
 }
 
@@ -1176,6 +1355,17 @@ function operationBetweenMatrices(previousMatrix, nextMatrix) {
         isDimensionDrop: false,
         operationMatrix: previousInverse ? multiplyMatrix2(nextValues, previousInverse) : nextValues,
         operationMode: '2d',
+      };
+    }
+
+    if (nextMode === '4d') {
+      const previousValues = matrixValuesForMode(previousMatrix, '4d');
+      const nextValues = matrixValuesForMode(nextMatrix, '4d');
+      const previousInverse = inverseForStep(previousValues, '4d');
+      return {
+        isDimensionDrop: false,
+        operationMatrix: previousInverse ? multiplyMatrixN(nextValues, previousInverse, 4) : nextValues,
+        operationMode: '4d',
       };
     }
 
@@ -1238,6 +1428,7 @@ function createVectorState(index, overrides = {}) {
     x: overrides.x ?? '2',
     y: overrides.y ?? '2',
     z: overrides.z ?? '2',
+    w: overrides.w ?? '0',
     visible: overrides.visible ?? true,
     scalarEnabled: overrides.scalarEnabled ?? false,
     scalar: overrides.scalar ?? '1',
@@ -2275,6 +2466,7 @@ export default function App() {
   const iLabelRef = useRef(null);
   const jLabelRef = useRef(null);
   const kLabelRef = useRef(null);
+  const lLabelRef = useRef(null);
   const scalarSolutionLabelRef = useRef(null);
   const vectorLabelRefs = useRef(new Map());
   const vectorDotLabelRefs = useRef(new Map());
@@ -2292,7 +2484,7 @@ export default function App() {
     startClientX: 0,
     startClientY: 0,
     startIntersection: new THREE.Vector3(),
-    startInputVector: [0, 0, 0],
+    startInputVector: [0, 0, 0, 0],
     startVector: new THREE.Vector3(),
     screenDown: new THREE.Vector3(),
     screenRight: new THREE.Vector3(),
@@ -2338,8 +2530,13 @@ export default function App() {
   const zoomLockedRef = useRef(false);
   const userVectorRef = useRef(
     initialShare.vectors?.[0]
-      ? [parseNumber(initialShare.vectors[0].x), parseNumber(initialShare.vectors[0].y), parseNumber(initialShare.vectors[0].z)]
-      : [2, 2, 2]
+      ? [
+          parseNumber(initialShare.vectors[0].x),
+          parseNumber(initialShare.vectors[0].y),
+          parseNumber(initialShare.vectors[0].z),
+          parseNumber(initialShare.vectors[0].w),
+        ]
+      : [2, 2, 2, 0]
   );
   const vectorsRef = useRef([]);
   const measurementsRef = useRef([]);
@@ -2356,7 +2553,7 @@ export default function App() {
     showVolume: false,
     showVector: true,
     showBasis: true,
-    basisVisibility: { i: true, j: true, k: true },
+    basisVisibility: { i: true, j: true, k: true, l: true },
     showGrid: true,
     showRelativeGrid: true,
     showCoordinates: true,
@@ -2379,6 +2576,7 @@ export default function App() {
   const [inputMode, setInputMode] = useState(initialShare.inputMode ?? '3d');
   const [displayMatrix, setDisplayMatrix] = useState([...(initialShare.displayMatrix ?? identity3)]);
   const [basisControlMatrix, setBasisControlMatrix] = useState([...(initialShare.displayMatrix ?? identity3)]);
+  const [matrix4, setMatrix4] = useState(initialShare.matrix4 ?? ['1', '0', '0', '0', '0', '1', '0', '0', '0', '0', '1', '0', '0', '0', '0', '1']);
   const [matrix3, setMatrix3] = useState(initialShare.matrix3 ?? ['1', '0', '0', '0', '1', '0', '0', '0', '1']);
   const [matrix2, setMatrix2] = useState(initialShare.matrix2 ?? ['1', '0', '0', '1']);
   const [matrix1, setMatrix1] = useState(initialShare.matrix1 ?? ['1']);
@@ -2391,10 +2589,10 @@ export default function App() {
       name: t(initialLocale, 'initialSpace'),
       matrix: [...(initialShare.displayMatrix ?? identity3)],
       previousMatrix: [...(initialShare.displayMatrix ?? identity3)],
-      previousStateMode: '3d',
-      operationMatrix: [...identity3],
-      operationMode: '3d',
-      stateMode: '3d',
+      previousStateMode: modeForMatrix(initialShare.displayMatrix ?? identity3),
+      operationMatrix: [...(matrixDimension(initialShare.displayMatrix ?? identity3) === 4 ? identity4 : identity3)],
+      operationMode: modeForMatrix(initialShare.displayMatrix ?? identity3),
+      stateMode: modeForMatrix(initialShare.displayMatrix ?? identity3),
     },
   ]);
   const [activeHistoryIndex, setActiveHistoryIndex] = useState(0);
@@ -2409,7 +2607,7 @@ export default function App() {
   const [showVolume, setShowVolume] = useState(initialShare.showVolume ?? false);
   const [showVector, setShowVector] = useState(initialShare.showVector ?? true);
   const [showBasis, setShowBasis] = useState(initialShare.showBasis ?? true);
-  const [basisVisibility, setBasisVisibility] = useState({ i: true, j: true, k: true });
+  const [basisVisibility, setBasisVisibility] = useState({ i: true, j: true, k: true, l: true });
   const [showGrid, setShowGrid] = useState(initialShare.showGrid ?? true);
   const [showRelativeGrid, setShowRelativeGrid] = useState(initialShare.showRelativeGrid ?? true);
   const [showCoordinates, setShowCoordinates] = useState(initialShare.showCoordinates ?? true);
@@ -2426,21 +2624,22 @@ export default function App() {
 
   const allLocked = cameraLocked && zoomLocked;
   const displayMode = viewKeyForMatrix(displayMatrix);
-  const inputColumns = dimensionForMode(displayMode);
+  const inputColumns = Math.max(dimensionForMode(displayMode), dimensionForMode(inputMode));
   const outputRows = dimensionForMode(inputMode);
+  const matrixInputSource = inputColumns === 4 || outputRows === 4 ? matrix4 : matrix3;
   const matrixInputValues = useMemo(
-    () => matrixInputValuesForShape(matrix3, outputRows, inputColumns),
-    [inputColumns, matrix3, outputRows]
+    () => matrixInputValuesForShape(matrixInputSource, outputRows, inputColumns),
+    [inputColumns, matrixInputSource, outputRows]
   );
   const visibleMatrixPresets = useMemo(
     () =>
-      inputMode === displayMode
+      outputRows === inputColumns
         ? (matrixPresetGroups[inputMode] ?? matrixPresetGroups['3d']).map((preset) => ({
             ...preset,
             name: presetLocaleNames[locale]?.[preset.id] ?? presetLocaleNames.ko?.[preset.id] ?? preset.name,
           }))
         : [],
-    [displayMode, inputMode, locale]
+    [inputColumns, inputMode, locale, outputRows]
   );
   const activeMatrixPresetId = useMemo(() => {
     const parsed = matrixInputValues.map(parseNumber);
@@ -2479,7 +2678,7 @@ export default function App() {
         ...item,
         visible: item.visible !== false,
         colorHex: colorToHex(item.color),
-        values: [parseNumber(item.x), parseNumber(item.y), parseNumber(item.z)],
+        values: [parseNumber(item.x), parseNumber(item.y), parseNumber(item.z), parseNumber(item.w)],
         scalarValue: parseNumber(item.scalar),
       })),
     [vectors]
@@ -2487,7 +2686,7 @@ export default function App() {
   const transformedVectorItems = useMemo(
     () =>
       vectorItems.map((item) => {
-        const transformed = transformVector3(displayMatrix, item.values);
+        const transformed = transformVectorForMatrix(displayMatrix, item.values);
         const length = vectorLength(transformed);
         const lengthSquared = dotValues(transformed, transformed);
         const scalarSpace = item.scalarSpace === 'input' ? 'input' : 'output';
@@ -2515,24 +2714,21 @@ export default function App() {
     [transformedVectorItems]
   );
   const basisItems = useMemo(() => {
-    const basis = [
-      { id: 'i', name: 'i′', color: 0xe05263, values: [basisControlMatrix[0], basisControlMatrix[3], basisControlMatrix[6]] },
-      { id: 'j', name: 'j′', color: 0x1f9d55, values: [basisControlMatrix[1], basisControlMatrix[4], basisControlMatrix[7]] },
-      { id: 'k', name: 'k′', color: 0x3f7ee8, values: [basisControlMatrix[2], basisControlMatrix[5], basisControlMatrix[8]] },
-    ];
-    return basis.map((item) => ({
+    const size = matrixDimension(basisControlMatrix);
+    return basisDefinitions.slice(0, size).map((item, column) => ({
       ...item,
+      values: basisColumnValues(basisControlMatrix, column),
       colorHex: colorToHex(item.color),
-      length: vectorLength(item.values),
-      lengthSquared: dotValues(item.values, item.values),
-      enabled: vectorLength(item.values) > EPSILON,
+      length: vectorLength(basisColumnValues(basisControlMatrix, column)),
+      lengthSquared: dotValues(basisColumnValues(basisControlMatrix, column), basisColumnValues(basisControlMatrix, column)),
+      enabled: vectorLength(basisColumnValues(basisControlMatrix, column)) > EPSILON,
     }));
   }, [basisControlMatrix]);
   const visibleBasisItems = useMemo(
     () => basisItems.filter((item) => item.enabled),
     [basisItems]
   );
-  const currentRank = useMemo(() => rank3(displayMatrix), [displayMatrix]);
+  const currentRank = useMemo(() => rankN(displayMatrix, matrixDimension(displayMatrix)), [displayMatrix]);
   const vectorDotPairs = useMemo(() => {
     const pairs = [];
     for (let rowIndex = 0; rowIndex < dotVectorItems.length; rowIndex += 1) {
@@ -2556,8 +2752,8 @@ export default function App() {
   const vectorVolumeMeasure = useMemo(() => {
     if (dotVectorItems.length < 2) return null;
     const [first, second, third] = dotVectorItems;
-    const a = new THREE.Vector3(...first.transformed);
-    const b = new THREE.Vector3(...second.transformed);
+    const a = projectVectorToScene(first.transformed);
+    const b = projectVectorToScene(second.transformed);
     const area = a.clone().cross(b).length();
     if (!third) {
       return {
@@ -2566,7 +2762,7 @@ export default function App() {
         value: area,
       };
     }
-    const c = new THREE.Vector3(...third.transformed);
+    const c = projectVectorToScene(third.transformed);
     return {
       type: 'volume',
       names: [first.name, second.name, third.name],
@@ -2605,10 +2801,10 @@ export default function App() {
         if (item.type === 'dot' && targets.length >= 2) {
           value = dotValues(targets[0].values, targets[1].values);
         } else if (item.type === 'volume' && targets.length >= 2) {
-          const a = new THREE.Vector3(...targets[0].values);
-          const b = new THREE.Vector3(...targets[1].values);
+          const a = projectVectorToScene(targets[0].values);
+          const b = projectVectorToScene(targets[1].values);
           value = targets.length >= 3
-            ? Math.abs(a.clone().cross(b).dot(new THREE.Vector3(...targets[2].values)))
+            ? Math.abs(a.clone().cross(b).dot(projectVectorToScene(targets[2].values)))
             : a.clone().cross(b).length();
         }
         return {
@@ -2651,11 +2847,11 @@ export default function App() {
     [displayMatrix, vectorScalarConstraints]
   );
   const parsedVector = useMemo(
-    () => [parseNumber(activeVector.x), parseNumber(activeVector.y), parseNumber(activeVector.z)],
+    () => [parseNumber(activeVector.x), parseNumber(activeVector.y), parseNumber(activeVector.z), parseNumber(activeVector.w)],
     [activeVector]
   );
   const transformedVector = useMemo(
-    () => transformVector3(displayMatrix, parsedVector),
+    () => transformVectorForMatrix(displayMatrix, parsedVector),
     [displayMatrix, parsedVector]
   );
   const currentModeLabel = displayMode.toUpperCase();
@@ -2761,32 +2957,35 @@ export default function App() {
       label.style.display = visible ? 'block' : 'none';
     };
 
-    const basisVectors = {
-      i: [displayMatrix[0], displayMatrix[3], displayMatrix[6]],
-      j: [displayMatrix[1], displayMatrix[4], displayMatrix[7]],
-      k: [displayMatrix[2], displayMatrix[5], displayMatrix[8]],
-    };
+    const basisVectors = Object.fromEntries(
+      basisDefinitions.map((basis, column) => [basis.id, basisColumnValues(displayMatrix, column)])
+    );
 
     showLabel(
       iLabelRef.current,
-      labelWithCoord('i', basisVectors.i),
+      labelWithCoord('i', basisVectors.i ?? [0]),
       showBasis && basisVisibility.i !== false && vectorLength(basisVectors.i) > EPSILON
     );
     showLabel(
       jLabelRef.current,
-      labelWithCoord('j', basisVectors.j),
+      labelWithCoord('j', basisVectors.j ?? [0, 0]),
       showBasis && basisVisibility.j !== false && vectorLength(basisVectors.j) > EPSILON
     );
     showLabel(
       kLabelRef.current,
-      labelWithCoord('k', basisVectors.k, '3d'),
+      labelWithCoord('k', basisVectors.k ?? [0, 0, 0], mode),
       showBasis && basisVisibility.k !== false && vectorLength(basisVectors.k) > 0.08
+    );
+    showLabel(
+      lLabelRef.current,
+      labelWithCoord('l', basisVectors.l ?? [0, 0, 0, 0], '4d'),
+      showBasis && basisVisibility.l !== false && mode === '4d' && vectorLength(basisVectors.l) > 0.08
     );
 
     vectors.forEach((item) => {
       const label = vectorLabelRefs.current.get(item.id);
-      const values = [parseNumber(item.x), parseNumber(item.y), parseNumber(item.z)];
-      const transformed = transformVector3(displayMatrix, values);
+      const values = [parseNumber(item.x), parseNumber(item.y), parseNumber(item.z), parseNumber(item.w)];
+      const transformed = transformVectorForMatrix(displayMatrix, values);
       const scalarSpace = item.scalarSpace === 'input' ? 'input' : 'output';
       const scalarNormal = scalarSpace === 'input' ? values : transformed;
       const scalarValue = hasScalarText(item.scalar)
@@ -3038,12 +3237,12 @@ export default function App() {
   const showAllVectorTargets = useCallback(() => {
     setShowVector(true);
     setShowBasis(true);
-    setBasisVisibility({ i: true, j: true, k: true });
+    setBasisVisibility({ i: true, j: true, k: true, l: true });
     setVectors((previous) => previous.map((item) => ({ ...item, visible: true })));
   }, []);
 
   const hideAllVectorTargets = useCallback(() => {
-    setBasisVisibility({ i: false, j: false, k: false });
+    setBasisVisibility({ i: false, j: false, k: false, l: false });
     setVectors((previous) => previous.map((item) => ({ ...item, visible: false })));
   }, []);
 
@@ -3051,6 +3250,7 @@ export default function App() {
     if (targetId === 'b:i') return iLabelRef.current;
     if (targetId === 'b:j') return jLabelRef.current;
     if (targetId === 'b:k') return kLabelRef.current;
+    if (targetId === 'b:l') return lLabelRef.current;
     if (targetId?.startsWith('v:')) return vectorLabelRefs.current.get(targetId.slice(2)) ?? null;
     return null;
   }, []);
@@ -3387,10 +3587,13 @@ export default function App() {
   }, []);
 
   const updateBasisInputValue = useCallback((basisId, axis, value) => {
-    const columnIndex = basisId === 'i' ? 0 : basisId === 'j' ? 1 : 2;
-    const rowOffset = axis === 'x' ? 0 : axis === 'y' ? 3 : 6;
-    const next = [...targetMatrixRef.current];
-    next[columnIndex + rowOffset] = parseNumber(value);
+    const columnIndex = basisIndexById[basisId] ?? 0;
+    const rowIndex = Math.max(0, axisNames.indexOf(axis));
+    const size = Math.max(3, matrixDimension(targetMatrixRef.current), columnIndex + 1, rowIndex + 1);
+    const next = targetMatrixRef.current.length === size * size
+      ? [...targetMatrixRef.current]
+      : matrixValuesForMode(targetMatrixRef.current, modeForDimension(size));
+    next[rowIndex * size + columnIndex] = parseNumber(value);
     setBasisControlMatrix(next);
     startMatrixRef.current = [...currentMatrixRef.current];
     targetMatrixRef.current = next;
@@ -3422,10 +3625,13 @@ export default function App() {
   }, []);
 
   const resetBasisVector = useCallback((basisId) => {
-    const columnIndex = basisId === 'i' ? 0 : basisId === 'j' ? 1 : 2;
-    const next = [...targetMatrixRef.current];
-    [0, 3, 6].forEach((rowOffset, rowIndex) => {
-      next[columnIndex + rowOffset] = rowIndex === columnIndex ? 1 : 0;
+    const columnIndex = basisIndexById[basisId] ?? 0;
+    const size = Math.max(3, matrixDimension(targetMatrixRef.current), columnIndex + 1);
+    const next = targetMatrixRef.current.length === size * size
+      ? [...targetMatrixRef.current]
+      : matrixValuesForMode(targetMatrixRef.current, modeForDimension(size));
+    Array.from({ length: size }).forEach((_, rowIndex) => {
+      next[rowIndex * size + columnIndex] = rowIndex === columnIndex ? 1 : 0;
     });
     setBasisControlMatrix(next);
     startMatrixRef.current = [...currentMatrixRef.current];
@@ -3483,18 +3689,22 @@ export default function App() {
   }, [locale]);
 
   const updateBasisVectorFromDrag = useCallback((dragKey, worldVector) => {
-    if (!['i', 'j', 'k'].includes(dragKey)) return worldVector;
+    if (!(dragKey in basisIndexById)) return worldVector;
     const mode = viewKeyForMatrix(currentMatrixRef.current);
     const adjusted = constrainVectorForMode(
       worldVector,
       mode,
       snapToInteger ? { drag: true } : { snap: false }
     );
-    const next = [...currentMatrixRef.current];
-    const columnIndex = dragKey === 'i' ? 0 : dragKey === 'j' ? 1 : 2;
-    next[columnIndex] = adjusted.x;
-    next[columnIndex + 3] = adjusted.y;
-    next[columnIndex + 6] = adjusted.z;
+    const columnIndex = basisIndexById[dragKey] ?? 0;
+    const size = Math.max(3, matrixDimension(currentMatrixRef.current), columnIndex + 1);
+    const next = currentMatrixRef.current.length === size * size
+      ? [...currentMatrixRef.current]
+      : matrixValuesForMode(currentMatrixRef.current, modeForDimension(size));
+    const wValue = size >= 4 ? next[3 * size + columnIndex] ?? 0 : 0;
+    next[columnIndex] = adjusted.x - wProjectionVector.x * wValue;
+    next[size + columnIndex] = adjusted.y - wProjectionVector.y * wValue;
+    next[2 * size + columnIndex] = adjusted.z - wProjectionVector.z * wValue;
     previewDraggedMatrix(next);
     return adjusted;
   }, [previewDraggedMatrix]);
@@ -3515,33 +3725,35 @@ export default function App() {
           { snap: false }
         )
       : null;
-    const solved = dragState
-      ? constrainInputValuesForMode(
-          startInput.map((value, index) => value + inputDelta[index]),
-          mode,
-          snapToInteger,
-          { drag: true }
-        )
-      : solveVectorInputForWorld(currentMatrixRef.current, constrainVectorForMode(worldVector, mode), mode);
-    const adjustedWorld = transformVector3(currentMatrixRef.current, solved);
+      const solved = dragState
+        ? constrainInputValuesForMode(
+          startInput.map((value, index) => value + (inputDelta[index] ?? 0)),
+            mode,
+            snapToInteger,
+            { drag: true }
+          )
+        : solveVectorInputForWorld(currentMatrixRef.current, constrainVectorForMode(worldVector, mode), mode);
+    const nextSolved = mode === '4d' ? [solved[0], solved[1], solved[2], startInput[3] ?? 0] : solved;
+    const adjustedWorld = projectVectorToScene(transformVectorForMatrix(currentMatrixRef.current, nextSolved));
     const nextVector = {
-      x: formatVectorInputValue(solved[0]),
-      y: formatVectorInputValue(solved[1]),
-      z: formatVectorInputValue(solved[2]),
+      x: formatVectorInputValue(nextSolved[0]),
+      y: formatVectorInputValue(nextSolved[1]),
+      z: formatVectorInputValue(nextSolved[2]),
+      w: formatVectorInputValue(nextSolved[3] ?? 0),
     };
     if (activeVectorIdRef.current === vectorId) {
-      userVectorRef.current = [solved[0], solved[1], solved[2]];
+      userVectorRef.current = nextSolved;
     }
     setVectors((previous) =>
       previous.map((item) => (item.id === vectorId ? { ...item, ...nextVector } : item))
     );
-    return new THREE.Vector3(adjustedWorld[0], adjustedWorld[1], adjustedWorld[2]);
+    return adjustedWorld;
   }, [snapToInteger]);
 
   const updateScalarConstraintFromDrag = useCallback((worldVector, dragState = null) => {
     const vectorId = scalarIdFromDragKey(dragState?.key);
     const normal = dragState?.scalarNormal;
-    if (!vectorId || !normal || normal.lengthSq() < EPSILON) return worldVector;
+    if (!vectorId || !normal || dotValues(normal, normal) < EPSILON) return worldVector;
 
     const scalarSpace = dragState?.scalarSpace === 'input' ? 'input' : 'output';
     const mode = viewKeyForMatrix(dragState?.startMatrix ?? currentMatrixRef.current);
@@ -3550,12 +3762,13 @@ export default function App() {
         ? solveVectorInputForWorld(dragState?.startMatrix ?? currentMatrixRef.current, worldVector, mode, { snap: false })
         : null;
     const scalarValue = scalarSpace === 'input'
-      ? normal.dot(inputVector)
-      : normal.dot(worldVector);
-    const anchorInput = normal.clone().multiplyScalar(scalarValue / normal.lengthSq());
+      ? dotValues(normal, mode === '4d' ? [inputVector[0], inputVector[1], inputVector[2], dragState.startInputVector?.[3] ?? 0] : inputVector)
+      : dotValues(normal, [worldVector.x, worldVector.y, worldVector.z, 0]);
+    const normalLengthSquared = dotValues(normal, normal);
+    const anchorInput = normal.map((value) => value * scalarValue / normalLengthSquared);
     const anchor = scalarSpace === 'input'
-      ? new THREE.Vector3(...transformVector3(dragState?.startMatrix ?? currentMatrixRef.current, [anchorInput.x, anchorInput.y, anchorInput.z]))
-      : anchorInput;
+      ? projectVectorToScene(transformVectorForMatrix(dragState?.startMatrix ?? currentMatrixRef.current, anchorInput))
+      : projectVectorToScene(anchorInput);
     setVectors((previous) =>
       previous.map((item) =>
         item.id === vectorId ? { ...item, scalar: formatInputValue(scalarValue), scalarEnabled: true } : item
@@ -3777,10 +3990,11 @@ export default function App() {
       const raw = Math.min((time - animationStartRef.current) / ANIMATION_MS, 1);
       const eased = easeInOut(raw);
 
-      for (let i = 0; i < 9; i += 1) {
+      const animationSize = Math.max(startMatrixRef.current.length, targetMatrixRef.current.length);
+      for (let i = 0; i < animationSize; i += 1) {
         currentMatrixRef.current[i] =
-          startMatrixRef.current[i] +
-          eased * (targetMatrixRef.current[i] - startMatrixRef.current[i]);
+          (startMatrixRef.current[i] ?? 0) +
+          eased * ((targetMatrixRef.current[i] ?? 0) - (startMatrixRef.current[i] ?? 0));
       }
 
       if (raw >= 1) {
@@ -3799,7 +4013,7 @@ export default function App() {
     const coordMode = viewKeyForMatrix(matrix);
     const isSystemMode = workspaceModeRef.current === 'system' || vectorToolModeRef.current === 'system';
     const isSystem3D = isSystemMode && systemDimensionRef.current === '3d';
-    const kAxisBlend = clamp01(new THREE.Vector3(matrix[2], matrix[5], matrix[8]).length());
+    const kAxisBlend = clamp01(basisColumnSceneVector(matrix, 2).length());
     const flatBlend = 1 - kAxisBlend;
     const matrix4 = toMatrix4(matrix);
     refs.dynamicGrid.matrix.copy(matrix4);
@@ -3809,7 +4023,7 @@ export default function App() {
     refs.areaMesh.matrix.copy(matrix4);
     refs.areaEdges.matrix.copy(matrix4);
 
-    const currentDet = determinant3(matrix);
+    const currentDet = determinantForStep(matrix, coordMode);
     const detMagnitude = Math.abs(currentDet);
     const volumeColor =
       detMagnitude < EPSILON
@@ -3818,8 +4032,8 @@ export default function App() {
           ? 0xe05263
           : 0xf1b434;
     const volumeOpacity = Math.min(0.34, Math.max(0, (detMagnitude - 0.035) * 1.8));
-    const iVector = new THREE.Vector3(matrix[0], matrix[3], matrix[6]);
-    const jVector = new THREE.Vector3(matrix[1], matrix[4], matrix[7]);
+    const iVector = basisColumnSceneVector(matrix, 0);
+    const jVector = basisColumnSceneVector(matrix, 1);
     const areaMagnitude = iVector.clone().cross(jVector).length();
     const heightRatio = areaMagnitude > EPSILON ? detMagnitude / areaMagnitude : 0;
     const areaBlend = Math.max(0, Math.min(1, (0.42 - heightRatio) / 0.42));
@@ -3863,21 +4077,30 @@ export default function App() {
     refs.equationPoint.visible = isSystemMode && refs.equationPoint.userData.visible;
 
     const basisVisible = uiStateRef.current.showBasis && !isSystemMode;
-    const basisVisibility = uiStateRef.current.basisVisibility ?? { i: true, j: true, k: true };
+    const basisVisibility = uiStateRef.current.basisVisibility ?? { i: true, j: true, k: true, l: true };
+    const sceneBasis = {
+      i: basisColumnSceneVector(matrix, 0),
+      j: basisColumnSceneVector(matrix, 1),
+      k: basisColumnSceneVector(matrix, 2),
+      l: basisColumnSceneVector(matrix, 3),
+    };
     const basisLengthByKey = {
-      i: Math.hypot(matrix[0], matrix[3], matrix[6]),
-      j: Math.hypot(matrix[1], matrix[4], matrix[7]),
-      k: Math.hypot(matrix[2], matrix[5], matrix[8]),
+      i: sceneBasis.i.length(),
+      j: sceneBasis.j.length(),
+      k: sceneBasis.k.length(),
+      l: sceneBasis.l.length(),
     };
     const independentBasisKeys = independentBasisKeysForMatrix(matrix);
     const basisVisibleByKey = {
       i: basisVisible && basisVisibility.i !== false && basisLengthByKey.i > EPSILON && independentBasisKeys.has('i'),
       j: basisVisible && basisVisibility.j !== false && basisLengthByKey.j > EPSILON && independentBasisKeys.has('j'),
       k: basisVisible && basisVisibility.k !== false && basisLengthByKey.k > EPSILON && independentBasisKeys.has('k'),
+      l: basisVisible && basisVisibility.l !== false && basisLengthByKey.l > EPSILON && independentBasisKeys.has('l'),
     };
-    setArrowVector(refs.iArrow, matrix[0], matrix[3], matrix[6], basisVisibleByKey.i);
-    setArrowVector(refs.jArrow, matrix[1], matrix[4], matrix[7], basisVisibleByKey.j);
-    setArrowVector(refs.kArrow, matrix[2], matrix[5], matrix[8], basisVisibleByKey.k);
+    setArrowVector(refs.iArrow, sceneBasis.i.x, sceneBasis.i.y, sceneBasis.i.z, basisVisibleByKey.i);
+    setArrowVector(refs.jArrow, sceneBasis.j.x, sceneBasis.j.y, sceneBasis.j.z, basisVisibleByKey.j);
+    setArrowVector(refs.kArrow, sceneBasis.k.x, sceneBasis.k.y, sceneBasis.k.z, basisVisibleByKey.k);
+    setArrowVector(refs.lArrow, sceneBasis.l.x, sceneBasis.l.y, sceneBasis.l.z, basisVisibleByKey.l);
 
     const activeDragKey = arrowDragRef.current.active ? arrowDragRef.current.key : null;
     const activeDragVectorId = vectorIdFromDragKey(activeDragKey) ?? scalarIdFromDragKey(activeDragKey);
@@ -3913,7 +4136,7 @@ export default function App() {
           .filter((item) => item.visible !== false && item.scalarEnabled)
           .map((item) => {
             const values = renderedVectorValues.get(item.id) ?? item.values;
-            const transformed = transformVector3(matrix, values);
+            const transformed = transformVectorForMatrix(matrix, values);
             const scalarSpace = item.scalarSpace === 'input' ? 'input' : 'output';
             const normal = scalarSpace === 'input' ? values : transformed;
             const lengthSquared = dotValues(normal, normal);
@@ -3930,7 +4153,7 @@ export default function App() {
         const rawScalarSolution = solveScalarConstraintPoint(scalarConstraints, coordMode);
         frameScalarSolution =
           rawScalarSolution && scalarConstraints.every((constraint) => constraint.scalarSpace === 'input')
-            ? transformVector3(matrix, rawScalarSolution)
+            ? transformVectorForMatrix(matrix, rawScalarSolution)
             : rawScalarSolution;
         scalarConstraints.forEach((constraint) => {
           if (coordMode === '1d') {
@@ -3979,7 +4202,7 @@ export default function App() {
       (item) => item.id === activeVectorIdRef.current && item.visible !== false && !item.scalarEnabled
     );
     const activeVectorWorld = activeVectorItem
-      ? new THREE.Vector3(...transformVector3(matrix, renderedVectorValues.get(activeVectorItem.id) ?? activeVectorItem.values))
+      ? projectVectorToScene(transformVectorForMatrix(matrix, renderedVectorValues.get(activeVectorItem.id) ?? activeVectorItem.values))
       : null;
     refs.userArrow.visible = false;
     refs.dotLine.visible = false;
@@ -3990,9 +4213,10 @@ export default function App() {
     const vectorLabelsVisible = true;
     const dragHandles = refs.dragHandles ?? {};
     const handleTargets = {
-      i: new THREE.Vector3(matrix[0], matrix[3], matrix[6]),
-      j: new THREE.Vector3(matrix[1], matrix[4], matrix[7]),
-      k: new THREE.Vector3(matrix[2], matrix[5], matrix[8]),
+      i: sceneBasis.i.clone(),
+      j: sceneBasis.j.clone(),
+      k: sceneBasis.k.clone(),
+      l: sceneBasis.l.clone(),
     };
     const visibleMeasureVectors = vectorsRef.current
       .filter((item) => item.visible !== false && !item.scalarEnabled)
@@ -4001,7 +4225,7 @@ export default function App() {
         const values = renderedVectorValues.get(item.id) ?? item.values;
         return {
           ...item,
-          world: new THREE.Vector3(...transformVector3(matrix, values)),
+          world: projectVectorToScene(transformVectorForMatrix(matrix, values)),
         };
       });
     const vectorMeasureVisible = false && visibleMeasureVectors.length >= 2;
@@ -4048,16 +4272,18 @@ export default function App() {
     clearEquationGroup(refs.measurementGroup);
     const activeMeasurementLabels = new Set();
     const getMeasureTargetName = (targetId) => {
-      if (targetId === 'b:i') return 'i′';
-      if (targetId === 'b:j') return 'j′';
-      if (targetId === 'b:k') return 'k′';
+      if (targetId === 'b:i') return basisNameForId('i');
+      if (targetId === 'b:j') return basisNameForId('j');
+      if (targetId === 'b:k') return basisNameForId('k');
+      if (targetId === 'b:l') return basisNameForId('l');
       const vectorId = targetId?.startsWith('v:') ? targetId.slice(2) : null;
       return vectorsRef.current.find((item) => item.id === vectorId)?.name ?? vectorId ?? '';
     };
     const getMeasureTargetColor = (targetId) => {
-      if (targetId === 'b:i') return '#ff6575';
-      if (targetId === 'b:j') return '#41cf76';
-      if (targetId === 'b:k') return '#78a5ff';
+      if (targetId === 'b:i') return colorToHex(basisById.i.color);
+      if (targetId === 'b:j') return colorToHex(basisById.j.color);
+      if (targetId === 'b:k') return colorToHex(basisById.k.color);
+      if (targetId === 'b:l') return colorToHex(basisById.l.color);
       const vectorId = targetId?.startsWith('v:') ? targetId.slice(2) : null;
       const vectorItem = vectorsRef.current.find((item) => item.id === vectorId);
       return vectorItem ? colorToHex(vectorItem.color) : undefined;
@@ -4075,24 +4301,29 @@ export default function App() {
     const getMeasureTargetWorld = (targetId) => {
       if (targetId === 'b:i') {
         if (!uiStateRef.current.showBasis || uiStateRef.current.basisVisibility?.i === false) return null;
-        const vector = new THREE.Vector3(matrix[0], matrix[3], matrix[6]);
+        const vector = basisColumnSceneVector(matrix, 0);
         return vector.lengthSq() > EPSILON ? vector : null;
       }
       if (targetId === 'b:j') {
         if (!uiStateRef.current.showBasis || uiStateRef.current.basisVisibility?.j === false) return null;
-        const vector = new THREE.Vector3(matrix[1], matrix[4], matrix[7]);
+        const vector = basisColumnSceneVector(matrix, 1);
         return vector.lengthSq() > EPSILON ? vector : null;
       }
       if (targetId === 'b:k') {
         if (!uiStateRef.current.showBasis || uiStateRef.current.basisVisibility?.k === false) return null;
-        const vector = new THREE.Vector3(matrix[2], matrix[5], matrix[8]);
+        const vector = basisColumnSceneVector(matrix, 2);
+        return vector.lengthSq() > EPSILON ? vector : null;
+      }
+      if (targetId === 'b:l') {
+        if (!uiStateRef.current.showBasis || uiStateRef.current.basisVisibility?.l === false) return null;
+        const vector = basisColumnSceneVector(matrix, 3);
         return vector.lengthSq() > EPSILON ? vector : null;
       }
       const vectorId = targetId?.startsWith('v:') ? targetId.slice(2) : null;
       const vectorItem = vectorsRef.current.find((item) => item.id === vectorId);
       if (!vectorItem || vectorItem.visible === false || vectorItem.scalarEnabled || !uiStateRef.current.showVector) return null;
       const values = renderedVectorValues.get(vectorItem.id) ?? vectorItem.values;
-      return new THREE.Vector3(...transformVector3(matrix, values));
+      return projectVectorToScene(transformVectorForMatrix(matrix, values));
     };
 
     if (!isSystemMode) {
@@ -4252,27 +4483,26 @@ export default function App() {
       visual.handle.userData.dragKey = vectorDragKey;
 
       const renderValues = renderedVectorValues.get(vectorItem.id) ?? vectorItem.values;
-      const [vx, vy, vz] = transformVector3(matrix, renderValues);
-      const userVector = new THREE.Vector3(vx, vy, vz);
+      const transformedValues = transformVectorForMatrix(matrix, renderValues);
+      const userVector = projectVectorToScene(transformedValues);
+      const [vx, vy, vz] = userVector.toArray();
       const vectorItemVisible = vectorItem.visible !== false;
       const isActiveVector = vectorItem.id === activeVectorIdRef.current;
       const baseLengthSquared = userVector.lengthSq();
       const activeLengthSquared = activeVectorWorld?.lengthSq() ?? 0;
       const scalarSpace = vectorItem.scalarSpace === 'input' ? 'input' : 'output';
-      const scalarNormal = scalarSpace === 'input'
-        ? new THREE.Vector3(renderValues[0], renderValues[1], renderValues[2])
-        : userVector;
-      const scalarBaseLengthSquared = scalarNormal.lengthSq();
+      const scalarNormal = scalarSpace === 'input' ? renderValues : transformedValues;
+      const scalarBaseLengthSquared = dotValues(scalarNormal, scalarNormal);
       const scalarValue = hasScalarText(vectorItem.scalar)
         ? parseNumber(vectorItem.scalar)
         : scalarBaseLengthSquared;
       const scalarAnchorInput =
         scalarBaseLengthSquared > EPSILON
-          ? scalarNormal.clone().multiplyScalar(scalarValue / scalarBaseLengthSquared)
-          : new THREE.Vector3(0, 0, 0);
+          ? scalarNormal.map((value) => value * scalarValue / scalarBaseLengthSquared)
+          : [0, 0, 0, 0];
       const scalarAnchor = scalarSpace === 'input'
-        ? new THREE.Vector3(...transformVector3(matrix, [scalarAnchorInput.x, scalarAnchorInput.y, scalarAnchorInput.z]))
-        : scalarAnchorInput;
+        ? projectVectorToScene(transformVectorForMatrix(matrix, scalarAnchorInput))
+        : projectVectorToScene(scalarAnchorInput);
       const projection =
         activeVectorWorld && baseLengthSquared > EPSILON
           ? userVector.clone().multiplyScalar(activeVectorWorld.dot(userVector) / baseLengthSquared)
@@ -4308,7 +4538,7 @@ export default function App() {
           : new THREE.Vector3(vx * 1.06, vy * 1.06, vz * 1.06),
         scalarEnabled
           ? `${scalarSpace === 'input' ? '' : 'A'}${vectorItem.name}·x = ${formatNumber(scalarValue)}`
-          : `${vectorItem.name}′${coordinatesVisible ? ` ${formatCoord([vx, vy, vz], coordMode)}` : ''}`,
+          : `${vectorItem.name}′${coordinatesVisible ? ` ${formatCoord(transformedValues, coordMode)}` : ''}`,
         vectorLabelsVisible && vectorVisible,
         scalarEnabled ? [0, -20] : [0, -18],
         { keepNameWhenCoordinatesHidden: !scalarEnabled }
@@ -4341,7 +4571,7 @@ export default function App() {
     const scalarSolution = frameScalarSolution ?? scalarSolutionRef.current;
     const scalarSolutionVisible = !!scalarSolution && uiStateRef.current.showVector && !isSystemMode;
     const scalarSolutionVector = scalarSolution
-      ? new THREE.Vector3(scalarSolution[0], scalarSolution[1], scalarSolution[2])
+      ? projectVectorToScene(scalarSolution)
       : new THREE.Vector3();
     if (refs.scalarSolutionPoint) {
       refs.scalarSolutionPoint.visible = scalarSolutionVisible;
@@ -4369,7 +4599,7 @@ export default function App() {
         target.length() > EPSILON &&
         (isVectorHandle
           ? uiStateRef.current.showVector && dragVectorVisible
-          : basisVisibleByKey[key] && (key !== 'k' || coordMode === '3d'));
+          : basisVisibleByKey[key]);
       const isHot = arrowDragRef.current.hovered === key || arrowDragRef.current.key === key;
       if (target) handle.position.copy(target);
       handle.visible = isAvailable;
@@ -4383,26 +4613,34 @@ export default function App() {
     });
     updateLabel(
       iLabelRef,
-      new THREE.Vector3(matrix[0] * 1.16, matrix[3] * 1.16, matrix[6] * 1.16),
-      `i′${coordinatesVisible ? ` ${formatCoord([matrix[0], matrix[3], matrix[6]], coordMode)}` : ''}`,
+      sceneBasis.i.clone().multiplyScalar(1.16),
+      `${basisNameForId('i')}${coordinatesVisible ? ` ${formatCoord(basisColumnValues(matrix, 0), coordMode)}` : ''}`,
       basisVisibleByKey.i,
       [18, 12],
       { keepNameWhenCoordinatesHidden: true }
     );
     updateLabel(
       jLabelRef,
-      new THREE.Vector3(matrix[1] * 1.12, matrix[4] * 1.12, matrix[7] * 1.12),
-      `j′${coordinatesVisible ? ` ${formatCoord([matrix[1], matrix[4], matrix[7]], coordMode)}` : ''}`,
+      sceneBasis.j.clone().multiplyScalar(1.12),
+      `${basisNameForId('j')}${coordinatesVisible ? ` ${formatCoord(basisColumnValues(matrix, 1), coordMode)}` : ''}`,
       basisVisibleByKey.j,
       [-14, -16],
       { keepNameWhenCoordinatesHidden: true }
     );
     updateLabel(
       kLabelRef,
-      new THREE.Vector3(matrix[2] * 1.12, matrix[5] * 1.12, matrix[8] * 1.12),
-      `k′${coordinatesVisible ? ` ${formatCoord([matrix[2], matrix[5], matrix[8]], '3d')}` : ''}`,
+      sceneBasis.k.clone().multiplyScalar(1.12),
+      `${basisNameForId('k')}${coordinatesVisible ? ` ${formatCoord(basisColumnValues(matrix, 2), coordMode)}` : ''}`,
       basisVisibleByKey.k && kAxisBlend > 0.08,
       [10, -18],
+      { keepNameWhenCoordinatesHidden: true }
+    );
+    updateLabel(
+      lLabelRef,
+      sceneBasis.l.clone().multiplyScalar(1.12),
+      `${basisNameForId('l')}${coordinatesVisible ? ` ${formatCoord(basisColumnValues(matrix, 3), '4d')}` : ''}`,
+      basisVisibleByKey.l && coordMode === '4d',
+      [14, -28],
       { keepNameWhenCoordinatesHidden: true }
     );
     resolveSceneLabelOverlaps(containerRef.current);
@@ -4527,8 +4765,9 @@ export default function App() {
     const iArrow = createArrow(0xe05263);
     const jArrow = createArrow(0x1f9d55);
     const kArrow = createArrow(0x3f7ee8);
+    const lArrow = createArrow(0xff8a3d);
     const userArrow = createArrow(0x8b5cf6);
-    scene.add(iArrow, jArrow, kArrow, userArrow);
+    scene.add(iArrow, jArrow, kArrow, lArrow, userArrow);
 
     const dotGeometry = new THREE.BufferGeometry();
     dotGeometry.setAttribute(
@@ -4611,6 +4850,7 @@ export default function App() {
       i: createDragHandle('i', 0xe05263),
       j: createDragHandle('j', 0x1f9d55),
       k: createDragHandle('k', 0x3f7ee8),
+      l: createDragHandle('l', 0xff8a3d),
     };
 
     const boxGeometry = new THREE.BoxGeometry(1, 1, 1);
@@ -4737,6 +4977,7 @@ export default function App() {
       iArrow,
       jArrow,
       kArrow,
+      lArrow,
       userArrow,
       dotLine,
       dotPoint,
@@ -4919,33 +5160,30 @@ export default function App() {
 
     const getDragTargetVector = (key) => {
       const matrix = currentMatrixRef.current;
-      if (key === 'i') return new THREE.Vector3(matrix[0], matrix[3], matrix[6]);
-      if (key === 'j') return new THREE.Vector3(matrix[1], matrix[4], matrix[7]);
-      if (key === 'k') return new THREE.Vector3(matrix[2], matrix[5], matrix[8]);
+      if (key in basisIndexById) return basisColumnSceneVector(matrix, basisIndexById[key]);
       const scalarId = scalarIdFromDragKey(key);
       if (scalarId) {
         const sourceVector = vectorsRef.current.find((item) => item.id === scalarId);
         if (!sourceVector) return new THREE.Vector3(0, 0, 0);
         const scalarSpace = sourceVector.scalarSpace === 'input' ? 'input' : 'output';
         const normal = scalarSpace === 'input'
-          ? new THREE.Vector3(...sourceVector.values)
-          : new THREE.Vector3(...transformVector3(matrix, sourceVector.values));
-        const lengthSquared = normal.lengthSq();
+          ? sourceVector.values
+          : transformVectorForMatrix(matrix, sourceVector.values);
+        const lengthSquared = dotValues(normal, normal);
         if (lengthSquared < EPSILON) return new THREE.Vector3(0, 0, 0);
         const scalarValue = hasScalarText(sourceVector.scalar)
           ? parseNumber(sourceVector.scalar)
           : lengthSquared;
-        const anchor = normal.multiplyScalar(scalarValue / lengthSquared);
+        const anchor = normal.map((value) => value * scalarValue / lengthSquared);
         return scalarSpace === 'input'
-          ? new THREE.Vector3(...transformVector3(matrix, [anchor.x, anchor.y, anchor.z]))
-          : anchor;
+          ? projectVectorToScene(transformVectorForMatrix(matrix, anchor))
+          : projectVectorToScene(anchor);
       }
       const vectorId = vectorIdFromDragKey(key);
       const sourceVector =
         vectorsRef.current.find((item) => item.id === vectorId)?.values ??
         userVectorRef.current;
-      const [vx, vy, vz] = transformVector3(matrix, sourceVector);
-      return new THREE.Vector3(vx, vy, vz);
+      return projectVectorToScene(transformVectorForMatrix(matrix, sourceVector));
     };
 
     const pickDragHandle = (event) => {
@@ -5050,8 +5288,8 @@ export default function App() {
         draggedScalarId
           ? (
               draggedScalarSpace === 'input'
-                ? new THREE.Vector3(...startInputVector)
-                : new THREE.Vector3(...transformVector3(currentMatrixRef.current, startInputVector))
+                ? [...startInputVector]
+                : transformVectorForMatrix(currentMatrixRef.current, startInputVector)
             )
           : null;
       const plane = new THREE.Plane().setFromNormalAndCoplanarPoint(normal.normalize(), startVector);
@@ -5204,12 +5442,18 @@ export default function App() {
       replaceHistory = false,
       stateMode = modeForMatrix(matrix),
     } = options;
-    const animationStartMatrix = [...currentMatrixRef.current];
+    const targetDimension = Math.max(matrixDimension(currentMatrixRef.current), matrixDimension(matrix));
+    const animationStartMatrix = currentMatrixRef.current.length === targetDimension * targetDimension
+      ? [...currentMatrixRef.current]
+      : matrixValuesForMode(currentMatrixRef.current, modeForDimension(targetDimension));
+    const animationTargetMatrix = matrix.length === targetDimension * targetDimension
+      ? [...matrix]
+      : matrixValuesForMode(matrix, modeForDimension(targetDimension));
     startMatrixRef.current = animationStartMatrix;
-    targetMatrixRef.current = [...matrix];
-    setBasisControlMatrix([...matrix]);
+    targetMatrixRef.current = animationTargetMatrix;
+    setBasisControlMatrix([...animationTargetMatrix]);
     animationViewFromRef.current = viewKeyForMatrix(animationStartMatrix);
-    animationViewToRef.current = viewKeyForMatrix(matrix);
+    animationViewToRef.current = viewKeyForMatrix(animationTargetMatrix);
     animationStartRef.current = null;
     lastUiSyncRef.current = 0;
     isAnimatingRef.current = true;
@@ -5218,13 +5462,13 @@ export default function App() {
     if (historyName) {
       const entry = {
         name: historyName,
-        matrix: [...matrix],
+        matrix: [...animationTargetMatrix],
         previousMatrix: [...(previousMatrix ?? animationStartMatrix)],
         previousStateMode: modeForMatrix(previousMatrix ?? animationStartMatrix),
         operationMatrix: [...operationMatrix],
         operationMode,
         isDimensionDrop,
-        stateMode,
+        stateMode: modeForMatrix(animationTargetMatrix),
       };
       setHistory((previous) => {
         const next = replaceHistory ? [entry] : [...previous, entry];
@@ -5236,11 +5480,16 @@ export default function App() {
   }, []);
 
   const applyTransformation = useCallback((matrix, name, operationMode = '3d') => {
-    const previousRank = rank3(currentMatrixRef.current);
-    const next = multiplyMatrix3(matrix, currentMatrixRef.current);
-    const nextRank = rank3(next);
+    const dimension = Math.max(matrixDimension(matrix), matrixDimension(currentMatrixRef.current));
+    const operation = matrix.length === dimension * dimension ? matrix : matrixValuesForMode(matrix, modeForDimension(dimension));
+    const current = currentMatrixRef.current.length === dimension * dimension
+      ? currentMatrixRef.current
+      : matrixValuesForMode(currentMatrixRef.current, modeForDimension(dimension));
+    const previousRank = rankN(current, dimension);
+    const next = multiplyMatrixN(operation, current, dimension);
+    const nextRank = rankN(next, dimension);
     startAnimationTo(next, name, {
-      operationMatrix: matrix,
+      operationMatrix: operation,
       operationMode,
       isDimensionDrop: nextRank < previousRank,
     });
@@ -5249,7 +5498,11 @@ export default function App() {
 
   const updateMatrixInputValues = useCallback((values) => {
     setHoveredMatrixPresetId(null);
-    setMatrix3((previous) => patchMatrixInputShape(previous, outputRows, inputColumns, values));
+    if (inputColumns === 4 || outputRows === 4) {
+      setMatrix4((previous) => patchMatrixInputShape(previous, outputRows, inputColumns, values));
+    } else {
+      setMatrix3((previous) => patchMatrixInputShape(previous, outputRows, inputColumns, values));
+    }
     if (outputRows === 2 && inputColumns === 2) setMatrix2(values);
     if (outputRows === 1 && inputColumns === 1) setMatrix1(values);
   }, [inputColumns, outputRows]);
@@ -5268,7 +5521,11 @@ export default function App() {
     const values = matrixInputValuesForShape(operationMatrixFromPreset(preset), rows, columns).map(formatPresetInputValue);
     setHoveredMatrixPresetId(null);
     setInputMode(preset.mode);
-    setMatrix3((previous) => patchMatrixInputShape(previous, rows, columns, values));
+    if (preset.mode === '4d') {
+      setMatrix4((previous) => patchMatrixInputShape(previous, rows, columns, values));
+    } else {
+      setMatrix3((previous) => patchMatrixInputShape(previous, rows, columns, values));
+    }
     if (preset.mode === '2d') setMatrix2(values);
     if (preset.mode === '1d') setMatrix1(values);
   }, []);
@@ -5279,7 +5536,9 @@ export default function App() {
     setHoveredMatrixPresetId(null);
     const values = matrixValuesForMode(preset.matrix, preset.mode);
     const matrix =
-      preset.mode === '2d'
+      preset.mode === '4d'
+        ? values
+        : preset.mode === '2d'
         ? [values[0], values[1], 0, values[2], values[3], 0, 0, 0, 0]
         : preset.mode === '1d'
           ? [values[0], 0, 0, 0, 0, 0, 0, 0, 0]
@@ -5360,14 +5619,18 @@ export default function App() {
       const normalized = numbers.map((value) => value.replace(/\s+/g, ''));
 
       if (normalized.length) {
-        const rows = Math.min(3, Math.max(1, Math.ceil(normalized.length / inputColumns)));
+        const rows = Math.min(4, Math.max(1, Math.ceil(normalized.length / inputColumns)));
         const nextValues = Array.from(
           { length: rows * inputColumns },
           (_, index) => normalized[index] ?? matrixInputValues[index] ?? '0'
         );
         setHoveredMatrixPresetId(null);
         setInputMode(modeForDimension(rows));
-        setMatrix3((previous) => patchMatrixInputShape(previous, rows, inputColumns, nextValues));
+        if (rows === 4 || inputColumns === 4) {
+          setMatrix4((previous) => patchMatrixInputShape(previous, rows, inputColumns, nextValues));
+        } else {
+          setMatrix3((previous) => patchMatrixInputShape(previous, rows, inputColumns, nextValues));
+        }
         if (rows === 2 && inputColumns === 2) setMatrix2(nextValues);
         if (rows === 1 && inputColumns === 1) setMatrix1(nextValues);
       }
@@ -5438,6 +5701,7 @@ export default function App() {
     workspaceMode,
     inputMode,
     displayMatrix: currentMatrixRef.current.map((value) => Number(value.toFixed(5))),
+    matrix4,
     matrix3,
     matrix2,
     matrix1,
@@ -5447,6 +5711,7 @@ export default function App() {
       x: item.x,
       y: item.y,
       z: item.z,
+      w: item.w,
       scalar: item.scalar,
       scalarEnabled: !!item.scalarEnabled,
       scalarSpace: item.scalarSpace === 'input' ? 'input' : 'output',
@@ -5469,6 +5734,7 @@ export default function App() {
     matrix1,
     matrix2,
     matrix3,
+    matrix4,
     showAxes,
     showBasis,
     showCoordinates,
@@ -5571,6 +5837,7 @@ export default function App() {
       stateMode: '3d',
     });
     moveCameraToView('3d');
+    setMatrix4(['1', '0', '0', '0', '0', '1', '0', '0', '0', '0', '1', '0', '0', '0', '0', '1']);
     setMatrix3(['1', '0', '0', '0', '1', '0', '0', '0', '1']);
     setMatrix2(['1', '0', '0', '1']);
     setMatrix1(['1']);
@@ -5580,7 +5847,7 @@ export default function App() {
     setShowCoordinates(true);
     setShowVector(true);
     setShowBasis(true);
-    setBasisVisibility({ i: true, j: true, k: true });
+    setBasisVisibility({ i: true, j: true, k: true, l: true });
     setShowDot(false);
     setShowAxes(true);
     setSnapToInteger(true);
@@ -5593,7 +5860,12 @@ export default function App() {
     setVectors([initialVector]);
     setActiveVectorId('v1');
     activeVectorIdRef.current = 'v1';
-    userVectorRef.current = [parseNumber(initialVector.x), parseNumber(initialVector.y), parseNumber(initialVector.z)];
+    userVectorRef.current = [
+      parseNumber(initialVector.x),
+      parseNumber(initialVector.y),
+      parseNumber(initialVector.z),
+      parseNumber(initialVector.w),
+    ];
     vectorRenderValuesRef.current = new Map([['v1', [...userVectorRef.current]]]);
     nextVectorIndexRef.current = 2;
   }, [locale, moveCameraToView, startAnimationTo]);
@@ -6042,6 +6314,25 @@ export default function App() {
             <span className="axis-label-text">k′</span>
             {renderLabelMeasureTools('b:k')}
           </span>
+          <span
+            ref={lLabelRef}
+            className={`axis-label axis-l draggable-axis measure-target-label ${measureDraft.includes('b:l') ? 'selected' : ''} ${hoveredMeasureTargetId === 'b:l' ? 'hovered' : ''}`}
+            data-drag-key="l"
+            onClick={(event) => {
+              if (!measureMode) return;
+              event.stopPropagation();
+              if (measureDraft.length === 0) {
+                startMeasurementFrom(measureMode, 'b:l', event);
+                return;
+              }
+              pickMeasureTarget('b:l');
+            }}
+            onPointerEnter={() => setHoveredMeasureTargetId('b:l')}
+            onPointerLeave={() => setHoveredMeasureTargetId(null)}
+          >
+            <span className="axis-label-text">l′</span>
+            {renderLabelMeasureTools('b:l')}
+          </span>
           {vectors.map((item) => (
             <span
               className={`axis-label axis-v draggable-axis measure-target-label ${measureDraft.includes(`v:${item.id}`) ? 'selected' : ''} ${hoveredMeasureTargetId === `v:${item.id}` ? 'hovered' : ''}`}
@@ -6403,6 +6694,7 @@ export default function App() {
                   </button>
                 </div>
                 <div className="segmented" role="tablist" aria-label={t(locale, 'matrixDimension')}>
+                  <button className={inputMode === '4d' ? 'active' : ''} onClick={() => setInputMode('4d')}>4x{inputColumns}</button>
                   <button className={inputMode === '3d' ? 'active' : ''} onClick={() => setInputMode('3d')}>3x{inputColumns}</button>
                   <button className={inputMode === '2d' ? 'active' : ''} onClick={() => setInputMode('2d')}>2x{inputColumns}</button>
                   <button className={inputMode === '1d' ? 'active' : ''} onClick={() => setInputMode('1d')}>1x{inputColumns}</button>
@@ -6418,6 +6710,8 @@ export default function App() {
                     accent={
                       hoveredMatrixPreset
                         ? 'preview'
+                        : inputMode === '4d'
+                          ? 'purple'
                         : inputMode === '3d'
                           ? 'teal'
                           : inputMode === '2d'
@@ -6533,8 +6827,7 @@ export default function App() {
                           {item.name}
                         </span>
                         <div className={`basis-compact-inputs mode-${displayMode}`}>
-                          {(displayMode === '1d' ? ['x'] : displayMode === '2d' ? ['x', 'y'] : ['x', 'y', 'z']).map((axis) => {
-                            const axisIndex = axis === 'x' ? 0 : axis === 'y' ? 1 : 2;
+                          {axesForMode(displayMode).map((axis, axisIndex) => {
                             return (
                             <input
                               aria-label={`${item.name} ${axis}`}
@@ -6573,7 +6866,7 @@ export default function App() {
                   </div>
                 </div>
                 {transformedVectorItems.map((item) => {
-                  const axes = displayMode === '1d' ? ['x'] : displayMode === '2d' ? ['x', 'y'] : ['x', 'y', 'z'];
+                  const axes = axesForMode(displayMode);
                   return (
                     <div
                       className={`vector-card ${item.id === activeVectorId ? 'active' : ''} ${measureDraft.includes(`v:${item.id}`) ? 'measuring' : ''} ${showVector ? '' : 'muted'} ${item.visible ? '' : 'scene-hidden'} ${item.scalarEnabled ? 'scalar-active' : ''}`}
@@ -6860,7 +7153,7 @@ export default function App() {
             <div
               className={`vector-inputs mode-${displayMode} ${showVector ? '' : 'muted'}`}
             >
-              {(displayMode === '1d' ? ['x'] : displayMode === '2d' ? ['x', 'y'] : ['x', 'y', 'z']).map((axis) => (
+              {axesForMode(displayMode).map((axis) => (
                 <label key={axis}>
                   <span>{axis}</span>
                   <input

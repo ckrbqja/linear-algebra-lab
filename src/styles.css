@@ -1291,6 +1291,11 @@ button {
   color: #78a5ff;
 }
 
+.axis-l {
+  z-index: 11;
+  color: #ffad5c;
+}
+
 .axis-v {
   z-index: 12;
   color: #b794ff;
@@ -2876,6 +2881,11 @@ button {
   box-shadow: 0 0 0 3px rgba(170, 117, 16, 0.16);
 }
 
+.matrix-cell.purple:focus {
+  border-color: #8b5cf6;
+  box-shadow: 0 0 0 3px rgba(139, 92, 246, 0.16);
+}
+
 .matrix-cell.preview {
   border-color: rgba(15, 143, 135, 0.58);
   background: #e5f8f5;
@@ -3246,6 +3256,10 @@ button {
   min-width: 0;
 }
 
+.basis-compact-inputs.mode-4d {
+  grid-template-columns: repeat(4, 34px);
+}
+
 .basis-compact-inputs.mode-2d {
   grid-template-columns: repeat(2, 40px);
 }
@@ -3364,6 +3378,10 @@ button {
 
 .vector-inline-inputs.has-scalar {
   grid-template-columns: repeat(4, minmax(32px, 1fr));
+}
+
+.vector-inline-inputs.mode-4d.has-scalar {
+  grid-template-columns: repeat(5, minmax(30px, 1fr));
 }
 
 .vector-inline-inputs.mode-2d.has-scalar {
@@ -5067,6 +5085,10 @@ body {
 
   .basis-compact-inputs {
     grid-template-columns: repeat(3, minmax(32px, 1fr));
+  }
+
+  .basis-compact-inputs.mode-4d {
+    grid-template-columns: repeat(4, minmax(28px, 1fr));
   }
 
   .basis-compact-inputs.mode-2d {
