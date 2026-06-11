@@ -899,38 +899,58 @@ function basisColumnSceneVector(matrix, column) {
   return projectVectorToScene(basisColumnValues(matrix, column));
 }
 
-function crossLengthValues(a, b) {
-  return Math.hypot(
-    a[1] * b[2] - a[2] * b[1],
-    a[2] * b[0] - a[0] * b[2],
-    a[0] * b[1] - a[1] * b[0]
+function rankOfVectorSet(vectors, dimension) {
+  const rows = vectors.map((vector) =>
+    Array.from({ length: dimension }, (_, index) => vector[index] ?? 0)
   );
-}
+  let rank = 0;
+  let row = 0;
 
-function determinantFromColumns(a, b, c) {
-  return determinant3([
-    a[0], b[0], c[0],
-    a[1], b[1], c[1],
-    a[2], b[2], c[2],
-  ]);
+  for (let column = 0; column < dimension && row < rows.length; column += 1) {
+    let pivotRow = row;
+    for (let candidate = row + 1; candidate < rows.length; candidate += 1) {
+      if (Math.abs(rows[candidate][column]) > Math.abs(rows[pivotRow][column])) {
+        pivotRow = candidate;
+      }
+    }
+    if (Math.abs(rows[pivotRow][column]) < EPSILON) continue;
+    if (pivotRow !== row) {
+      [rows[row], rows[pivotRow]] = [rows[pivotRow], rows[row]];
+    }
+
+    const pivot = rows[row][column];
+    for (let normalizeColumn = column; normalizeColumn < dimension; normalizeColumn += 1) {
+      rows[row][normalizeColumn] /= pivot;
+    }
+    for (let targetRow = 0; targetRow < rows.length; targetRow += 1) {
+      if (targetRow === row) continue;
+      const factor = rows[targetRow][column];
+      for (let reduceColumn = column; reduceColumn < dimension; reduceColumn += 1) {
+        rows[targetRow][reduceColumn] -= factor * rows[row][reduceColumn];
+      }
+    }
+
+    row += 1;
+    rank += 1;
+  }
+
+  return rank;
 }
 
 function independentBasisKeysForMatrix(matrix) {
-  const candidates = basisDefinitions.map((basis, column) => [
+  const dimension = matrixDimension(matrix);
+  const candidates = basisDefinitions.slice(0, dimension).map((basis, column) => [
     basis.id,
-    projectVectorToScene(basisColumnValues(matrix, column)).toArray(),
+    basisColumnValues(matrix, column),
   ]);
   const selected = [];
   const keys = new Set();
 
   candidates.forEach(([key, vector]) => {
-    if (vectorLength(vector) <= EPSILON || selected.length >= 3) return;
-    const isIndependent =
-      selected.length === 0 ||
-      (selected.length === 1 && crossLengthValues(selected[0], vector) > EPSILON) ||
-      (selected.length === 2 && Math.abs(determinantFromColumns(selected[0], selected[1], vector)) > EPSILON);
-
-    if (!isIndependent) return;
+    if (vectorLength(vector) <= EPSILON || selected.length >= dimension) return;
+    const previousRank = rankOfVectorSet(selected, dimension);
+    const nextRank = rankOfVectorSet([...selected, vector], dimension);
+    if (nextRank <= previousRank) return;
     selected.push(vector);
     keys.add(key);
   });
