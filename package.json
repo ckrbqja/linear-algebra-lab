@@ -7,7 +7,9 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "deploy:pages": "pnpm run build && pnpm dlx wrangler pages deploy dist --project-name flow-math",
+    "deploy": "pnpm run deploy:pages",
+    "deploy:pages": "pnpm run build && pnpm run deploy:pages:dist",
+    "deploy:pages:dist": "pnpm dlx wrangler pages deploy dist --project-name flow-math",
     "preview": "vite preview"
   },
   "dependencies": {

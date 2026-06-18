@@ -69,6 +69,26 @@ Manual deploy from an authenticated machine:
 pnpm run deploy:pages
 ```
 
+Cloudflare Pages deploy command, if the dashboard asks for one:
+
+```bash
+pnpm run deploy:pages:dist
+```
+
+Do not use `npx wrangler deploy` for this project. That command is for Workers
+and fails on Pages with a missing Worker entry point or assets directory.
+
+If the Cloudflare dashboard is set up as a Workers Git deployment instead of a
+Pages deployment, keep the same build output and use Wrangler assets:
+
+- Build command: `pnpm run build`
+- Deploy command: `npx wrangler deploy` or blank if Cloudflare supplies it
+- Root/path: `/`
+
+`wrangler.toml` must keep both `pages_build_output_dir = "./dist"` and an
+`[assets]` block with `directory = "./dist"` so Workers Git does not fall back
+to the default Hello World Worker.
+
 ## Browser Testing Notes
 
 - Prefer the in-app browser for local visual checks.
