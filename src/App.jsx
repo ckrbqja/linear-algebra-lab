@@ -18,6 +18,8 @@ import {
   Plus,
   RotateCcw,
   Sigma,
+  SlidersHorizontal,
+  Square,
   VectorSquare,
   X,
   ZoomIn,
@@ -40,6 +42,7 @@ import { managedLocaleMessages, managedPresetLocaleNames } from './i18n.js';
 const ANIMATION_MS = 1001;
 const CAMERA_MOVE_MS = 850;
 const UI_SYNC_MS = 16;
+const VECTOR_SPAWN_MS = 280;
 const SNAP_DISTANCE = 0.08;
 const DRAG_SNAP_DISTANCE = 0.12;
 const AXIS_LOCK_RATIO_3D = 0.045;
@@ -49,11 +52,16 @@ const PLANE_LOCK_MAX_3D = 0.07;
 const SHIFT_AXIS_LOCK_PX = 22;
 const MEASURE_DOT_HEX = 0xf1b434;
 const MEASURE_DOT_GUIDE_HEX = 0xffd66b;
+const MEASURE_LENGTH_HEX = 0x8bd3ff;
 const MEASURE_AREA_HEX = 0xff4fd8;
 const MEASURE_AREA_EDGE_HEX = 0xff9bea;
 const MEASURE_VOLUME_HEX = 0xff7a59;
 const MEASURE_VOLUME_EDGE_HEX = 0xffb199;
+const NOTEBOOK_MIN_VISIBLE_LINES = 10;
+const NOTEBOOK_NORMAL_SPEED = 0.5;
+const DEFAULT_NOTEBOOK_SPEED = NOTEBOOK_NORMAL_SPEED;
 const SCALAR_CONSTRAINT_LINE_RANGE = 5.6;
+const DEFAULT_RELATIVE_GRID_STRENGTH = 0.45;
 const monetizationConfig = {
   adProvider: import.meta.env.VITE_AD_PROVIDER || 'adsense',
   adClient: import.meta.env.VITE_AD_CLIENT || '',
@@ -249,10 +257,13 @@ function readSharedStateFromUrl() {
     showBasis: decoded.showBasis !== false,
     showGrid: decoded.showGrid !== false,
     showRelativeGrid: decoded.showRelativeGrid !== false,
+    relativeGridStrength: normalizeRelativeGridStrength(decoded.relativeGridStrength),
     showCoordinates: decoded.showCoordinates !== false,
     showDot: !!decoded.showDot,
     showAxes: decoded.showAxes !== false,
+    showRelativeAxes: decoded.showRelativeAxes !== false,
     snapToInteger: decoded.snapToInteger !== false,
+    notebookSpeed: normalizeNotebookSpeed(decoded.notebookSpeed),
     camera: normalizeCameraState(decoded.camera),
   };
 }
@@ -406,7 +417,9 @@ function resolveSceneLabelOverlaps(container) {
     if (!Number.isFinite(baseX) || !Number.isFinite(baseY)) return;
 
     const isScalarLabel = label.dataset.dragKey?.startsWith('s:');
-    const isSolutionLabel = label.classList.contains('scalar-solution-label');
+    const isSolutionLabel =
+      label.classList.contains('scalar-solution-label') ||
+      label.classList.contains('equation-solution-label');
     const preferredXOffset = isSolutionLabel ? 18 : 0;
     const preferredYOffset = isScalarLabel ? -20 : isSolutionLabel ? 6 : 0;
 
@@ -561,6 +574,42 @@ function updateVolumeGeometry(meshGeometry, edgeGeometry, a, b, c) {
   ]);
 }
 
+function updateLengthGeometry(meshGeometry, edgeGeometry, a) {
+  setGeometryPositions(meshGeometry, []);
+  setGeometryPositions(edgeGeometry, [
+    0, 0, 0,
+    a.x, a.y, a.z,
+  ]);
+}
+
+function measurementDimensionForMode(mode) {
+  if (mode === '1d') return 1;
+  if (mode === '2d') return 2;
+  return 3;
+}
+
+function effectiveVolumeTargetCount(targetCount, mode) {
+  return Math.min(targetCount, measurementDimensionForMode(mode));
+}
+
+function volumeMeasureKind(targetCount, mode) {
+  const count = effectiveVolumeTargetCount(targetCount, mode);
+  if (count >= 3) return 'volume';
+  if (count === 2) return 'area';
+  return 'length';
+}
+
+function volumeMeasureValue(targets, mode) {
+  const count = effectiveVolumeTargetCount(targets.length, mode);
+  if (count <= 0) return null;
+  const a = new THREE.Vector3(...targets[0].values);
+  if (count === 1) return a.length();
+  const b = new THREE.Vector3(...targets[1].values);
+  if (count === 2) return a.clone().cross(b).length();
+  const c = new THREE.Vector3(...targets[2].values);
+  return Math.abs(a.clone().cross(b).dot(c));
+}
+
 function setAxisLabelText(label, text) {
   if (!label) return;
   const textNode = label.querySelector('.axis-label-text');
@@ -596,12 +645,101 @@ function clamp01(value) {
   return Math.min(1, Math.max(0, value));
 }
 
+function normalizeRelativeGridStrength(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return DEFAULT_RELATIVE_GRID_STRENGTH;
+  return Math.min(1, Math.max(0.2, numeric));
+}
+
+function normalizeNotebookSpeed(value) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return DEFAULT_NOTEBOOK_SPEED;
+  return Math.min(1.25, Math.max(0.35, numeric));
+}
+
+function getNotebookPlaybackRate(value) {
+  return normalizeNotebookSpeed(value) / NOTEBOOK_NORMAL_SPEED;
+}
+
+function formatNotebookSpeedLabel(value) {
+  return `${formatMatrixNumber(getNotebookPlaybackRate(value), 2)}x`;
+}
+
+function easeOutCubic(value) {
+  const t = clamp01(value);
+  return 1 - Math.pow(1 - t, 3);
+}
+
+function interpolateNumberValue(from, to, progress) {
+  const start = parseNumber(from);
+  const end = parseNumber(to);
+  if (!Number.isFinite(start)) return Number.isFinite(end) ? end : 0;
+  if (!Number.isFinite(end)) return start;
+  return start + (end - start) * clamp01(progress);
+}
+
+function interpolateValueStrings(fromValues = [], toValues = [], progress) {
+  const size = Math.max(fromValues.length, toValues.length);
+  return Array.from({ length: size }, (_, index) =>
+    formatPresetInputValue(interpolateNumberValue(fromValues[index] ?? 0, toValues[index] ?? 0, progress))
+  );
+}
+
+function interpolateEquationEntry(fromEntry, toEntry, progress) {
+  if (!fromEntry || !toEntry) return toEntry;
+  const eased = clamp01(progress);
+  const fromCoeffs = [...(fromEntry.coeffs ?? [0, 0, 0]), 0, 0, 0].slice(0, 3);
+  const toCoeffs = [...(toEntry.coeffs ?? [0, 0, 0]), 0, 0, 0].slice(0, 3);
+  const coeffs = fromCoeffs.map((value, index) =>
+    interpolateNumberValue(value, toCoeffs[index], eased)
+  );
+  const value = interpolateNumberValue(fromEntry.value ?? 0, toEntry.value ?? 0, eased);
+  return {
+    ...toEntry,
+    coeffs,
+    value,
+    text: formatEquationFromCoefficients(coeffs, value),
+    dimension: Math.max(fromEntry.dimension ?? 2, toEntry.dimension ?? 2),
+  };
+}
+
 function setMaterialOpacity(material, opacity) {
   const materials = Array.isArray(material) ? material : [material];
   materials.forEach((item) => {
     if (!item) return;
     item.transparent = true;
     item.opacity = opacity;
+  });
+}
+
+function setObjectRevealOpacity(object, revealProgress) {
+  const eased = easeOutCubic(revealProgress);
+  object?.traverse?.((child) => {
+    const material = child.material;
+    if (!material) return;
+    const materials = Array.isArray(material) ? material : [material];
+    materials.forEach((item) => {
+      if (!item) return;
+      if (!Number.isFinite(item.userData.baseOpacity)) {
+        item.userData.baseOpacity = Number.isFinite(item.opacity) ? item.opacity : 1;
+      }
+      item.transparent = true;
+      item.opacity = item.userData.baseOpacity * eased;
+    });
+  });
+}
+
+function scaleObjectOpacity(object, opacityScale) {
+  object?.traverse?.((child) => {
+    const material = child.material;
+    if (!material) return;
+    const materials = Array.isArray(material) ? material : [material];
+    materials.forEach((item) => {
+      if (!item) return;
+      const baseOpacity = Number.isFinite(item.opacity) ? item.opacity : 1;
+      item.transparent = true;
+      item.opacity = baseOpacity * opacityScale;
+    });
   });
 }
 
@@ -701,6 +839,7 @@ function toMatrix4(m) {
 }
 
 function formatNumber(value, digits = 2) {
+  if (!Number.isFinite(value)) return '0';
   if (Math.abs(value) < EPSILON) return '0';
   if (Math.abs(value - Math.round(value)) < EPSILON) return String(Math.round(value));
   return Number(value.toFixed(digits)).toString();
@@ -754,52 +893,43 @@ function formatCompactCoord(values, mode = '3d', digits = 1) {
   return `(${values.slice(0, size).map((value) => formatMatrixNumber(value, digits)).join(', ')})`;
 }
 
+function coordLabelText(name, values, mode = '3d', showCoordinates = true, highlightIndices = []) {
+  if (!showCoordinates) return `${name}\u2032`;
+  const size = mode === '1d' ? 1 : mode === '2d' ? 2 : 3;
+  const highlightSet = new Set(highlightIndices.filter((index) => index >= 0 && index < size));
+  if (!highlightSet.size) return `${name}\u2032 ${formatCoord(values, mode)}`;
+
+  const parts = [{ text: `${name}\u2032 (` }];
+  values.slice(0, size).forEach((value, index) => {
+    parts.push({
+      text: formatMatrixNumber(value, 2),
+      className: highlightSet.has(index) ? 'axis-lock-value' : undefined,
+    });
+    if (index < size - 1) parts.push({ text: ', ' });
+  });
+  parts.push({ text: ')' });
+  return parts;
+}
+
+function scalarLockHighlightIndices(values, mode = '3d') {
+  const size = mode === '1d' ? 1 : mode === '2d' ? 2 : 3;
+  const active = values
+    .slice(0, size)
+    .map((value, index) => ({ index, value: Math.abs(value) }))
+    .filter((entry) => entry.value > EPSILON);
+  if (!active.length) return [];
+  const maxValue = Math.max(...active.map((entry) => entry.value));
+  return active
+    .filter((entry) => entry.value >= maxValue * 0.2)
+    .map((entry) => entry.index);
+}
+
 function dotValues(a, b) {
   return a.reduce((sum, value, index) => sum + value * (b[index] ?? 0), 0);
 }
 
 function vectorLength(values) {
   return Math.sqrt(dotValues(values, values));
-}
-
-function crossLengthValues(a, b) {
-  return Math.hypot(
-    a[1] * b[2] - a[2] * b[1],
-    a[2] * b[0] - a[0] * b[2],
-    a[0] * b[1] - a[1] * b[0]
-  );
-}
-
-function determinantFromColumns(a, b, c) {
-  return determinant3([
-    a[0], b[0], c[0],
-    a[1], b[1], c[1],
-    a[2], b[2], c[2],
-  ]);
-}
-
-function independentBasisKeysForMatrix(matrix) {
-  const candidates = [
-    ['i', [matrix[0], matrix[3], matrix[6]]],
-    ['j', [matrix[1], matrix[4], matrix[7]]],
-    ['k', [matrix[2], matrix[5], matrix[8]]],
-  ];
-  const selected = [];
-  const keys = new Set();
-
-  candidates.forEach(([key, vector]) => {
-    if (vectorLength(vector) <= EPSILON || selected.length >= 3) return;
-    const isIndependent =
-      selected.length === 0 ||
-      (selected.length === 1 && crossLengthValues(selected[0], vector) > EPSILON) ||
-      (selected.length === 2 && Math.abs(determinantFromColumns(selected[0], selected[1], vector)) > EPSILON);
-
-    if (!isIndependent) return;
-    selected.push(vector);
-    keys.add(key);
-  });
-
-  return keys;
 }
 
 function dotRelationText(dotValue, lengthA, lengthB) {
@@ -809,13 +939,29 @@ function dotRelationText(dotValue, lengthA, lengthB) {
 }
 
 function hasScalarText(value) {
-  return String(value ?? '').trim() !== '';
+  const text = String(value ?? '').trim();
+  return text !== '' && text.toLowerCase() !== 'nan';
+}
+
+function cleanScalarText(value) {
+  const text = String(value ?? '');
+  return text.trim().toLowerCase() === 'nan' ? '' : text;
 }
 
 function formatInputValue(value) {
+  if (!Number.isFinite(value)) return '0';
   if (Math.abs(value) < EPSILON) return '0';
   if (Math.abs(value - Math.round(value)) < EPSILON) return String(Math.round(value));
   return Number(value.toFixed(2)).toString();
+}
+
+function isFiniteVector3(vector) {
+  return (
+    !!vector &&
+    Number.isFinite(vector.x) &&
+    Number.isFinite(vector.y) &&
+    Number.isFinite(vector.z)
+  );
 }
 
 function formatPresetInputValue(value) {
@@ -919,6 +1065,7 @@ function snapGuideLabelForVectors(rawVector, snappedVector, mode) {
 
 function solveVectorInputForWorld(matrix, worldVector, mode, options = {}) {
   const { snap = true } = options;
+  if (!isFiniteVector3(worldVector)) return [0, 0, 0];
 
   if (mode === '2d') {
     const [a, b, c, d] = [matrix[0], matrix[1], matrix[3], matrix[4]];
@@ -967,7 +1114,7 @@ function solveVectorInputForWorld(matrix, worldVector, mode, options = {}) {
   ];
   const inverse = inverse3(ata);
   const solved = inverse ? transformVector3(inverse, atb) : [worldVector.x, worldVector.y, worldVector.z];
-  return constrainInputValuesForMode(solved, mode, snap);
+  return solved.every(Number.isFinite) ? constrainInputValuesForMode(solved, mode, snap) : [0, 0, 0];
 }
 
 function viewKeyForMatrix(matrix) {
@@ -1071,6 +1218,12 @@ function operationMatrixFromPreset(preset) {
   return values;
 }
 
+function identityMatrixForMode(mode = '3d') {
+  if (mode === '1d') return [1, 0, 0, 0, 0, 0, 0, 0, 0];
+  if (mode === '2d') return [1, 0, 0, 0, 1, 0, 0, 0, 0];
+  return [...identity3];
+}
+
 function matrixInputValuesForShape(matrix, rows, columns) {
   const values = [];
   for (let row = 0; row < rows; row += 1) {
@@ -1107,6 +1260,484 @@ function operationMatrixFromInputValues(values, rows, columns) {
 
 function operationModeForShape(rows, columns) {
   return rows === columns ? modeForDimension(rows) : '3d';
+}
+
+function identityInputValuesForMode(mode = '2d') {
+  const dimension = dimensionForMode(mode);
+  return matrixInputValuesForShape(identity3, dimension, dimension).map(formatPresetInputValue);
+}
+
+function matrixTextFromValues(values, dimension) {
+  const rows = [];
+  for (let row = 0; row < dimension; row += 1) {
+    rows.push(values.slice(row * dimension, row * dimension + dimension).join(' '));
+  }
+  return rows.join('\n');
+}
+
+function matrixTextFromShapeValues(values, rows, columns) {
+  const lines = [];
+  for (let row = 0; row < rows; row += 1) {
+    lines.push(values.slice(row * columns, row * columns + columns).join(' '));
+  }
+  return lines.join('\n');
+}
+
+function splitNotebookAlias(line) {
+  const source = String(line ?? '');
+  const match = source.match(/^(.*?)(?:\s+)#([^\s#!]+)\s*(!)?\s*$/u);
+  if (!match || !match[1].trim()) return { body: source, alias: null, hidden: false };
+  return {
+    body: match[1].trimEnd(),
+    alias: match[2],
+    hidden: Boolean(match[3]),
+  };
+}
+
+function splitNotebookExecute(line) {
+  const source = String(line ?? '');
+  const match = source.match(/^(.*?)@\s*$/u);
+  if (!match || !match[1].trim()) return { body: source, execute: false };
+  return {
+    body: match[1].trimEnd(),
+    execute: true,
+  };
+}
+
+function splitNotebookSuffixMeta(line) {
+  let body = String(line ?? '').trimEnd();
+  let execute = false;
+  let remove = false;
+  let show = false;
+  let durationSec = null;
+  let changed = true;
+
+  while (changed) {
+    changed = false;
+
+    const durationMatch = body.match(/^(.*?)\s+([+-]?(?:\d+(?:[.,]\d*)?|[.,]\d+)(?:\s*\/\s*[+-]?(?:\d+(?:[.,]\d*)?|[.,]\d+))?)\s*s\s*$/iu);
+    if (durationMatch && durationMatch[1].trim()) {
+      const parsed = parseNumber(durationMatch[2]);
+      if (Number.isFinite(parsed) && parsed > 0) durationSec = parsed;
+      body = durationMatch[1].trimEnd();
+      changed = true;
+      continue;
+    }
+
+    const removeMatch = body.match(/^(.*?)\s+-\s*$/u);
+    if (removeMatch && removeMatch[1].trim()) {
+      remove = true;
+      body = removeMatch[1].trimEnd();
+      changed = true;
+      continue;
+    }
+
+    const showMatch = body.match(/^(.*?)\s+\+\s*$/u);
+    if (showMatch && showMatch[1].trim()) {
+      show = true;
+      body = showMatch[1].trimEnd();
+      changed = true;
+      continue;
+    }
+
+    const executeMatch = body.match(/^(.*?)@\s*$/u);
+    if (executeMatch && executeMatch[1].trim()) {
+      execute = true;
+      body = executeMatch[1].trimEnd();
+      changed = true;
+    }
+  }
+
+  return {
+    body,
+    execute,
+    remove,
+    show,
+    durationSec,
+  };
+}
+
+function splitNotebookMute(line) {
+  const source = String(line ?? '');
+  const match = source.match(/^(\s*)!(?:\s*)(.*)$/u);
+  if (!match) return { body: source, hidden: false };
+  return {
+    body: `${match[1] ?? ''}${match[2] ?? ''}`,
+    hidden: true,
+  };
+}
+
+function splitNotebookLineMeta(line) {
+  const muted = splitNotebookMute(line);
+  const suffixed = splitNotebookSuffixMeta(muted.body);
+  const aliased = splitNotebookAlias(suffixed.body);
+  return {
+    body: aliased.body,
+    alias: aliased.alias,
+    hidden: muted.hidden || aliased.hidden,
+    execute: suffixed.execute,
+    remove: suffixed.remove,
+    show: suffixed.show,
+    durationSec: suffixed.durationSec,
+  };
+}
+
+function appendNotebookAlias(body, alias, hidden = false, execute = false, durationSec = null, remove = false, show = false) {
+  const cleaned = normalizeNotebookVariableName(alias);
+  let result = cleaned ? `${body}  #${cleaned}${hidden ? '!' : ''}` : body;
+  if (execute) result = `${result}@`;
+  if (remove) result = `${result} -`;
+  else if (show) result = `${result} +`;
+  if (Number.isFinite(durationSec) && durationSec > 0) {
+    result = `${result} ${formatMatrixNumber(durationSec, 2)}s`;
+  }
+  return result;
+}
+
+function appendNotebookLineMeta(body, meta = {}) {
+  const aliased = appendNotebookAlias(body, meta.alias, meta.hidden, meta.execute, meta.durationSec, meta.remove, meta.show);
+  return meta.hidden && !meta.alias ? `! ${aliased}` : aliased;
+}
+
+const NOTEBOOK_IDENTIFIER_PATTERN = '[\\p{L}_][\\p{L}\\p{N}_]*';
+const NOTEBOOK_NUMBER_TOKEN_PATTERN = /^[+-]?(?:\d+(?:[.,]\d*)?|[.,]\d+)(?:\s*\/\s*[+-]?(?:\d+(?:[.,]\d*)?|[.,]\d+))?$/u;
+
+function isNotebookNumberToken(value) {
+  return NOTEBOOK_NUMBER_TOKEN_PATTERN.test(String(value ?? '').trim());
+}
+
+function parseNotebookVectorLine(line) {
+  const { body: sourceLine, alias, hidden, durationSec, remove } = splitNotebookLineMeta(line);
+  const trimmed = sourceLine.trim();
+  if (!trimmed || !trimmed.includes(',')) return null;
+  const assignment = trimmed.match(new RegExp(`^(${NOTEBOOK_IDENTIFIER_PATTERN})\\s*(?:=|:)\\s*(.+)$`, 'u'));
+  const assignedName = assignment?.[1] ?? null;
+  const name = alias ?? assignedName;
+  const source = assignment?.[2] ?? trimmed;
+  const body = trimmed
+    ? source
+    .replace(/^[([{<]\s*/, '')
+    .replace(/\s*[)\]}>]$/, '')
+    : '';
+  const parts = body.split(',').map((part) => part.trim()).filter(Boolean);
+  if (parts.length < 2 || parts.length > 3) return null;
+  if (!parts.every(isNotebookNumberToken)) return null;
+  const values = parts.map((part) => parseNumber(part));
+  if (!values.every(Number.isFinite)) return null;
+  return {
+    name,
+    alias,
+    assignedName,
+    hidden,
+    execute: true,
+    explicitExecute: true,
+    remove,
+    durationSec,
+    dimension: parts.length,
+    values: [
+      formatPresetInputValue(values[0] ?? 0),
+      formatPresetInputValue(values[1] ?? 0),
+      formatPresetInputValue(values[2] ?? 0),
+    ],
+  };
+}
+
+function normalizeNotebookVariableName(value, fallback = '') {
+  const cleaned = String(value ?? '')
+    .trim()
+    .replace(/[^\p{L}\p{N}_]/gu, '_')
+    .replace(/^(\p{N})/u, '_$1');
+  return cleaned || fallback;
+}
+
+function notebookVariableKey(value) {
+  return normalizeNotebookVariableName(value).toLowerCase();
+}
+
+function resolveNotebookVariableName(value, knownNames) {
+  const fallback = normalizeNotebookVariableName(value);
+  if (!fallback) return fallback;
+  return knownNames?.get?.(notebookVariableKey(fallback)) ?? fallback;
+}
+
+function rememberNotebookVariableName(knownNames, value) {
+  const normalized = normalizeNotebookVariableName(value);
+  if (!normalized) return normalized;
+  const key = notebookVariableKey(normalized);
+  if (!knownNames.has(key)) knownNames.set(key, normalized);
+  return knownNames.get(key) ?? normalized;
+}
+
+function notebookVectorIdForName(name, index) {
+  return `notebook-${normalizeNotebookVariableName(name, `v${index + 1}`)}`;
+}
+
+function measurementStateKey(type, targets) {
+  return `${type}:${[...targets].sort().join('|')}`;
+}
+
+function parseNotebookMeasurementLine(line, knownNames = new Map(), knownShapes = new Map()) {
+  const { body: sourceLine, alias, hidden, durationSec, remove } = splitNotebookLineMeta(line);
+  const trimmed = sourceLine.trim();
+  if (!trimmed) return null;
+  const match = trimmed.match(/^(dot|det)\s*\((.*)\)\s*$/iu);
+  if (match) {
+    const kind = match[1].toLowerCase();
+    const names = match[2]
+      .split(',')
+      .map((part) => resolveNotebookVariableName(part.trim(), knownNames))
+      .filter(Boolean);
+    if (kind === 'dot' && names.length < 2) return null;
+    if (kind === 'det' && names.length < 2) return null;
+    return {
+      type: kind === 'dot' ? 'dot' : 'volume',
+      alias,
+      hidden,
+      remove,
+      durationSec,
+      execute: true,
+      names: kind === 'dot' ? names.slice(0, 2) : names.slice(0, 3),
+    };
+  }
+
+  const product = trimmed.match(new RegExp(`^(${NOTEBOOK_IDENTIFIER_PATTERN})\\s*(?:\\*|횞)\\s*(${NOTEBOOK_IDENTIFIER_PATTERN})$`, 'u'));
+  if (!product) return null;
+  const leftName = resolveNotebookVariableName(product[1], knownNames);
+  const rightName = resolveNotebookVariableName(product[2], knownNames);
+  const leftShape = knownShapes.get(notebookVariableKey(leftName));
+  const rightShape = knownShapes.get(notebookVariableKey(rightName));
+  if (leftShape?.kind !== 'vector' || rightShape?.kind !== 'vector') return null;
+  return {
+    type: 'dot',
+    alias,
+    hidden,
+    remove,
+    durationSec,
+    execute: true,
+    notation: 'product',
+    names: [leftName, rightName],
+  };
+}
+
+function parseNotebookCaptionLine(line) {
+  const { body: sourceLine, hidden, durationSec, remove } = splitNotebookLineMeta(line);
+  const trimmed = sourceLine.trim();
+  if (!trimmed.startsWith('//')) return null;
+  const text = trimmed.replace(/^\/\/\s?/u, '').trim();
+  if (!text && !remove) return null;
+  return {
+    text,
+    hidden,
+    remove,
+    durationSec,
+  };
+}
+
+function parseNotebookCalculationLine(line) {
+  const { body: sourceLine, alias, hidden, execute, durationSec, remove } = splitNotebookLineMeta(line);
+  const trimmed = sourceLine.trim();
+  if (!trimmed || !/[=*×]/.test(trimmed)) return null;
+  const assignment = trimmed.match(new RegExp(`^(${NOTEBOOK_IDENTIFIER_PATTERN})\\s*=\\s*(.+)$`, 'u'));
+  const assignedTarget = assignment?.[1] ?? null;
+  const target = alias ?? assignedTarget;
+  const expression = (assignment?.[2] ?? trimmed).trim();
+  const product = expression.match(new RegExp(`^(${NOTEBOOK_IDENTIFIER_PATTERN})\\s*(?:\\*|×)\\s*(${NOTEBOOK_IDENTIFIER_PATTERN})$`, 'u'));
+  if (!product) return null;
+  return {
+    target,
+    alias,
+    assignedTarget,
+    hidden,
+    execute: true,
+    explicitExecute: Boolean(execute),
+    remove,
+    durationSec,
+    left: product[1],
+    right: product[2],
+  };
+}
+
+function multiplyNotebookMatrixVector(matrix, vectorValues) {
+  return transformVector3(matrix, vectorValues.map((value) => parseNumber(value))).map(formatPresetInputValue);
+}
+
+function notebookMatrixShape(matrix) {
+  const rows = Math.max(1, Math.min(3, Number(matrix?.rows) || 3));
+  const columns = Math.max(1, Math.min(3, Number(matrix?.columns) || rows));
+  const shapedValues = Array.isArray(matrix?.shapeValues)
+    ? matrix.shapeValues
+    : Array.isArray(matrix?.values)
+      ? matrixInputValuesForShape(matrix.values, rows, columns)
+      : [];
+  const values = Array.from({ length: rows * columns }, (_, index) =>
+    parseNumber(shapedValues[index] ?? (index % (columns + 1) === 0 ? '1' : '0'))
+  );
+  return { rows, columns, values };
+}
+
+function multiplyNotebookMatrices(leftMatrix, rightMatrix) {
+  const left = notebookMatrixShape(leftMatrix);
+  const right = notebookMatrixShape(rightMatrix);
+  if (left.columns !== right.rows) return null;
+
+  const shapeValues = [];
+  for (let row = 0; row < left.rows; row += 1) {
+    for (let column = 0; column < right.columns; column += 1) {
+      let sum = 0;
+      for (let shared = 0; shared < left.columns; shared += 1) {
+        sum += left.values[row * left.columns + shared] * right.values[shared * right.columns + column];
+      }
+      shapeValues.push(formatPresetInputValue(sum));
+    }
+  }
+
+  return {
+    type: 'matrix',
+    rows: left.rows,
+    columns: right.columns,
+    mode: operationModeForShape(left.rows, right.columns),
+    shapeValues,
+    values: operationMatrixFromInputValues(shapeValues, left.rows, right.columns),
+  };
+}
+
+function formatEquationFromCoefficients(coeffs, value) {
+  const terms = coeffs
+    .map((coefficient, index) => ({ coefficient, variable: equationVariables[index] }))
+    .filter((term) => Math.abs(term.coefficient) > EPSILON);
+  if (!terms.length) return `0 = ${formatMatrixNumber(value, 3)}`;
+  const left = terms
+    .map((term, index) => `${formatEquationCoefficient(term.coefficient, index === 0)}${term.variable}`)
+    .join('')
+    .trim();
+  return `${left} = ${formatMatrixNumber(value, 3)}`;
+}
+
+function transformNotebookEquation(equation, matrixEntry) {
+  if (!equation || !matrixEntry) return null;
+  const coeffs = [...(equation.coeffs ?? [0, 0, 0]), 0, 0, 0].slice(0, 3);
+  const value = Number(equation.value ?? 0);
+  const equationDimension = Math.abs(coeffs[2]) > EPSILON ? 3 : 2;
+  const matrixDimension = Math.max(matrixEntry.rows ?? 2, matrixEntry.columns ?? 2);
+  const dimension = Math.max(equationDimension, matrixDimension >= 3 ? 3 : 2);
+
+  if (dimension <= 2) {
+    const [a, b, c, d] = matrixValuesForMode(matrixEntry.values, '2d');
+    const det = a * d - b * c;
+    if (Math.abs(det) < EPSILON) return null;
+    const inverse = [d / det, -b / det, -c / det, a / det];
+    const nextCoeffs = [
+      inverse[0] * coeffs[0] + inverse[2] * coeffs[1],
+      inverse[1] * coeffs[0] + inverse[3] * coeffs[1],
+      0,
+    ];
+    return {
+      type: 'equation',
+      coeffs: nextCoeffs,
+      value,
+      text: formatEquationFromCoefficients(nextCoeffs, value),
+      dimension: 2,
+    };
+  }
+
+  const inverse = inverse3(matrixEntry.values);
+  if (!inverse) return null;
+  const nextCoeffs = [
+    inverse[0] * coeffs[0] + inverse[3] * coeffs[1] + inverse[6] * coeffs[2],
+    inverse[1] * coeffs[0] + inverse[4] * coeffs[1] + inverse[7] * coeffs[2],
+    inverse[2] * coeffs[0] + inverse[5] * coeffs[1] + inverse[8] * coeffs[2],
+  ];
+  return {
+    type: 'equation',
+    coeffs: nextCoeffs,
+    value,
+    text: formatEquationFromCoefficients(nextCoeffs, value),
+    dimension: 3,
+  };
+}
+
+function parseNotebookReferenceLine(line, knownNames = new Map(), knownShapes = new Map()) {
+  const meta = splitNotebookLineMeta(line);
+  const trimmed = meta.body.trim().replace(/^#\s*/u, '');
+  if (!new RegExp(`^${NOTEBOOK_IDENTIFIER_PATTERN}$`, 'u').test(trimmed)) return null;
+  const name = resolveNotebookVariableName(trimmed, knownNames);
+  const shape = knownShapes.get(notebookVariableKey(name));
+  if (!shape) return null;
+  return {
+    ...meta,
+    name,
+    refKind: shape.kind,
+    shape,
+    execute: true,
+    explicitExecute: Boolean(meta.execute),
+  };
+}
+
+function parseNotebookNumericRowLine(line) {
+  const trimmed = splitNotebookLineMeta(line).body.trim();
+  if (parseNotebookVectorLine(trimmed)) return null;
+  if (!trimmed || /[a-zㄱ-ㅎㅏ-ㅣ가-힣一-龥ぁ-んァ-ン=]/i.test(trimmed)) return null;
+  if (!/^[\d\s.,/+()-]+$/.test(trimmed)) return null;
+  const numberPattern = /[+-]?(?:\d+(?:[.,]\d*)?|[.,]\d+)(?:\s*\/\s*[+-]?(?:\d+(?:[.,]\d*)?|[.,]\d+))?/g;
+  const matches = trimmed.match(numberPattern) ?? [];
+  if (matches.length < 2 || !/\S\s+\S/.test(trimmed)) return null;
+  return matches;
+}
+
+function notebookMatrixRowsFromText(text) {
+  const source = String(text ?? '').replace(/\r/g, '');
+  return source
+    .split('\n')
+    .map((line) => parseNotebookNumericRowLine(line) ?? [])
+    .filter((row) => row.length > 0);
+}
+
+function notebookMatrixModeFromText(text, fallbackMode = '2d') {
+  const rows = notebookMatrixRowsFromText(text);
+  if (rows.length >= 1 && rows.length <= 3 && rows.every((row) => row.length === rows.length)) {
+    return modeForDimension(rows.length);
+  }
+  const valueCount = rows.reduce((total, row) => total + row.length, 0);
+  const dimension = Math.sqrt(valueCount);
+  if (Number.isInteger(dimension) && dimension >= 1 && dimension <= 3) return modeForDimension(dimension);
+  return fallbackMode;
+}
+
+function matrixValuesFromNotebookText(text, mode = '2d') {
+  const resolvedMode = notebookMatrixModeFromText(text, mode);
+  const dimension = dimensionForMode(resolvedMode);
+  const rows = notebookMatrixRowsFromText(text);
+  const rowValues = rows.flatMap((row) => row);
+  const values = Array.from({ length: dimension * dimension }, (_, index) =>
+    formatPresetInputValue(parseNumber(rowValues[index] ?? (index % (dimension + 1) === 0 ? '1' : '0')))
+  );
+  return values;
+}
+
+function createNotebookEquationCell(text = '') {
+  return {
+    id: `equation-cell-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    type: 'equation',
+    text,
+  };
+}
+
+function createNotebookMatrixCell(mode = '2d') {
+  const dimension = dimensionForMode(mode);
+  return {
+    id: `matrix-cell-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    type: 'matrix',
+    mode,
+    text: matrixTextFromValues(identityInputValuesForMode(mode), dimension),
+  };
+}
+
+function createNotebookNoteCell(text = '') {
+  return {
+    id: `note-cell-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    type: 'note',
+    text,
+  };
 }
 
 function inverseForStep(matrix, mode = '3d') {
@@ -1215,8 +1846,8 @@ function scalarIdFromDragKey(key) {
 }
 
 const equationVariables = ['x', 'y', 'z'];
-const equationLineColors = [0xff6575, 0x22c1b6, 0xf1b434, 0x8b5cf6, 0x41cf76, 0x78a5ff];
-const vectorPalette = [0x8b5cf6, 0xf1b434, 0x22c1b6, 0xff6575, 0x41cf76, 0x78a5ff];
+const equationLineColors = [0xf59e0b, 0xa855f7, 0xec4899, 0xf97316, 0xd946ef, 0xeab308];
+const vectorPalette = [0x8b5cf6, 0xf59e0b, 0xec4899, 0xf97316, 0xd946ef, 0xeab308];
 const equationExamples = {
   unique: ['x + y = 3', '2x - y = 0'],
   infinite: ['2x + 2y = 4', 'x + y = 2'],
@@ -1227,6 +1858,36 @@ const equationExamples = {
 
 function colorToHex(color) {
   return `#${color.toString(16).padStart(6, '0')}`;
+}
+
+function equationSceneLabelName(item, mode, index) {
+  const prefix = mode === '3d' ? 'P' : 'L';
+  return `${prefix}${(item?.index ?? index) + 1}`;
+}
+
+function equationSceneLabelKey(item, mode, index) {
+  return `${mode}:${item?.index ?? index}`;
+}
+
+function equationRevealKey(item, mode, index) {
+  return `equation:${mode === '3d' ? 'plane' : 'line'}:${item?.index ?? index}`;
+}
+
+function equationAnchorPoint(item, mode) {
+  if (!item) return null;
+  const normal = mode === '3d'
+    ? new THREE.Vector3(item.a, item.b, item.c)
+    : new THREE.Vector3(item.a, item.b, 0);
+  const lengthSquared = normal.lengthSq();
+  if (lengthSquared < EPSILON) return null;
+  return normal.multiplyScalar((Number(item.value) || 0) / lengthSquared);
+}
+
+function equationSceneLabelText(item, mode, index, showCoordinates = true) {
+  const name = equationSceneLabelName(item, mode, index);
+  if (!showCoordinates) return `${name}\u2032`;
+  const coeffs = mode === '3d' ? [item.a, item.b, item.c] : [item.a, item.b, 0];
+  return `${name}\u2032 ${formatEquationFromCoefficients(coeffs, item.value)}`;
 }
 
 function createVectorState(index, overrides = {}) {
@@ -1249,7 +1910,9 @@ function parseExpression(expression) {
   const coeffs = [0, 0, 0];
   let constant = 0;
   const compact = expression
+    .normalize('NFKC')
     .toLowerCase()
+    .replace(/[−–—]/g, '-')
     .replace(/[−–—]/g, '-')
     .replace(/\*/g, '')
     .replace(/,/g, '.')
@@ -1257,7 +1920,6 @@ function parseExpression(expression) {
     .replace(/([+\-])\s+([xyz])/gi, '$1$2')
     .replace(/([+\-])\s+/g, '$1')
     .trim()
-    .replace(/\s+(?=[^+\-])/g, '+')
     .replace(/\s+/g, '')
     .replace(/\+\-/g, '-');
 
@@ -1270,19 +1932,20 @@ function parseExpression(expression) {
   terms.forEach((term) => {
     const sign = term.startsWith('-') ? -1 : 1;
     const body = term.slice(1);
-    const variableMatch = body.match(/^((?:\d+(?:\.\d*)?|\.\d+)?)?([xyz])$/i);
+    const numberPattern = '(?:\\d+(?:\\.\\d*)?|\\.\\d+)(?:\\/(?:\\d+(?:\\.\\d*)?|\\.\\d+))?';
+    const variableMatch = body.match(new RegExp(`^(${numberPattern})?([xyz])$`, 'i'));
 
     if (variableMatch) {
       const variableIndex = equationVariables.indexOf(variableMatch[2].toLowerCase());
       const coefficientText = variableMatch[1] ?? '';
-      const coefficient = coefficientText ? Number(coefficientText) : 1;
+      const coefficient = coefficientText ? parseNumber(coefficientText) : 1;
       if (!Number.isFinite(coefficient)) throw new Error('coefficient');
       coeffs[variableIndex] += sign * coefficient;
       return;
     }
 
-    if (/^(?:\d+(?:\.\d*)?|\.\d+)$/.test(body)) {
-      constant += sign * Number(body);
+    if (/^(?:\d+(?:\.\d*)?|\.\d+)(?:\/(?:\d+(?:\.\d*)?|\.\d+))?$/.test(body)) {
+      constant += sign * parseNumber(body);
       return;
     }
 
@@ -1293,7 +1956,8 @@ function parseExpression(expression) {
 }
 
 function parseEquation(text) {
-  const trimmed = text.trim();
+  const source = splitNotebookLineMeta(text).body;
+  const trimmed = source.normalize('NFKC').replace(/[＝]/g, '=').trim();
   if (!trimmed) return null;
   const parts = trimmed.split('=');
   if (parts.length > 2) throw new Error('equals');
@@ -1304,6 +1968,803 @@ function parseEquation(text) {
     coeffs: left.coeffs.map((value, index) => value - right.coeffs[index]),
     value: right.constant - left.constant,
   };
+}
+
+function formatEquationCoefficient(value, isFirst = false) {
+  const sign = value < 0 ? '-' : '+';
+  const absolute = Math.abs(value);
+  const coefficient = Math.abs(absolute - 1) < EPSILON ? '' : formatMatrixNumber(absolute, 3);
+  return `${isFirst ? (sign === '-' ? '- ' : '') : ` ${sign} `}${coefficient}`;
+}
+
+function prettifyEquationLine(text) {
+  const meta = splitNotebookLineMeta(text);
+  const { body, alias, hidden } = meta;
+  if (!body.trim()) return '';
+  try {
+    const parsed = parseEquation(body);
+    if (!parsed) return '';
+    const terms = parsed.coeffs
+      .map((coefficient, index) => ({ coefficient, variable: equationVariables[index] }))
+      .filter((term) => Math.abs(term.coefficient) > EPSILON);
+    if (!terms.length) return appendNotebookLineMeta(`0 = ${formatMatrixNumber(parsed.value, 3)}`, meta);
+
+    const left = terms
+      .map((term, index) => `${formatEquationCoefficient(term.coefficient, index === 0)}${term.variable}`)
+      .join('')
+      .trim();
+    return appendNotebookLineMeta(`${left} = ${formatMatrixNumber(parsed.value, 3)}`, meta);
+  } catch {
+    return appendNotebookLineMeta(body.trim().replace(/\s+/g, ' '), meta);
+  }
+}
+
+function prettifyEquationNoteText(text) {
+  return text
+    .replace(/\r/g, '')
+    .split('\n')
+    .map((line) => prettifyEquationLine(line))
+    .join('\n');
+}
+
+function parsedEquationLine(text) {
+  const trimmed = splitNotebookLineMeta(text).body.trim();
+  if (!trimmed || !trimmed.includes('=')) return null;
+  try {
+    const parsed = parseEquation(trimmed);
+    if (!parsed || !parsed.coeffs.some((coefficient) => Math.abs(coefficient) > EPSILON)) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function prettifyNotebookScriptText(text) {
+  let equationCount = 0;
+  let vectorCount = 0;
+  let matrixCount = 0;
+  let calculationCount = 0;
+  const lines = String(text ?? '').replace(/\r/g, '').split('\n');
+  const output = [];
+  const knownNames = new Map();
+  const knownShapes = new Map();
+
+  const prettifyNoteLine = (sourceLine) => {
+    const trimmed = String(sourceLine ?? '').trim();
+    if (!trimmed) return '';
+    if (trimmed.startsWith('//')) return `// ${trimmed.replace(/^\/\/\s?/u, '').trim()}`;
+    if (trimmed.startsWith('#')) return trimmed;
+    return `# ${trimmed}`;
+  };
+
+  for (let index = 0; index < lines.length;) {
+    const line = lines[index];
+    if (!line.trim()) {
+      output.push('');
+      index += 1;
+      continue;
+    }
+
+      const equationLine = parsedEquationLine(line);
+      if (equationLine) {
+        equationCount += 1;
+        const meta = splitNotebookLineMeta(line);
+        const prefix = Math.abs(equationLine.coeffs[2]) > EPSILON || /\bz\b/i.test(meta.body) ? 'P' : 'L';
+        const equationAlias = rememberNotebookVariableName(
+          knownNames,
+          normalizeNotebookVariableName(meta.alias, `${prefix}${equationCount}`)
+        );
+        const lineWithAlias = meta.alias
+          ? line
+          : appendNotebookLineMeta(meta.body, { ...meta, alias: equationAlias });
+        knownShapes.set(notebookVariableKey(equationAlias), {
+          kind: 'equation',
+          coeffs: equationLine.coeffs,
+          value: equationLine.value,
+          dimension: prefix === 'P' ? 3 : 2,
+        });
+      output.push(prettifyEquationLine(lineWithAlias));
+      index += 1;
+      continue;
+      }
+
+      const captionLine = parseNotebookCaptionLine(line);
+      if (captionLine) {
+        output.push(appendNotebookLineMeta(captionLine.text ? `// ${captionLine.text}` : '//', captionLine));
+        index += 1;
+        continue;
+      }
+
+      const measurementLine = parseNotebookMeasurementLine(line, knownNames, knownShapes);
+      if (measurementLine) {
+        const expression = measurementLine.type === 'dot'
+          ? measurementLine.notation === 'product'
+            ? `${measurementLine.names[0]} * ${measurementLine.names[1]}`
+            : `dot(${measurementLine.names[0]}, ${measurementLine.names[1]})`
+          : `det(${measurementLine.names.join(', ')})`;
+        output.push(appendNotebookLineMeta(expression, measurementLine));
+        index += 1;
+        continue;
+      }
+
+      const vectorLine = parseNotebookVectorLine(line);
+      if (vectorLine) {
+      vectorCount += 1;
+        const vectorText = vectorLine.values.slice(0, vectorLine.dimension).join(', ');
+      if (vectorLine.alias) {
+        rememberNotebookVariableName(knownNames, vectorLine.alias);
+        knownShapes.set(notebookVariableKey(vectorLine.alias), {
+          kind: 'vector',
+          dimension: vectorLine.dimension,
+        });
+        output.push(appendNotebookLineMeta(vectorText, vectorLine));
+        index += 1;
+        continue;
+      }
+      const vectorAlias = normalizeNotebookVariableName(vectorLine.assignedName, `v${vectorCount}`);
+      const resolvedVectorAlias = rememberNotebookVariableName(knownNames, vectorAlias);
+        knownShapes.set(notebookVariableKey(resolvedVectorAlias), {
+          kind: 'vector',
+          dimension: vectorLine.dimension,
+        });
+        const next = vectorLine.assignedName ? `${resolvedVectorAlias} = ${vectorText}` : vectorText;
+      output.push(appendNotebookLineMeta(next, { ...vectorLine, alias: resolvedVectorAlias }));
+      index += 1;
+      continue;
+      }
+
+      const calculationLine = parseNotebookCalculationLine(line);
+      if (calculationLine) {
+      calculationCount += 1;
+        const leftName = resolveNotebookVariableName(calculationLine.left, knownNames);
+        const rightName = resolveNotebookVariableName(calculationLine.right, knownNames);
+        const leftShape = knownShapes.get(notebookVariableKey(leftName));
+        const rightShape = knownShapes.get(notebookVariableKey(rightName));
+        const isMatrixProduct = leftShape?.kind === 'matrix' && rightShape?.kind === 'matrix';
+        const isVectorProduct =
+          (leftShape?.kind === 'matrix' && rightShape?.kind === 'vector') ||
+          (leftShape?.kind === 'vector' && rightShape?.kind === 'matrix');
+        const isEquationProduct =
+          (leftShape?.kind === 'matrix' && rightShape?.kind === 'equation') ||
+          (leftShape?.kind === 'equation' && rightShape?.kind === 'matrix');
+        const defaultTarget = isMatrixProduct
+          ? rightName
+          : isVectorProduct
+            ? (leftShape?.kind === 'vector' ? leftName : rightName)
+            : isEquationProduct
+              ? (leftShape?.kind === 'equation' ? leftName : rightName)
+              : null;
+        const rememberCalculationShape = (targetName) => {
+          if (!targetName) return;
+          const normalizedTarget = rememberNotebookVariableName(knownNames, targetName);
+          const shape = isMatrixProduct
+            ? { kind: 'matrix', rows: leftShape.rows, columns: rightShape.columns }
+            : isEquationProduct
+              ? {
+                  kind: 'equation',
+                  coeffs: (leftShape?.kind === 'equation' ? leftShape : rightShape)?.coeffs ?? [0, 0, 0],
+                  value: (leftShape?.kind === 'equation' ? leftShape : rightShape)?.value ?? 0,
+                  dimension: Math.max(leftShape?.dimension ?? 2, rightShape?.dimension ?? 2),
+                }
+              : isVectorProduct
+                ? { kind: 'vector', dimension: leftShape?.rows ?? rightShape?.dimension ?? 3 }
+                : null;
+          if (shape) knownShapes.set(notebookVariableKey(normalizedTarget), shape);
+        };
+        const expression = `${leftName} * ${rightName}`;
+      if (calculationLine.alias) {
+        rememberNotebookVariableName(knownNames, calculationLine.alias);
+        rememberCalculationShape(calculationLine.alias);
+        output.push(appendNotebookLineMeta(expression, {
+          ...calculationLine,
+          execute: calculationLine.explicitExecute,
+        }));
+        index += 1;
+        continue;
+      }
+      if (calculationLine.assignedTarget) {
+        const calculationAlias = normalizeNotebookVariableName(calculationLine.assignedTarget, `r${calculationCount}`);
+        const resolvedCalculationAlias = rememberNotebookVariableName(knownNames, calculationAlias);
+        rememberCalculationShape(resolvedCalculationAlias);
+        output.push(appendNotebookLineMeta(`${resolvedCalculationAlias} = ${expression}`, {
+          ...calculationLine,
+          alias: undefined,
+          execute: calculationLine.explicitExecute,
+        }));
+        index += 1;
+        continue;
+      }
+      rememberCalculationShape(defaultTarget);
+      output.push(appendNotebookLineMeta(expression, {
+        ...calculationLine,
+        alias: undefined,
+        execute: calculationLine.explicitExecute,
+      }));
+      index += 1;
+      continue;
+      }
+
+      const referenceLine = parseNotebookReferenceLine(line, knownNames, knownShapes);
+      if (referenceLine) {
+        const shouldShowReference = !referenceLine.remove && referenceLine.refKind !== 'matrix';
+        output.push(appendNotebookLineMeta(referenceLine.name, {
+          execute: referenceLine.explicitExecute,
+          remove: referenceLine.remove,
+          show: shouldShowReference,
+          durationSec: referenceLine.durationSec,
+        }));
+        index += 1;
+        continue;
+      }
+
+      const numericRow = parseNotebookNumericRowLine(line);
+      if (numericRow) {
+      const matrixRows = [];
+      let rowIndex = index;
+      while (rowIndex < lines.length) {
+        const row = parseNotebookNumericRowLine(lines[rowIndex]);
+        if (!row) break;
+        const meta = splitNotebookLineMeta(lines[rowIndex]);
+        matrixRows.push({ row, meta });
+        rowIndex += 1;
+      }
+
+      const rows = matrixRows.length;
+      const columns = matrixRows[0]?.row.length ?? 0;
+      const hasMatrixBlockBreak = rowIndex >= lines.length || !lines[rowIndex].trim();
+      const isMatrixBlock =
+        hasMatrixBlockBreak &&
+        rows >= 2 &&
+        rows <= 3 &&
+        columns >= 1 &&
+        columns <= 3 &&
+        matrixRows.every((item) => item.row.length === columns);
+
+      if (isMatrixBlock) {
+        matrixCount += 1;
+        const matrixAlias = matrixRows.map((item) => item.meta.alias).find(Boolean) ?? `M${matrixCount}`;
+        const resolvedMatrixAlias = rememberNotebookVariableName(knownNames, matrixAlias);
+        const matrixExecute = matrixRows.some((rowItem) => rowItem.meta.execute);
+        const matrixRemove = matrixRows.some((rowItem) => rowItem.meta.remove);
+        const matrixDurationSec = matrixRows.map((rowItem) => rowItem.meta.durationSec).find(Number.isFinite) ?? null;
+        knownShapes.set(notebookVariableKey(resolvedMatrixAlias), {
+          kind: 'matrix',
+          rows,
+          columns,
+        });
+        matrixRows.forEach((item, itemIndex) => {
+          output.push(
+            appendNotebookLineMeta(
+              item.row.map((value) => formatPresetInputValue(parseNumber(value))).join(' '),
+              {
+                hidden: item.meta.hidden,
+                alias: itemIndex === 0 ? resolvedMatrixAlias : undefined,
+                execute: itemIndex === 0 && matrixExecute,
+                remove: itemIndex === 0 && matrixRemove,
+                durationSec: itemIndex === 0 ? matrixDurationSec : null,
+              }
+            )
+          );
+        });
+        index = rowIndex;
+        continue;
+      }
+
+      matrixRows.forEach((item) => {
+        output.push(
+          appendNotebookLineMeta(
+            item.row.map((value) => formatPresetInputValue(parseNumber(value))).join(' '),
+            item.meta
+          )
+        );
+      });
+      index = rowIndex;
+      continue;
+    }
+
+    output.push(prettifyNoteLine(line));
+    index += 1;
+  }
+
+  return output.join('\n');
+}
+
+function notebookStarterText(locale) {
+  const equationLines = t(locale, 'equationNotePlaceholder')
+    .split('\n')
+    .map((line, index) => appendNotebookAlias(line, `L${index + 1}`))
+    .join('\n');
+  return `${equationLines}\n\n2 1  #M1\n1 2\n\n# ${t(locale, 'notePlaceholder')}`;
+}
+
+function notebookPlaceholderText(locale) {
+  return `${notebookStarterText(locale)}   [Tab]`;
+}
+
+function parseNotebookScript(text) {
+  const lines = String(text ?? '').replace(/\r/g, '').split('\n');
+  const cells = [];
+  const marks = Array.from({ length: Math.max(1, lines.length) }, () => null);
+  let equationCount = 0;
+  let matrixCount = 0;
+  let vectorCount = 0;
+  let calculationCount = 0;
+  let measurementCount = 0;
+  let scriptMode = '2d';
+  let index = 0;
+  const knownNames = new Map();
+  const knownShapes = new Map();
+
+  const flushEquationBlock = (block) => {
+    if (!block.length) return;
+    const visibleBlock = block.filter((item) => !item.hidden);
+    const hasZ = visibleBlock.some((item) => Math.abs(item.parsed.coeffs[2]) > EPSILON || /\bz\b/i.test(item.line));
+    if (hasZ) scriptMode = '3d';
+    const prefix = hasZ ? 'P' : 'L';
+    const textBlock = visibleBlock.map((item) => item.body.trim()).join('\n');
+    const equationLineDurations = block
+      .filter((item) => Number.isFinite(item.durationSec) && item.durationSec > 0)
+      .map((item) => ({
+        line: item.index,
+        durationSec: item.durationSec,
+      }));
+    const equationItems = [];
+      block.forEach((item) => {
+        equationCount += 1;
+        const defaultLabel = `${prefix}${equationCount}`;
+        const equationName = rememberNotebookVariableName(
+          knownNames,
+          normalizeNotebookVariableName(item.alias, defaultLabel)
+        );
+        const color = equationLineColors[(equationCount - 1) % equationLineColors.length];
+        marks[item.index] = {
+          kind: 'equation',
+          label: equationName,
+          color,
+          hidden: item.hidden,
+        };
+        knownShapes.set(notebookVariableKey(equationName), {
+          kind: 'equation',
+          coeffs: item.parsed.coeffs,
+          value: item.parsed.value,
+          dimension: hasZ ? 3 : 2,
+        });
+        if (!item.hidden) {
+          equationItems.push({
+            name: equationName,
+            text: item.body.trim(),
+            coeffs: item.parsed.coeffs,
+            value: item.parsed.value,
+            color,
+            dimension: hasZ ? 3 : 2,
+          });
+        }
+      });
+    cells.push({
+      id: `script-equation-${block[0].index}-${block[block.length - 1].index}`,
+      type: 'equation',
+      text: textBlock,
+      equations: equationItems,
+      hidden: visibleBlock.length === 0,
+      lineDurations: equationLineDurations,
+      lineStart: block[0].index,
+      lineEnd: block[block.length - 1].index,
+    });
+  };
+
+  while (index < lines.length) {
+    const line = lines[index];
+    const lineMeta = splitNotebookLineMeta(line);
+    const trimmed = lineMeta.body.trim();
+    if (!trimmed) {
+      index += 1;
+      continue;
+    }
+
+    const captionLine = parseNotebookCaptionLine(lines[index]);
+    if (captionLine) {
+      marks[index] = {
+        kind: 'caption',
+        label: 'CC',
+        color: 0xf1b434,
+        hidden: captionLine.hidden,
+      };
+      cells.push({
+        id: `script-caption-${index}`,
+        type: 'caption',
+        text: captionLine.text,
+        hidden: captionLine.hidden,
+        remove: captionLine.remove,
+        durationSec: captionLine.durationSec,
+        lineStart: index,
+        lineEnd: index,
+      });
+      index += 1;
+      continue;
+    }
+
+    const measurementLine = parseNotebookMeasurementLine(lines[index], knownNames, knownShapes);
+    if (measurementLine) {
+      measurementCount += 1;
+      const defaultLabel = `${measurementLine.type === 'dot' ? 'dot' : 'det'}${measurementCount}`;
+      const measurementName = rememberNotebookVariableName(
+        knownNames,
+        normalizeNotebookVariableName(measurementLine.alias, defaultLabel)
+      );
+      marks[index] = {
+        kind: 'measurement',
+        label: measurementName,
+        color: measurementLine.type === 'dot' ? MEASURE_DOT_HEX : MEASURE_AREA_HEX,
+        hidden: measurementLine.hidden,
+      };
+      cells.push({
+        id: `script-measure-${index}`,
+        type: 'measurement',
+        measureType: measurementLine.type,
+        name: measurementName,
+        names: measurementLine.names,
+        hidden: measurementLine.hidden,
+        lineStart: index,
+        lineEnd: index,
+      });
+      index += 1;
+      continue;
+    }
+
+    const vectorLine = parseNotebookVectorLine(lines[index]);
+    if (vectorLine) {
+      vectorCount += 1;
+      const vectorName = rememberNotebookVariableName(
+        knownNames,
+        normalizeNotebookVariableName(vectorLine.name, `v${vectorCount}`)
+      );
+      const vectorColor = vectorPalette[(vectorCount - 1) % vectorPalette.length];
+      if (vectorLine.dimension >= 3) scriptMode = '3d';
+      marks[index] = {
+        kind: 'vector',
+        label: vectorName,
+        color: vectorColor,
+        hidden: vectorLine.hidden,
+      };
+      cells.push({
+        id: `script-vector-${index}`,
+        type: 'vector',
+        name: vectorName,
+        values: vectorLine.values,
+        dimension: vectorLine.dimension,
+        color: vectorColor,
+        hidden: vectorLine.hidden,
+        remove: vectorLine.remove,
+        durationSec: vectorLine.durationSec,
+        lineStart: index,
+        lineEnd: index,
+      });
+      knownShapes.set(notebookVariableKey(vectorName), {
+        kind: 'vector',
+        dimension: vectorLine.dimension,
+      });
+      index += 1;
+      continue;
+    }
+
+    const calculationLine = parseNotebookCalculationLine(lines[index]);
+    if (calculationLine) {
+      calculationCount += 1;
+      const leftName = resolveNotebookVariableName(calculationLine.left, knownNames);
+      const rightName = resolveNotebookVariableName(calculationLine.right, knownNames);
+      const leftShape = knownShapes.get(notebookVariableKey(leftName));
+      const rightShape = knownShapes.get(notebookVariableKey(rightName));
+      const isMatrixProduct = leftShape?.kind === 'matrix' && rightShape?.kind === 'matrix';
+      const isVectorProduct =
+        (leftShape?.kind === 'matrix' && rightShape?.kind === 'vector') ||
+        (leftShape?.kind === 'vector' && rightShape?.kind === 'matrix');
+      const isEquationProduct =
+        (leftShape?.kind === 'matrix' && rightShape?.kind === 'equation') ||
+        (leftShape?.kind === 'equation' && rightShape?.kind === 'matrix');
+      const defaultTarget = isMatrixProduct
+        ? rightName
+        : isVectorProduct
+          ? (leftShape?.kind === 'vector' ? leftName : rightName)
+          : isEquationProduct
+            ? (leftShape?.kind === 'equation' ? leftName : rightName)
+            : null;
+      const hasCalculationTarget = Boolean(calculationLine.target || defaultTarget);
+      const calculationName = hasCalculationTarget
+        ? rememberNotebookVariableName(
+            knownNames,
+            normalizeNotebookVariableName(calculationLine.target ?? defaultTarget, `r${calculationCount}`)
+          )
+        : null;
+      const resultRows = isMatrixProduct ? leftShape.rows : null;
+      const resultColumns = isMatrixProduct ? rightShape.columns : null;
+      const resultKind = isMatrixProduct ? 'matrix' : isEquationProduct ? 'equation' : 'vector';
+      const calculationColor = isMatrixProduct
+        ? 0x0e7490
+        : isEquationProduct
+          ? equationLineColors[(equationCount + calculationCount - 1) % equationLineColors.length]
+        : vectorPalette[(vectorCount + calculationCount - 1) % vectorPalette.length];
+      marks[index] = hasCalculationTarget
+        ? {
+            kind: resultKind,
+            label: calculationName,
+            color: calculationColor,
+            hidden: calculationLine.hidden,
+          }
+        : { kind: 'note', label: '', color: calculationColor, hidden: calculationLine.hidden };
+      cells.push({
+        id: `script-calc-${index}`,
+        type: 'calc',
+        resultKind,
+        execute: calculationLine.execute,
+        name: calculationName,
+        left: leftName,
+        right: rightName,
+        rows: resultRows,
+        columns: resultColumns,
+        color: calculationColor,
+        hidden: calculationLine.hidden,
+        durationSec: calculationLine.durationSec,
+        lineStart: index,
+        lineEnd: index,
+      });
+      if (hasCalculationTarget) {
+        knownShapes.set(notebookVariableKey(calculationName), isMatrixProduct
+          ? { kind: 'matrix', rows: resultRows, columns: resultColumns }
+          : isEquationProduct
+            ? {
+                kind: 'equation',
+                coeffs: (leftShape?.kind === 'equation' ? leftShape : rightShape)?.coeffs ?? [0, 0, 0],
+                value: (leftShape?.kind === 'equation' ? leftShape : rightShape)?.value ?? 0,
+                dimension: Math.max(leftShape?.dimension ?? 2, rightShape?.dimension ?? 2),
+              }
+            : { kind: 'vector', dimension: leftShape?.rows ?? rightShape?.dimension ?? 3 }
+        );
+      }
+      index += 1;
+      continue;
+    }
+
+    const referenceLine = parseNotebookReferenceLine(lines[index], knownNames, knownShapes);
+    if (referenceLine) {
+      const refColor = referenceLine.refKind === 'matrix'
+        ? 0x0e7490
+        : referenceLine.refKind === 'equation'
+          ? equationLineColors[equationCount % equationLineColors.length]
+          : vectorPalette[vectorCount % vectorPalette.length];
+      marks[index] = {
+        kind: referenceLine.remove ? 'note' : referenceLine.refKind,
+        label: referenceLine.remove ? '' : referenceLine.name,
+        color: refColor,
+        hidden: referenceLine.hidden,
+      };
+      cells.push({
+        id: `script-ref-${index}`,
+        type: 'ref',
+        name: referenceLine.name,
+        refKind: referenceLine.refKind,
+        execute: true,
+        remove: referenceLine.remove,
+        hidden: referenceLine.hidden,
+        durationSec: referenceLine.durationSec,
+        lineStart: index,
+        lineEnd: index,
+      });
+      index += 1;
+      continue;
+    }
+
+    const equationBlock = [];
+    while (index < lines.length) {
+      const parsed = parsedEquationLine(lines[index]);
+      if (!parsed) break;
+      const { body, alias, hidden, durationSec, remove } = splitNotebookLineMeta(lines[index]);
+      equationBlock.push({ index, line: lines[index], body, alias, hidden, durationSec, remove, parsed });
+      index += 1;
+    }
+    if (equationBlock.length) {
+      flushEquationBlock(equationBlock);
+      continue;
+    }
+
+    const matrixRows = [];
+    const startIndex = index;
+    while (index < lines.length) {
+      const row = parseNotebookNumericRowLine(lines[index]);
+      if (!row) break;
+      const rowMeta = splitNotebookLineMeta(lines[index]);
+      matrixRows.push({
+        index,
+        row,
+        alias: rowMeta.alias,
+        hidden: rowMeta.hidden,
+        execute: rowMeta.execute,
+        remove: rowMeta.remove,
+        durationSec: rowMeta.durationSec,
+      });
+      index += 1;
+    }
+    if (matrixRows.length) {
+      const hasMatrixBlockBreak = index < lines.length && !lines[index].trim();
+      const rows = matrixRows.length;
+      const columns = matrixRows[0]?.row.length ?? 0;
+      if (
+        hasMatrixBlockBreak &&
+        rows >= 2 &&
+        rows <= 3 &&
+        columns >= 1 &&
+        columns <= 3 &&
+        matrixRows.every((item) => item.row.length === columns)
+      ) {
+        matrixCount += 1;
+        const matrixAlias = matrixRows.map((item) => item.alias).find(Boolean);
+        const matrixName = rememberNotebookVariableName(
+          knownNames,
+          normalizeNotebookVariableName(matrixAlias, `M${matrixCount}`)
+        );
+        const matrixHidden = matrixRows.some((item) => item.hidden);
+        const matrixExecute = matrixRows.some((item) => item.execute);
+        const matrixRemove = matrixRows.some((item) => item.remove);
+        const matrixDurationSec = matrixRows.map((item) => item.durationSec).find(Number.isFinite) ?? null;
+        const scriptDimension = dimensionForMode(scriptMode);
+        const shouldEmbedSquare = rows === columns && rows < scriptDimension;
+        const targetRows = shouldEmbedSquare ? scriptDimension : rows;
+        const targetColumns = shouldEmbedSquare ? scriptDimension : columns;
+        const mode = operationModeForShape(targetRows, targetColumns);
+        const values = shouldEmbedSquare
+          ? matrixInputValuesForShape(identity3, targetRows, targetColumns).map(formatPresetInputValue)
+          : Array.from({ length: targetRows * targetColumns }, () => '0');
+        matrixRows.forEach((item, rowIndex) => {
+          item.row.forEach((value, columnIndex) => {
+            values[rowIndex * targetColumns + columnIndex] = formatPresetInputValue(parseNumber(value));
+          });
+        });
+        const matrixText = matrixTextFromShapeValues(values, targetRows, targetColumns);
+        marks[startIndex] = {
+          kind: 'matrix',
+          label: matrixName,
+          color: 0x0e7490,
+          span: matrixRows.length,
+          hidden: matrixHidden,
+        };
+        matrixRows.slice(1).forEach((item) => {
+          marks[item.index] = { kind: 'matrix-row', label: '', color: 0x0e7490, hidden: matrixHidden };
+        });
+        cells.push({
+          id: `script-matrix-${startIndex}-${matrixRows[matrixRows.length - 1].index}`,
+          type: 'matrix',
+          name: matrixName,
+          execute: matrixExecute,
+          mode,
+          rows: targetRows,
+          columns: targetColumns,
+          values,
+          text: matrixText,
+          hidden: matrixHidden,
+          remove: matrixRemove,
+          durationSec: matrixDurationSec,
+          lineStart: startIndex,
+          lineEnd: matrixRows[matrixRows.length - 1].index,
+        });
+        knownShapes.set(notebookVariableKey(matrixName), {
+          kind: 'matrix',
+          rows: targetRows,
+          columns: targetColumns,
+        });
+      }
+      continue;
+    }
+
+    marks[index] = { kind: 'note', label: '', color: 0x8b5cf6, hidden: lineMeta.hidden };
+    index += 1;
+  }
+
+  if (!cells.length) {
+    cells.push({
+      id: 'script-empty',
+      type: 'equation',
+      text: '',
+      lineStart: 0,
+      lineEnd: 0,
+    });
+  }
+
+  return {
+    cells,
+    lineCount: Math.max(1, lines.length),
+    marks,
+    mode: scriptMode,
+  };
+}
+
+function notebookMatrixCellSignature(cell) {
+  if (
+    !cell ||
+    (
+      cell.type !== 'matrix' &&
+      !(cell.type === 'calc' && cell.resultKind === 'matrix') &&
+      !(cell.type === 'ref' && cell.refKind === 'matrix')
+    )
+  ) return '';
+  const values = cell.type === 'calc'
+    ? `${cell.left ?? ''}*${cell.right ?? ''}`
+    : cell.type === 'ref'
+      ? `${cell.name ?? ''}`
+      : Array.isArray(cell.values)
+      ? cell.values.join(',')
+      : String(cell.text ?? '');
+  return [
+    cell.lineStart ?? 0,
+    cell.lineEnd ?? cell.lineStart ?? 0,
+    `${cell.rows ?? ''}x${cell.columns ?? ''}`,
+    cell.execute === false ? 'declare' : 'execute',
+    cell.durationSec ?? '',
+    values,
+  ].join(':');
+}
+
+function notebookMatrixSignatures(cells) {
+  return cells
+    .filter((cell) =>
+      !cell.hidden &&
+      (
+        cell.type === 'matrix' ||
+        (cell.type === 'calc' && cell.resultKind === 'matrix') ||
+        (cell.type === 'ref' && cell.refKind === 'matrix')
+      )
+    )
+    .map(notebookMatrixCellSignature);
+}
+
+function notebookModeForCells(cells, fallback = '2d') {
+  let has2d = false;
+  for (const cell of cells ?? []) {
+    if (!cell || cell.hidden) continue;
+    if (cell.type === 'equation') {
+      if (/\bz\b/i.test(cell.text ?? '')) return '3d';
+      if (String(cell.text ?? '').trim()) has2d = true;
+      continue;
+    }
+    if (cell.type === 'vector') {
+      if ((cell.dimension ?? 0) >= 3) return '3d';
+      if ((cell.dimension ?? 0) >= 2) has2d = true;
+      continue;
+    }
+    if (cell.type === 'matrix') {
+      const mode = cell.mode ?? operationModeForShape(cell.rows ?? 3, cell.columns ?? 3);
+      if (mode === '3d') return '3d';
+      if (mode === '2d') has2d = true;
+      continue;
+    }
+    if (cell.type === 'calc' && cell.resultKind === 'matrix') {
+      const mode = operationModeForShape(cell.rows ?? 3, cell.columns ?? 3);
+      if (mode === '3d') return '3d';
+      if (mode === '2d') has2d = true;
+    }
+  }
+  return has2d ? '2d' : fallback;
+}
+
+function notebookCellSignature(cell) {
+  if (!cell) return '';
+  return [
+    cell.type,
+    cell.lineStart ?? '',
+    cell.lineEnd ?? '',
+    cell.name ?? '',
+    cell.hidden ? 'hidden' : '',
+    cell.execute === false ? 'declare' : 'execute',
+    cell.remove ? 'remove' : '',
+    cell.durationSec ?? '',
+    Array.isArray(cell.lineDurations)
+      ? cell.lineDurations.map((item) => `${item.line ?? ''}=${item.durationSec ?? ''}`).join(',')
+      : '',
+    cell.resultKind ?? '',
+    cell.refKind ?? '',
+    cell.text ?? '',
+    Array.isArray(cell.values) ? cell.values.join(',') : '',
+    cell.left ?? '',
+    cell.right ?? '',
+  ].join(':');
 }
 
 function solveEquationSystem(equations) {
@@ -1428,6 +2889,30 @@ function formatGeneralSolution(solution) {
   return [formatSolutionTuple(solution.particular), ...basisTerms].join(' + ');
 }
 
+function formatLineSolutionEquation(line) {
+  if (!line) return '';
+  return formatEquationFromCoefficients([line.a, line.b, 0], line.value);
+}
+
+function solutionGeometryLabelKey(solution) {
+  const degrees = solution?.nullspaceBasis?.length ?? 0;
+  if (degrees === 1) return 'solutionKindLine';
+  if (degrees >= 2) return 'solutionKindPlane';
+  return null;
+}
+
+function solutionLabelAnchor(solution) {
+  if (!solution || solution.status !== 'infinite' || !solution.nullspaceBasis?.length) return null;
+  if (solution.nullspaceBasis.length === 1) {
+    return closestSolutionCenter(solution.particular, solution.nullspaceBasis).toArray();
+  }
+  return [
+    Number(solution.particular?.[0]) || 0,
+    Number(solution.particular?.[1]) || 0,
+    Number(solution.particular?.[2]) || 0,
+  ];
+}
+
 function parseLineEquation(text, index) {
   const parsed = parseEquation(text);
   if (!parsed) return null;
@@ -1512,13 +2997,102 @@ function scalarLineSegmentForEquation(line, range = SCALAR_CONSTRAINT_LINE_RANGE
   ];
 }
 
+function disposeObject3D(object) {
+  if (!object) return;
+  object.traverse?.((child) => {
+    child.geometry?.dispose?.();
+    if (Array.isArray(child.material)) {
+      child.material.forEach((material) => material?.dispose?.());
+    } else {
+      child.material?.dispose?.();
+    }
+  });
+}
+
 function clearEquationGroup(group) {
   if (!group) return;
-  group.children.forEach((child) => {
-    child.geometry?.dispose?.();
-    child.material?.dispose?.();
+  [...group.children].forEach((child) => {
+    disposeObject3D(child);
+    group.remove(child);
   });
-  group.clear();
+}
+
+function createDotMeasurementVisual() {
+  const group = new THREE.Group();
+  const mainGeometry = new THREE.BufferGeometry();
+  const guideGeometry = new THREE.BufferGeometry();
+  const mainMaterial = new THREE.LineBasicMaterial({
+    color: MEASURE_DOT_HEX,
+    transparent: true,
+    opacity: 0.96,
+    depthTest: false,
+    depthWrite: false,
+  });
+  const guideMaterial = new THREE.LineDashedMaterial({
+    color: MEASURE_DOT_GUIDE_HEX,
+    transparent: true,
+    opacity: 0.32,
+    dashSize: 0.12,
+    gapSize: 0.08,
+    depthTest: false,
+    depthWrite: false,
+  });
+  const pointGeometry = new THREE.SphereGeometry(0.055, 18, 12);
+  const pointMaterial = new THREE.MeshBasicMaterial({
+    color: MEASURE_DOT_HEX,
+    transparent: true,
+    opacity: 1,
+    depthTest: false,
+    depthWrite: false,
+  });
+  const mainLine = new THREE.LineSegments(mainGeometry, mainMaterial);
+  const guideLine = new THREE.LineSegments(guideGeometry, guideMaterial);
+  const point = new THREE.Mesh(pointGeometry, pointMaterial);
+  group.add(mainLine, guideLine, point);
+  return { kind: 'dot', group, mainLine, guideLine, point };
+}
+
+function createVolumeMeasurementVisual() {
+  const group = new THREE.Group();
+  const meshGeometry = new THREE.BufferGeometry();
+  const edgeGeometry = new THREE.BufferGeometry();
+  const meshMaterial = new THREE.MeshBasicMaterial({
+    color: MEASURE_AREA_HEX,
+    transparent: true,
+    opacity: 0.2,
+    side: THREE.DoubleSide,
+    depthWrite: false,
+  });
+  const edgeMaterial = new THREE.LineBasicMaterial({
+    color: MEASURE_AREA_EDGE_HEX,
+    transparent: true,
+    opacity: 0.86,
+    depthTest: false,
+    depthWrite: false,
+  });
+  const mesh = new THREE.Mesh(meshGeometry, meshMaterial);
+  const edges = new THREE.LineSegments(edgeGeometry, edgeMaterial);
+  group.add(mesh, edges);
+  return { kind: 'volume', group, mesh, edges };
+}
+
+function disposeMeasurementVisual(visual) {
+  if (!visual) return;
+  visual.group.parent?.remove(visual.group);
+  disposeObject3D(visual.group);
+}
+
+function getMeasurementVisual(refs, item, kind) {
+  if (!refs.measurementVisuals) refs.measurementVisuals = new Map();
+  let visual = refs.measurementVisuals.get(item.id);
+  if (!visual || visual.kind !== kind) {
+    disposeMeasurementVisual(visual);
+    visual = kind === 'dot' ? createDotMeasurementVisual() : createVolumeMeasurementVisual();
+    refs.measurementGroup.add(visual.group);
+    refs.measurementVisuals.set(item.id, visual);
+  }
+  visual.group.visible = true;
+  return visual;
 }
 
 function parseEquationRows(equations) {
@@ -1651,6 +3225,62 @@ function statusKeyForLineSystem(status) {
   if (status === 'none3d') return 'solutionStatusNone';
   if (status === 'invalid') return 'invalidFormat';
   return 'waitingInput';
+}
+
+function buildLineSystemInfo(lineSystem) {
+  const variableCount = lineSystem.mode === '3d' ? 3 : 2;
+  const equationCount = lineSystem.mode === '3d' ? lineSystem.planes.length : lineSystem.lines.length;
+  const rankA = lineSystem.solution?.rankA ?? lineSystem.rankA;
+  const rankAugmented = lineSystem.solution?.rankAugmented ?? lineSystem.rankAugmented;
+  const freeCount = typeof rankA === 'number' ? Math.max(0, variableCount - rankA) : null;
+
+  let solutionDimension = null;
+  if (lineSystem.status === 'unique' || lineSystem.status === 'unique3d') solutionDimension = 0;
+  if (lineSystem.status === 'single' || lineSystem.status === 'same') solutionDimension = 1;
+  if (lineSystem.status === 'single3d') solutionDimension = 2;
+  if (lineSystem.status === 'infinite3d') {
+    solutionDimension = lineSystem.solution?.nullspaceBasis?.length ?? null;
+  }
+
+  let kindKey = null;
+  if (solutionDimension === 0) kindKey = 'solutionKindPoint';
+  if (solutionDimension === 1) kindKey = 'solutionKindLine';
+  if (solutionDimension === 2) kindKey = 'solutionKindPlane';
+  if (lineSystem.status === 'none' || lineSystem.status === 'parallel' || lineSystem.status === 'none3d') {
+    kindKey = 'solutionKindEmpty';
+  }
+
+  let noteKey = 'solutionEducationWaiting';
+  if (lineSystem.status === 'invalid') noteKey = 'solutionEducationInvalid';
+  else if (lineSystem.status === 'unique' || lineSystem.status === 'unique3d') noteKey = 'solutionEducationPoint';
+  else if (lineSystem.status === 'single' || lineSystem.status === 'same') noteKey = 'solutionEducationLine';
+  else if (lineSystem.status === 'single3d') noteKey = 'solutionEducationPlane';
+  else if (lineSystem.status === 'infinite3d') {
+    noteKey = solutionDimension === 1 ? 'solutionEducationLine' : 'solutionEducationPlane';
+  } else if (lineSystem.status === 'none' || lineSystem.status === 'parallel' || lineSystem.status === 'none3d') {
+    noteKey = 'solutionEducationNone';
+  }
+
+  let solutionText = '';
+  if (lineSystem.point) {
+    solutionText = formatCoord(lineSystem.point, lineSystem.mode);
+  } else if (lineSystem.mode === '2d' && (lineSystem.status === 'single' || lineSystem.status === 'same')) {
+    solutionText = formatLineSolutionEquation(lineSystem.lines[0]);
+  } else if (lineSystem.status === 'infinite3d') {
+    solutionText = formatGeneralSolution(lineSystem.solution);
+  }
+
+  return {
+    equationCount,
+    freeCount,
+    kindKey,
+    noteKey,
+    rankA,
+    rankAugmented,
+    solutionDimension,
+    solutionText,
+    variableCount,
+  };
 }
 
 function relationText(relation, lines) {
@@ -1921,8 +3551,9 @@ function closestSolutionCenter(particular, basisVectors) {
   return anchor;
 }
 
-function createSolutionHighlightObjects(solution, color = 0xf1b434, size = 4.8) {
+function createSolutionHighlightObjects(solution, color = 0xf1b434, size = 5.8) {
   if (!solution || solution.status !== 'infinite' || !solution.nullspaceBasis?.length) return [];
+  if (solution.nullspaceBasis.length !== 1) return [];
 
   const center = closestSolutionCenter(solution.particular, solution.nullspaceBasis);
   const objects = [];
@@ -1936,11 +3567,11 @@ function createSolutionHighlightObjects(solution, color = 0xf1b434, size = 4.8) 
     const curve = new THREE.LineCurve3(start, end);
 
     const glow = new THREE.Mesh(
-      new THREE.TubeGeometry(curve, 24, index === 0 ? 0.13 : 0.095, 12, false),
+      new THREE.TubeGeometry(curve, 24, index === 0 ? 0.095 : 0.07, 12, false),
       new THREE.MeshBasicMaterial({
         color,
         transparent: true,
-        opacity: index === 0 ? 0.26 : 0.16,
+        opacity: index === 0 ? 0.22 : 0.13,
         depthTest: false,
         depthWrite: false,
       })
@@ -1948,11 +3579,11 @@ function createSolutionHighlightObjects(solution, color = 0xf1b434, size = 4.8) 
     glow.renderOrder = 36;
 
     const core = new THREE.Mesh(
-      new THREE.TubeGeometry(curve, 24, index === 0 ? 0.048 : 0.036, 10, false),
+      new THREE.TubeGeometry(curve, 24, index === 0 ? 0.034 : 0.026, 10, false),
       new THREE.MeshBasicMaterial({
         color: index === 0 ? color : 0xffffff,
         transparent: true,
-        opacity: index === 0 ? 0.98 : 0.72,
+        opacity: index === 0 ? 0.92 : 0.62,
         depthTest: false,
         depthWrite: false,
       })
@@ -2275,12 +3906,20 @@ export default function App() {
   const iLabelRef = useRef(null);
   const jLabelRef = useRef(null);
   const kLabelRef = useRef(null);
+  const equationSolutionLabelRef = useRef(null);
   const scalarSolutionLabelRef = useRef(null);
+  const equationLabelRefs = useRef(new Map());
   const vectorLabelRefs = useRef(new Map());
   const vectorDotLabelRefs = useRef(new Map());
   const measurementLabelRefs = useRef(new Map());
   const vectorVolumeLabelRef = useRef(null);
   const scrubTrackRef = useRef(null);
+  const notebookProgressRef = useRef(null);
+  const notebookSceneProgressRef = useRef(null);
+  const notebookPlaybackFrameRef = useRef(null);
+  const notebookMatrixSignatureRef = useRef(null);
+  const notebookVisualSignatureRef = useRef(null);
+  const notebookReplayFromStartRef = useRef(false);
   const historyStripRef = useRef(null);
   const panelScrollRef = useRef(null);
   const arrowDragRef = useRef({
@@ -2336,6 +3975,8 @@ export default function App() {
   });
   const cameraLockedRef = useRef(false);
   const zoomLockedRef = useRef(false);
+  const cameraAutoRef = useRef(initialShare.workspaceMode === 'system');
+  const autoCameraTargetViewRef = useRef(initialShare.workspaceMode === 'system' ? '2d' : '3d');
   const userVectorRef = useRef(
     initialShare.vectors?.[0]
       ? [parseNumber(initialShare.vectors[0].x), parseNumber(initialShare.vectors[0].y), parseNumber(initialShare.vectors[0].z)]
@@ -2344,14 +3985,15 @@ export default function App() {
   const vectorsRef = useRef([]);
   const measurementsRef = useRef([]);
   const scalarSolutionRef = useRef(null);
+  const notebookHasVisualVectorsRef = useRef(false);
+  const notebookHasMatrixCellsRef = useRef(false);
+  const notebookVectorTransformRef = useRef([...identity3]);
   const activeVectorIdRef = useRef(initialShare.vectors?.[0]?.id ?? 'v1');
   const nextVectorIndexRef = useRef(2);
   const nextMeasurementIndexRef = useRef(1);
   const measureModeRef = useRef(null);
   const measureDraftRef = useRef([]);
   const vectorToolModeRef = useRef('vector');
-  const timelineCloseTimerRef = useRef(null);
-  const timelinePinnedRef = useRef(false);
   const uiStateRef = useRef({
     showVolume: false,
     showVector: true,
@@ -2359,22 +4001,23 @@ export default function App() {
     basisVisibility: { i: true, j: true, k: true },
     showGrid: true,
     showRelativeGrid: true,
+    relativeGridStrength: DEFAULT_RELATIVE_GRID_STRENGTH,
     showCoordinates: true,
     showCoordinateNumbers: true,
     showDot: false,
     showAxes: true,
+    showRelativeAxes: true,
   });
   const workspaceModeRef = useRef('transform');
   const systemDimensionRef = useRef('2d');
+  const lineSystemRef = useRef(null);
 
   const [isLoaded, setIsLoaded] = useState(false);
   const [isSidebarOpen, setIsSidebarOpen] = useState(() => {
     if (typeof window === 'undefined') return true;
     return !window.matchMedia('(max-width: 760px)').matches;
   });
-  const [isTimelineOpen, setIsTimelineOpen] = useState(false);
-  const [isTimelinePinned, setIsTimelinePinned] = useState(false);
-  const isTimelineExpanded = isTimelineOpen || isTimelinePinned;
+  const [isAnimationFocus, setIsAnimationFocus] = useState(false);
   const [workspaceMode, setWorkspaceMode] = useState(initialShare.workspaceMode ?? 'transform');
   const [inputMode, setInputMode] = useState(initialShare.inputMode ?? '3d');
   const [displayMatrix, setDisplayMatrix] = useState([...(initialShare.displayMatrix ?? identity3)]);
@@ -2385,7 +4028,14 @@ export default function App() {
   const [vectors, setVectors] = useState(initialShare.vectors ?? [createVectorState(0, { id: 'v1', name: 'v1' })]);
   const [activeVectorId, setActiveVectorId] = useState(initialShare.vectors?.[0]?.id ?? 'v1');
   const [vectorToolMode, setVectorToolMode] = useState('vector');
-  const [equations, setEquations] = useState(equationExamples.infinite);
+  const [equations, setEquations] = useState(['']);
+  const [notebookText, setNotebookText] = useState('');
+  const [notebookCells, setNotebookCells] = useState(() => [
+    createNotebookEquationCell(''),
+  ]);
+  const [activeNotebookCellId, setActiveNotebookCellId] = useState(null);
+  const [notebookCursor, setNotebookCursor] = useState(0);
+  const [activeNotebookCaption, setActiveNotebookCaption] = useState('');
   const [history, setHistory] = useState([
     {
       name: t(initialLocale, 'initialSpace'),
@@ -2404,6 +4054,7 @@ export default function App() {
   const [activeView, setActiveView] = useState(initialShare.camera ? null : '3d');
   const [cameraLocked, setCameraLocked] = useState(false);
   const [zoomLocked, setZoomLocked] = useState(false);
+  const [cameraAuto, setCameraAuto] = useState(initialShare.workspaceMode === 'system');
   const [cameraState, setCameraState] = useState(initialShare.camera ?? null);
   const [locale, setLocale] = useState(initialLocale);
   const [showVolume, setShowVolume] = useState(initialShare.showVolume ?? false);
@@ -2412,17 +4063,43 @@ export default function App() {
   const [basisVisibility, setBasisVisibility] = useState({ i: true, j: true, k: true });
   const [showGrid, setShowGrid] = useState(initialShare.showGrid ?? true);
   const [showRelativeGrid, setShowRelativeGrid] = useState(initialShare.showRelativeGrid ?? true);
+  const [relativeGridStrength, setRelativeGridStrength] = useState(
+    normalizeRelativeGridStrength(initialShare.relativeGridStrength)
+  );
   const [showCoordinates, setShowCoordinates] = useState(initialShare.showCoordinates ?? true);
   const [showDot, setShowDot] = useState(initialShare.showDot ?? false);
   const [showAxes, setShowAxes] = useState(initialShare.showAxes ?? true);
+  const [showRelativeAxes, setShowRelativeAxes] = useState(initialShare.showRelativeAxes ?? true);
   const [snapToInteger, setSnapToInteger] = useState(initialShare.snapToInteger ?? true);
+  const [notebookSpeed, setNotebookSpeed] = useState(normalizeNotebookSpeed(initialShare.notebookSpeed));
+  const [notebookPlaying, setNotebookPlaying] = useState(false);
   const [measureMode, setMeasureMode] = useState(null);
   const [measureDraft, setMeasureDraft] = useState([]);
+  const [measureAnchorId, setMeasureAnchorId] = useState(null);
   const [measurePointer, setMeasurePointer] = useState(null);
   const [dragSnapGuide, setDragSnapGuide] = useState(null);
   const [hoveredMeasureTargetId, setHoveredMeasureTargetId] = useState(null);
   const [measurements, setMeasurements] = useState([]);
   const [hoveredMatrixPresetId, setHoveredMatrixPresetId] = useState(null);
+
+  const stopPanelPointerPropagation = useCallback((event) => {
+    event.stopPropagation();
+  }, []);
+
+  const handlePanelPointerDown = useCallback((event) => {
+    event.stopPropagation();
+    arrowDragRef.current.active = false;
+    arrowDragRef.current.key = null;
+    arrowDragRef.current.snapped = false;
+    setDragSnapGuide(null);
+    setMeasurePointer(null);
+    setHoveredMeasureTargetId(null);
+  }, []);
+
+  const preventPanelNativeDrag = useCallback((event) => {
+    event.preventDefault();
+    event.stopPropagation();
+  }, []);
 
   const allLocked = cameraLocked && zoomLocked;
   const displayMode = viewKeyForMatrix(displayMatrix);
@@ -2469,6 +4146,10 @@ export default function App() {
   const previewIndex = hoveredHistoryIndex ?? activeHistoryIndex;
   const previewHistory = history[previewIndex] ?? history[activeHistoryIndex] ?? history.at(-1);
   const currentHistory = history[activeHistoryIndex] ?? history.at(-1);
+  const displayedHistoryEntries = useMemo(
+    () => history.map((step, index) => ({ step, index })).reverse(),
+    [history]
+  );
   const activeVector = useMemo(
     () => vectors.find((item) => item.id === activeVectorId) ?? vectors[0] ?? createVectorState(0, { id: 'v1', name: 'v1' }),
     [activeVectorId, vectors]
@@ -2604,22 +4285,25 @@ export default function App() {
         let value = null;
         if (item.type === 'dot' && targets.length >= 2) {
           value = dotValues(targets[0].values, targets[1].values);
-        } else if (item.type === 'volume' && targets.length >= 2) {
-          const a = new THREE.Vector3(...targets[0].values);
-          const b = new THREE.Vector3(...targets[1].values);
-          value = targets.length >= 3
-            ? Math.abs(a.clone().cross(b).dot(new THREE.Vector3(...targets[2].values)))
-            : a.clone().cross(b).length();
+        } else if (item.type === 'volume' && targets.length >= 1) {
+          value = volumeMeasureValue(targets, displayMode);
         }
+        const measureKind = item.type === 'volume'
+          ? volumeMeasureKind(targets.length, displayMode)
+          : item.type;
+        const labelTargets = item.type === 'volume'
+          ? targets.slice(0, effectiveVolumeTargetCount(targets.length, displayMode))
+          : targets;
         return {
           ...item,
           targetIds: item.targets,
           targets,
-          label: targets.map((target) => `A${target.name}`).join(' · '),
+          measureKind,
+          label: labelTargets.map((target) => `A${target.name}`).join(' · '),
           value,
         };
       }),
-    [measureTargetMap, measurements]
+    [displayMode, measureTargetMap, measurements]
   );
   const dotMeasurementSummaries = useMemo(
     () => measurementSummaries.filter((item) => item.type === 'dot'),
@@ -2661,6 +4345,198 @@ export default function App() {
   const currentModeLabel = displayMode.toUpperCase();
   const equationSolution = useMemo(() => solveEquationSystem(equations), [equations]);
   const lineSystem = useMemo(() => analyzeEquationGeometry(equations), [equations]);
+  lineSystemRef.current = lineSystem;
+  const notebookScript = useMemo(() => parseNotebookScript(notebookText), [notebookText]);
+  const effectiveSystemMode = lineSystem.mode === '3d' || notebookScript.mode === '3d' ? '3d' : '2d';
+  const equationLabelItems = useMemo(() => {
+    const mode = lineSystem.mode === '3d' ? '3d' : '2d';
+    const items = mode === '3d' ? lineSystem.planes : lineSystem.lines;
+    return items.map((item, index) => ({
+      key: equationSceneLabelKey(item, mode, index),
+      name: equationSceneLabelName(item, mode, index),
+      color: item.color ?? equationLineColors[index % equationLineColors.length],
+    }));
+  }, [lineSystem]);
+  const systemMatrixMode = effectiveSystemMode;
+  const systemMatrixDimension = dimensionForMode(systemMatrixMode);
+  const notebookMatrixSignatureList = useMemo(() => notebookMatrixSignatures(notebookScript.cells), [notebookScript.cells]);
+  const notebookMatrixSignatureKey = notebookMatrixSignatureList.join('\n');
+  const notebookVisualSignatureKey = useMemo(
+    () => notebookScript.cells.map(notebookCellSignature).join('\n'),
+    [notebookScript.cells]
+  );
+  const notebookTokenStyles = useMemo(() => {
+    const styles = new Map();
+    notebookScript.marks.forEach((mark) => {
+      if (!mark?.label) return;
+      styles.set(notebookVariableKey(mark.label), {
+        label: mark.label,
+        kind: mark.kind,
+        color: mark.color ?? 0x8b5cf6,
+        hidden: Boolean(mark.hidden),
+      });
+    });
+    notebookScript.cells.forEach((cell) => {
+      if (!cell?.name) return;
+      styles.set(notebookVariableKey(cell.name), {
+        label: cell.name,
+        kind: cell.type,
+        color: cell.color ?? (cell.type === 'matrix' ? 0x0e7490 : 0x8b5cf6),
+        hidden: Boolean(cell.hidden),
+      });
+    });
+    return styles;
+  }, [notebookScript.cells, notebookScript.marks]);
+
+  const notebookMeasurementItems = useMemo(() => {
+    const clampedCursor = Math.max(0, Math.min(100, Number(notebookCursor) || 0));
+    const lastLineFromCells = Math.max(
+      0,
+      ...notebookScript.cells.map((cell, index) => Number.isFinite(cell.lineEnd) ? cell.lineEnd : index)
+    );
+    const lineCount = Math.max(NOTEBOOK_MIN_VISIBLE_LINES, notebookScript.lineCount, lastLineFromCells + 1);
+    const linePosition = (clampedCursor / 100) * lineCount;
+    const hasReachedLine = (lineStart) => {
+      const start = Number.isFinite(lineStart) ? lineStart : 0;
+      return clampedCursor >= 100 || linePosition > start;
+    };
+    const targetByName = new Map([
+      ['i', 'b:i'],
+      ['j', 'b:j'],
+      ['k', 'b:k'],
+    ]);
+    measureTargetMap.forEach((target) => {
+      if (target?.name) targetByName.set(notebookVariableKey(target.name), target.id);
+    });
+    notebookScript.cells.forEach((cell) => {
+      if (
+        (
+          cell.type === 'vector' ||
+          (cell.type === 'calc' && cell.resultKind === 'vector') ||
+          (cell.type === 'ref' && cell.refKind === 'vector' && !cell.remove)
+        ) &&
+        !cell.remove &&
+        cell.name
+      ) {
+        const targetId = `v:${notebookVectorIdForName(cell.name, 0)}`;
+        targetByName.set(notebookVariableKey(cell.name), targetId);
+      }
+    });
+
+    return notebookScript.cells
+      .filter((cell) => cell.type === 'measurement' && !cell.hidden && hasReachedLine(cell.lineStart))
+      .map((cell) => {
+        const targets = cell.names
+          .map((name) => targetByName.get(notebookVariableKey(name)))
+          .filter((targetId) => targetId && measureTargetMap.has(targetId));
+        if (cell.measureType === 'dot' && targets.length < 2) return null;
+        if (cell.measureType === 'volume' && targets.length < 2) return null;
+        const pickedTargets = cell.measureType === 'dot' ? targets.slice(0, 2) : targets.slice(0, 3);
+        return {
+          id: `notebook-measure-${cell.lineStart}-${cell.measureType}`,
+          type: cell.measureType,
+          targets: pickedTargets,
+          visible: true,
+          source: 'notebook',
+          lineStart: cell.lineStart,
+        };
+      })
+      .filter(Boolean);
+  }, [measureTargetMap, notebookCursor, notebookScript.cells, notebookScript.lineCount]);
+
+  useEffect(() => {
+    if (workspaceMode !== 'system') {
+      setMeasurements((previous) => {
+        const next = previous.filter((item) => item.source !== 'notebook');
+        return next.length === previous.length ? previous : next;
+      });
+      return;
+    }
+
+    setMeasurements((previous) => {
+      const notebookKeys = new Set(notebookMeasurementItems.map((item) => measurementStateKey(item.type, item.targets)));
+      const previousVisibility = new Map(
+        previous.map((item) => [measurementStateKey(item.type, item.targets), item.visible !== false])
+      );
+      const manualItems = previous.filter(
+        (item) => item.source !== 'notebook' && !notebookKeys.has(measurementStateKey(item.type, item.targets))
+      );
+      const syncedItems = notebookMeasurementItems.map((item) => ({
+        ...item,
+        visible: previousVisibility.get(measurementStateKey(item.type, item.targets)) ?? true,
+      }));
+      const next = [...manualItems, ...syncedItems];
+      const isSame =
+        previous.length === next.length &&
+        previous.every((item, index) => {
+          const other = next[index];
+          return (
+            other &&
+            item.id === other.id &&
+            item.type === other.type &&
+            item.source === other.source &&
+            item.visible === other.visible &&
+            item.lineStart === other.lineStart &&
+            item.targets.join('|') === other.targets.join('|')
+          );
+        });
+      return isSame ? previous : next;
+    });
+  }, [notebookMeasurementItems, workspaceMode]);
+
+  const notebookProgressRatio = Math.max(0, Math.min(1, notebookCursor / 100));
+  const notebookLineCount = Math.max(NOTEBOOK_MIN_VISIBLE_LINES, notebookScript.lineCount);
+  const notebookLinePosition = notebookProgressRatio * notebookLineCount;
+  const notebookActiveLineIndex = notebookCursor <= 0
+    ? -1
+    : Math.min(notebookLineCount - 1, Math.max(0, Math.floor(notebookLinePosition)));
+  const notebookTimelineMarks = useMemo(() => {
+    const seen = new Set();
+    return notebookScript.marks
+      .map((mark, lineIndex) => ({ ...mark, lineIndex }))
+      .filter((mark) => mark?.label && mark.kind !== 'blank' && mark.kind !== 'note')
+      .filter((mark) => {
+        const key = `${mark.lineIndex}:${mark.label}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      })
+      .map((mark) => ({
+        ...mark,
+        percent: Math.max(0, Math.min(100, ((mark.lineIndex + 0.5) / notebookLineCount) * 100)),
+      }));
+  }, [notebookLineCount, notebookScript.marks]);
+
+  useEffect(() => {
+    notebookHasVisualVectorsRef.current = notebookScript.cells.some(
+      (cell) =>
+        (cell.type === 'vector' && cell.execute !== false && !cell.remove) ||
+        (cell.type === 'calc' && cell.resultKind === 'vector' && cell.execute === true) ||
+        (cell.type === 'ref' && cell.refKind === 'vector' && !cell.remove)
+    );
+    notebookHasMatrixCellsRef.current = notebookScript.cells.some(
+      (cell) =>
+        cell.type === 'matrix' ||
+        (cell.type === 'calc' && cell.resultKind === 'matrix') ||
+        (cell.type === 'ref' && cell.refKind === 'matrix')
+    );
+  }, [notebookScript.cells]);
+
+  useEffect(() => {
+    setNotebookCells((previous) =>
+      previous.map((cell) =>
+        cell.type !== 'matrix'
+          ? cell
+          : cell.mode === systemMatrixMode
+          ? cell
+          : {
+              ...cell,
+              mode: systemMatrixMode,
+              text: matrixTextFromValues(identityInputValuesForMode(systemMatrixMode), systemMatrixDimension),
+            }
+      )
+    );
+  }, [systemMatrixDimension, systemMatrixMode]);
 
   useEffect(() => {
     if (typeof window === 'undefined') return undefined;
@@ -2686,8 +4562,8 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    systemDimensionRef.current = lineSystem.mode ?? '2d';
-  }, [lineSystem.mode]);
+    systemDimensionRef.current = effectiveSystemMode;
+  }, [effectiveSystemMode]);
 
   useEffect(() => {
     vectorToolModeRef.current = vectorToolMode;
@@ -2742,19 +4618,33 @@ export default function App() {
       basisVisibility,
       showGrid,
       showRelativeGrid,
+      relativeGridStrength,
       showCoordinates: true,
       showCoordinateNumbers: showCoordinates,
       showDot,
       showAxes,
+      showRelativeAxes,
     };
-  }, [showVolume, showVector, showBasis, basisVisibility, showGrid, showRelativeGrid, showCoordinates, showDot, showAxes]);
+  }, [
+    showVolume,
+    showVector,
+    showBasis,
+    basisVisibility,
+    showGrid,
+    showRelativeGrid,
+    relativeGridStrength,
+    showCoordinates,
+    showDot,
+    showAxes,
+    showRelativeAxes,
+  ]);
 
   useEffect(() => {
     if (!threeRef.current) return;
 
     const mode = viewKeyForMatrix(displayMatrix);
-    const labelWithCoord = (name, values, coordMode = mode) =>
-      `${name}′${showCoordinates ? ` ${formatCoord(values, coordMode)}` : ''}`;
+    const labelWithCoord = (name, values, coordMode = mode, highlightIndices = []) =>
+      coordLabelText(name, values, coordMode, showCoordinates, highlightIndices);
     const showLabel = (label, text, visible) => {
       if (!label) return;
       setAxisLabelText(label, text);
@@ -2770,17 +4660,17 @@ export default function App() {
     showLabel(
       iLabelRef.current,
       labelWithCoord('i', basisVectors.i),
-      showBasis && basisVisibility.i !== false && vectorLength(basisVectors.i) > EPSILON
+      showRelativeAxes && basisVisibility.i !== false && vectorLength(basisVectors.i) > EPSILON
     );
     showLabel(
       jLabelRef.current,
       labelWithCoord('j', basisVectors.j),
-      showBasis && basisVisibility.j !== false && vectorLength(basisVectors.j) > EPSILON
+      showRelativeAxes && basisVisibility.j !== false && vectorLength(basisVectors.j) > EPSILON
     );
     showLabel(
       kLabelRef.current,
       labelWithCoord('k', basisVectors.k, '3d'),
-      showBasis && basisVisibility.k !== false && vectorLength(basisVectors.k) > 0.08
+      showRelativeAxes && basisVisibility.k !== false && vectorLength(basisVectors.k) > 0.08
     );
 
     vectors.forEach((item) => {
@@ -2789,22 +4679,20 @@ export default function App() {
       const transformed = transformVector3(displayMatrix, values);
       const scalarSpace = item.scalarSpace === 'input' ? 'input' : 'output';
       const scalarNormal = scalarSpace === 'input' ? values : transformed;
-      const scalarValue = hasScalarText(item.scalar)
-        ? parseNumber(item.scalar)
-        : dotValues(scalarNormal, scalarNormal);
+      const highlightIndices = item.scalarEnabled ? scalarLockHighlightIndices(scalarNormal, mode) : [];
       showLabel(
         label,
-        item.scalarEnabled
-          ? `${scalarSpace === 'input' ? '' : 'A'}${item.name}·x = ${formatNumber(scalarValue)}`
-          : labelWithCoord(item.name, transformed),
+        labelWithCoord(item.name, transformed, mode, highlightIndices),
         showVector && item.visible !== false
       );
     });
-  }, [basisVisibility, displayMatrix, showBasis, showCoordinates, showVector, vectors]);
+  }, [basisVisibility, displayMatrix, showCoordinates, showRelativeAxes, showVector, vectors]);
 
   useEffect(() => {
     cameraLockedRef.current = cameraLocked;
     zoomLockedRef.current = zoomLocked;
+    cameraAutoRef.current = cameraAuto;
+    autoCameraTargetViewRef.current = workspaceMode === 'system' ? effectiveSystemMode : displayMode;
     if (cameraLocked) {
       cameraMoveRef.current.active = false;
     }
@@ -2817,7 +4705,7 @@ export default function App() {
       });
       refs.controls.update();
     }
-  }, [activeView, cameraLocked, displayMode, zoomLocked]);
+  }, [activeView, cameraAuto, cameraLocked, displayMode, effectiveSystemMode, workspaceMode, zoomLocked]);
 
   const updateVectorValue = useCallback((id, axis, value) => {
     setVectors((previous) =>
@@ -2828,8 +4716,9 @@ export default function App() {
   }, []);
 
   const updateVectorScalar = useCallback((id, value) => {
+    const nextValue = cleanScalarText(value);
     setVectors((previous) =>
-      previous.map((item) => (item.id === id ? { ...item, scalar: value.replace(/^0+(?=\d)/, '') } : item))
+      previous.map((item) => (item.id === id ? { ...item, scalar: nextValue.replace(/^0+(?=\d)/, '') } : item))
     );
   }, []);
 
@@ -2896,6 +4785,7 @@ export default function App() {
     setMeasureMode((previous) => {
       const next = previous === mode ? null : mode;
       setMeasureDraft([]);
+      setMeasureAnchorId(null);
       setMeasurePointer(null);
       setHoveredMeasureTargetId(null);
       return next;
@@ -2906,6 +4796,7 @@ export default function App() {
     const rect = containerRef.current?.getBoundingClientRect();
     setMeasureMode(mode);
     setMeasureDraft([targetId]);
+    setMeasureAnchorId(null);
     setMeasurePointer(
       event && rect
         ? {
@@ -2927,11 +4818,89 @@ export default function App() {
     );
   }, []);
 
-  const removeMeasurement = useCallback((id) => {
-    setMeasurements((previous) => previous.filter((item) => item.id !== id));
+  const notebookNameForMeasureTarget = useCallback((targetId) => {
+    if (targetId === 'b:i') return 'i';
+    if (targetId === 'b:j') return 'j';
+    if (targetId === 'b:k') return 'k';
+    if (targetId?.startsWith('v:')) {
+      const vectorId = targetId.slice(2);
+      return vectorsRef.current.find((item) => item.id === vectorId)?.name ?? vectorId;
+    }
+    return null;
   }, []);
 
+  const notebookMeasurementExpressionForTargets = useCallback((type, targetIds) => {
+    const names = targetIds.map(notebookNameForMeasureTarget).filter(Boolean);
+    if (type === 'dot') return names.length >= 2 ? `dot(${names[0]}, ${names[1]})` : null;
+    if (type === 'volume') return names.length >= 2 ? `det(${names.join(', ')})` : null;
+    return null;
+  }, [notebookNameForMeasureTarget]);
+
+  const nextNotebookMeasurementAlias = useCallback((lines, prefix) => {
+    const aliasPattern = new RegExp(`#${prefix}(\\d+)\\b`, 'gi');
+    const nextIndex = [...String(lines.join('\n')).matchAll(aliasPattern)]
+      .reduce((max, match) => Math.max(max, Number(match[1]) || 0), 0) + 1;
+    return `${prefix}${nextIndex}`;
+  }, []);
+
+  const resolveNotebookMeasurementAlias = useCallback((lines, currentAlias, nextType) => {
+    const normalized = normalizeNotebookVariableName(currentAlias ?? '');
+    const generated = /^(?:dot|det)\d+$/iu.test(normalized);
+    if (normalized && !generated) return normalized;
+    const prefix = nextType === 'dot' ? 'dot' : 'det';
+    if (normalized && notebookVariableKey(normalized).startsWith(prefix)) return normalized;
+    return nextNotebookMeasurementAlias(lines, prefix);
+  }, [nextNotebookMeasurementAlias]);
+
+  const updateNotebookMeasurementFormula = useCallback((source, nextType, nextTargets) => {
+    if (workspaceModeRef.current !== 'system' || source?.source !== 'notebook') return false;
+    const expression = notebookMeasurementExpressionForTargets(nextType, nextTargets);
+    if (!expression) return false;
+
+    setNotebookText((previous) => {
+      const normalized = String(previous ?? '').replace(/\r/g, '');
+      const lines = normalized.split('\n');
+      let index = Number.isInteger(source.lineStart) ? source.lineStart : -1;
+      if (index < 0 || index >= lines.length) {
+        const previousExpression = notebookMeasurementExpressionForTargets(source.type, source.targets);
+        index = previousExpression
+          ? lines.findIndex((line) => splitNotebookLineMeta(line).body.trim() === previousExpression)
+          : -1;
+      }
+      if (index < 0 || index >= lines.length) return previous;
+
+      const meta = splitNotebookLineMeta(lines[index]);
+      const alias = resolveNotebookMeasurementAlias(lines, meta.alias, nextType);
+      lines[index] = appendNotebookLineMeta(expression, { alias, hidden: meta.hidden });
+      return lines.join('\n');
+    });
+    return true;
+  }, [notebookMeasurementExpressionForTargets, resolveNotebookMeasurementAlias]);
+
+  const removeMeasurement = useCallback((id) => {
+    const source = measurementsRef.current.find((item) => item.id === id);
+    if (workspaceModeRef.current === 'system' && source?.source === 'notebook') {
+      setNotebookText((previous) => {
+        const lines = String(previous ?? '').replace(/\r/g, '').split('\n');
+        if (Number.isInteger(source.lineStart) && lines[source.lineStart]) {
+          return lines.filter((_, index) => index !== source.lineStart).join('\n');
+        }
+
+        const expression = notebookMeasurementExpressionForTargets(source.type, source.targets);
+        if (!expression) return previous;
+        return lines
+          .filter((line) => splitNotebookLineMeta(line).body.trim() !== expression)
+          .join('\n');
+      });
+    }
+    setMeasurements((previous) => previous.filter((item) => item.id !== id));
+  }, [notebookMeasurementExpressionForTargets]);
+
   const reverseDotMeasurement = useCallback((id) => {
+    const source = measurementsRef.current.find((item) => item.id === id);
+    if (source?.type === 'dot' && source.targets.length >= 2) {
+      updateNotebookMeasurementFormula(source, 'dot', [...source.targets].reverse());
+    }
     setMeasurements((previous) =>
       previous.map((item) => (
         item.id === id && item.type === 'dot' && item.targets.length >= 2
@@ -2939,18 +4908,22 @@ export default function App() {
           : item
       ))
     );
-  }, []);
+  }, [updateNotebookMeasurementFormula]);
 
   const convertMeasurementType = useCallback((id) => {
-    const measurementKey = (type, targets) => `${type}:${[...targets].sort().join('|')}`;
+    const sourceSnapshot = measurementsRef.current.find((item) => item.id === id);
+    if (sourceSnapshot && sourceSnapshot.targets.length >= 2) {
+      const nextType = sourceSnapshot.type === 'dot' ? 'volume' : 'dot';
+      updateNotebookMeasurementFormula(sourceSnapshot, nextType, sourceSnapshot.targets.slice(0, 2));
+    }
     setMeasurements((previous) => {
       const source = previous.find((item) => item.id === id);
       if (!source || source.targets.length < 2) return previous;
       const nextType = source.type === 'dot' ? 'volume' : 'dot';
       const nextTargets = source.type === 'dot' ? source.targets.slice(0, 2) : source.targets.slice(0, 2);
-      const nextKey = measurementKey(nextType, nextTargets);
+      const nextKey = measurementStateKey(nextType, nextTargets);
       return previous
-        .filter((item) => item.id === id || measurementKey(item.type, item.targets) !== nextKey)
+        .filter((item) => item.id === id || measurementStateKey(item.type, item.targets) !== nextKey)
         .map((item) => (
           item.id === id
             ? { ...item, type: nextType, targets: nextTargets, visible: true }
@@ -2959,14 +4932,16 @@ export default function App() {
     });
     setMeasureMode(null);
     setMeasureDraft([]);
+    setMeasureAnchorId(null);
     setMeasurePointer(null);
-  }, []);
+  }, [updateNotebookMeasurementFormula]);
 
   const continueMeasurement = useCallback((item) => {
     const targetIds = item?.targetIds ?? item?.targets;
     if (!item || item.type !== 'volume' || !Array.isArray(targetIds) || targetIds.length < 2) return;
     setMeasureMode('volume');
     setMeasureDraft(targetIds.slice(0, 2));
+    setMeasureAnchorId(item.id);
     setMeasurePointer(null);
     setHoveredMeasureTargetId(null);
   }, []);
@@ -2977,10 +4952,32 @@ export default function App() {
     startMeasurementFrom('dot', targetIds[targetIds.length - 1], event);
   }, [startMeasurementFrom]);
 
+  const appendNotebookMeasurementFormula = useCallback((type, targetIds) => {
+    if (workspaceModeRef.current !== 'system') return;
+    const expression = notebookMeasurementExpressionForTargets(type, targetIds);
+    if (!expression) return;
+    const aliasPrefix = type === 'dot' ? 'dot' : 'det';
+
+    setNotebookText((previous) => {
+      const normalized = String(previous ?? '').replace(/\r/g, '');
+      const alreadyExists = normalized
+        .split('\n')
+        .some((line) => splitNotebookLineMeta(line).body.trim() === expression);
+      if (alreadyExists) return previous;
+
+      const aliasPattern = new RegExp(`#${aliasPrefix}(\\d+)\\b`, 'gi');
+      const nextIndex = [...normalized.matchAll(aliasPattern)]
+        .reduce((max, match) => Math.max(max, Number(match[1]) || 0), 0) + 1;
+      const prefix = normalized.trimEnd() ? '\n' : '';
+      return `${normalized.trimEnd()}${prefix}${expression}  #${aliasPrefix}${nextIndex}`;
+    });
+  }, [notebookMeasurementExpressionForTargets]);
+
   const pickMeasureTarget = useCallback((targetId) => {
     if (!measureMode || measureDraft.length === 0) return false;
     if (measureDraft.includes(targetId)) {
       setMeasureDraft([]);
+      setMeasureAnchorId(null);
       setMeasurePointer(null);
       setHoveredMeasureTargetId(null);
       setMeasureMode(null);
@@ -2988,19 +4985,26 @@ export default function App() {
     }
     const withoutDuplicate = measureDraft.filter((id) => id !== targetId);
     const next = [...withoutDuplicate, targetId];
-    const measurementKey = (type, targets) => `${type}:${[...targets].sort().join('|')}`;
     const addMeasurement = (type, targets, replaceTargets = null) => {
       const id = `m${nextMeasurementIndexRef.current}`;
       nextMeasurementIndexRef.current += 1;
+      const source = workspaceModeRef.current === 'system' ? 'notebook' : 'manual';
+      const replaceSource = replaceTargets
+        ? measurementsRef.current.find((item) => (
+          measurementStateKey(item.type, item.targets) === measurementStateKey(type, replaceTargets)
+        ))
+        : null;
+      const updatedNotebookFormula = updateNotebookMeasurementFormula(replaceSource, type, targets);
       setMeasurements((items) => [
         ...items.filter((item) => {
-          const itemKey = measurementKey(item.type, item.targets);
-          if (itemKey === measurementKey(type, targets)) return false;
-          if (replaceTargets && itemKey === measurementKey(type, replaceTargets)) return false;
+          const itemKey = measurementStateKey(item.type, item.targets);
+          if (itemKey === measurementStateKey(type, targets)) return false;
+          if (replaceTargets && itemKey === measurementStateKey(type, replaceTargets)) return false;
           return true;
         }),
-        { id, type, targets, visible: true },
+        { id, type, targets, visible: true, source },
       ]);
+      if (!updatedNotebookFormula) appendNotebookMeasurementFormula(type, targets);
     };
 
     if (next.length < 2) {
@@ -3011,11 +5015,12 @@ export default function App() {
     const targetLimit = measureMode === 'volume' && displayMode === '3d' ? 3 : 2;
     addMeasurement(measureMode, next.slice(0, targetLimit), measureDraft.length >= 2 ? measureDraft : null);
     setMeasureDraft([]);
+    setMeasureAnchorId(null);
     setMeasurePointer(null);
     setHoveredMeasureTargetId(null);
     setMeasureMode(null);
     return true;
-  }, [displayMode, measureDraft, measureMode]);
+  }, [appendNotebookMeasurementFormula, displayMode, measureDraft, measureMode, updateNotebookMeasurementFormula]);
 
   const handleBasisLegendClick = useCallback((id) => {
     if (measureMode && measureDraft.length === 0) {
@@ -3209,7 +5214,7 @@ export default function App() {
 
   const renderMeasurementChip = useCallback((item) => (
     <div
-      className={`measure-chip measure-${item.type} ${item.type === 'volume' && item.targetIds?.length === 2 ? 'measure-area' : ''} ${item.visible === false ? 'muted' : ''}`}
+      className={`measure-chip measure-${item.measureKind ?? item.type} ${item.visible === false ? 'muted' : ''}`}
       key={item.id}
     >
       <button
@@ -3264,7 +5269,9 @@ export default function App() {
 
   const measureDraftGuide = useMemo(() => {
     if (!measureMode || measureDraft.length === 0 || !measurePointer) return null;
-    const anchorTargetNode = getMeasureTargetLabelNode(measureDraft[measureDraft.length - 1]);
+    const anchorTargetNode = measureAnchorId
+      ? measurementLabelRefs.current.get(measureAnchorId)
+      : getMeasureTargetLabelNode(measureDraft[measureDraft.length - 1]);
     const sceneNode = containerRef.current;
     if (!anchorTargetNode || !sceneNode) return null;
     const targetRect = anchorTargetNode.getBoundingClientRect();
@@ -3276,7 +5283,7 @@ export default function App() {
       y2: measurePointer.y,
       snapped: !!hoveredMeasureTargetId && !measureDraft.includes(hoveredMeasureTargetId),
     };
-  }, [getMeasureTargetLabelNode, hoveredMeasureTargetId, measureDraft, measureMode, measurePointer]);
+  }, [getMeasureTargetLabelNode, hoveredMeasureTargetId, measureAnchorId, measureDraft, measureMode, measurePointer]);
 
   const focusVectorDot = useCallback((id) => {
     setVectors((previous) =>
@@ -3320,6 +5327,8 @@ export default function App() {
 
     clearEquationGroup(refs.equationGroup);
     refs.equationPoint.userData.visible = false;
+    refs.equationPoint.userData.inputPoint = null;
+    refs.equationPoint.userData.revealKey = null;
     refs.equationPoint.visible = false;
 
     if (workspaceMode !== 'system' && vectorToolMode !== 'system') {
@@ -3330,15 +5339,19 @@ export default function App() {
     refs.equationGroup.visible = true;
 
     if (lineSystem.mode === '3d') {
-      const hasSolutionHighlight = lineSystem.solution?.status === 'infinite';
+      const hasSolutionHighlight =
+        lineSystem.solution?.status === 'infinite' &&
+        lineSystem.solution?.nullspaceBasis?.length === 1;
       lineSystem.planes.forEach((plane) => {
-        createPlaneObjects(plane, 6.5, hasSolutionHighlight).forEach((object) =>
-          refs.equationGroup.add(object)
-        );
+        createPlaneObjects(plane, 6.5, hasSolutionHighlight).forEach((object) => {
+          object.userData.revealKey = `equation:plane:${plane.index}`;
+          refs.equationGroup.add(object);
+        });
       });
-      createSolutionHighlightObjects(lineSystem.solution, 0xf1b434).forEach((object) =>
-        refs.equationGroup.add(object)
-      );
+      createSolutionHighlightObjects(lineSystem.solution, 0xf1b434).forEach((object) => {
+        object.userData.revealKey = `equation:solution:${lineSystem.solution?.status ?? 'none'}`;
+        refs.equationGroup.add(object);
+      });
     } else {
       lineSystem.lines.forEach((line) => {
         const segment = lineSegmentForEquation(line);
@@ -3356,17 +5369,26 @@ export default function App() {
         });
         const lineMesh = new THREE.Line(geometry, material);
         lineMesh.renderOrder = 32;
+        lineMesh.userData.revealKey = `equation:line:${line.index}`;
         refs.equationGroup.add(lineMesh);
       });
     }
 
     if (lineSystem.point) {
-      refs.equationPoint.position.set(
+      refs.equationPoint.userData.inputPoint = [
         lineSystem.point[0],
         lineSystem.point[1],
-        lineSystem.mode === '3d' ? lineSystem.point[2] : 0.055
+        lineSystem.mode === '3d' ? lineSystem.point[2] : 0.055,
+      ];
+      refs.equationPoint.userData.solutionPoint = [...lineSystem.point];
+      refs.equationPoint.userData.mode = lineSystem.mode;
+      refs.equationPoint.position.set(
+        refs.equationPoint.userData.inputPoint[0],
+        refs.equationPoint.userData.inputPoint[1],
+        refs.equationPoint.userData.inputPoint[2]
       );
       refs.equationPoint.userData.visible = true;
+      refs.equationPoint.userData.revealKey = `equation:point:${lineSystem.mode}`;
       refs.equationPoint.visible = true;
     }
 
@@ -3499,6 +5521,46 @@ export default function App() {
     return adjusted;
   }, [previewDraggedMatrix]);
 
+  const syncNotebookVectorLineFromDrag = useCallback((vectorId, solved) => {
+    if (workspaceModeRef.current !== 'system' || !vectorId?.startsWith('notebook-')) return;
+    if (!Array.isArray(solved) || !solved.every(Number.isFinite)) return;
+
+    setNotebookText((previous) => {
+      const normalized = String(previous ?? '').replace(/\r/g, '');
+      const parsed = parseNotebookScript(normalized);
+      const visualIndexByName = new Map();
+      let targetCell = null;
+
+      parsed.cells.forEach((cell) => {
+        if (cell.type !== 'vector' && cell.type !== 'calc') return;
+        const key = notebookVariableKey(cell.name);
+        if (!visualIndexByName.has(key)) {
+          visualIndexByName.set(key, visualIndexByName.size);
+        }
+        const candidateId = notebookVectorIdForName(cell.name, visualIndexByName.get(key));
+        if (candidateId === vectorId) targetCell = cell;
+      });
+
+      if (!targetCell || !Number.isFinite(targetCell.lineStart)) return previous;
+      const lines = normalized.split('\n');
+      const sourceLine = lines[targetCell.lineStart] ?? '';
+      const sourceVector = parseNotebookVectorLine(sourceLine);
+      const sourceDimension = sourceVector?.dimension ?? targetCell.dimension;
+      const dimension = sourceDimension >= 3 || Math.abs(solved[2] ?? 0) > 0.001 ? 3 : 2;
+      const vectorText = solved
+        .slice(0, dimension)
+        .map((value) => formatVectorInputValue(value))
+        .join(', ');
+      const sourceMeta = splitNotebookLineMeta(sourceLine);
+      lines[targetCell.lineStart] = appendNotebookLineMeta(vectorText, {
+        ...sourceMeta,
+        alias: targetCell.name,
+      });
+      const next = lines.join('\n');
+      return next === normalized ? previous : next;
+    });
+  }, []);
+
   const updateUserVectorFromDrag = useCallback((worldVector, dragState = null) => {
     const vectorId = vectorIdFromDragKey(dragState?.key) ?? activeVectorIdRef.current;
     const matrix = dragState?.startMatrix ?? currentMatrixRef.current;
@@ -3532,16 +5594,19 @@ export default function App() {
     if (activeVectorIdRef.current === vectorId) {
       userVectorRef.current = [solved[0], solved[1], solved[2]];
     }
+    syncNotebookVectorLineFromDrag(vectorId, solved);
     setVectors((previous) =>
       previous.map((item) => (item.id === vectorId ? { ...item, ...nextVector } : item))
     );
     return new THREE.Vector3(adjustedWorld[0], adjustedWorld[1], adjustedWorld[2]);
-  }, [snapToInteger]);
+  }, [snapToInteger, syncNotebookVectorLineFromDrag]);
 
   const updateScalarConstraintFromDrag = useCallback((worldVector, dragState = null) => {
     const vectorId = scalarIdFromDragKey(dragState?.key);
     const normal = dragState?.scalarNormal;
-    if (!vectorId || !normal || normal.lengthSq() < EPSILON) return worldVector;
+    if (!vectorId || !normal || normal.lengthSq() < EPSILON || !isFiniteVector3(worldVector) || !isFiniteVector3(normal)) {
+      return worldVector;
+    }
 
     const scalarSpace = dragState?.scalarSpace === 'input' ? 'input' : 'output';
     const mode = viewKeyForMatrix(dragState?.startMatrix ?? currentMatrixRef.current);
@@ -3552,10 +5617,12 @@ export default function App() {
     const scalarValue = scalarSpace === 'input'
       ? normal.dot(inputVector)
       : normal.dot(worldVector);
+    if (!Number.isFinite(scalarValue)) return worldVector;
     const anchorInput = normal.clone().multiplyScalar(scalarValue / normal.lengthSq());
     const anchor = scalarSpace === 'input'
       ? new THREE.Vector3(...transformVector3(dragState?.startMatrix ?? currentMatrixRef.current, [anchorInput.x, anchorInput.y, anchorInput.z]))
       : anchorInput;
+    if (!isFiniteVector3(anchor)) return worldVector;
     setVectors((previous) =>
       previous.map((item) =>
         item.id === vectorId ? { ...item, scalar: formatInputValue(scalarValue), scalarEnabled: true } : item
@@ -3598,12 +5665,17 @@ export default function App() {
     const refs = threeRef.current;
     if (!refs) return;
 
-    cameraMoveRef.current.active = false;
     if (cameraLockedRef.current) {
+      cameraMoveRef.current.active = false;
+      refs.controls.update();
+      return;
+    }
+    if (workspaceModeRef.current === 'system') {
       refs.controls.update();
       return;
     }
 
+    cameraMoveRef.current.active = false;
     const clamped = Math.max(0, Math.min(1, rawProgress));
     const eased = easeInOut(clamped);
     const fromKey = animationViewFromRef.current;
@@ -3709,7 +5781,7 @@ export default function App() {
     const refs = threeRef.current;
     const label = labelRef?.current ?? labelRef;
     const allowOrigin = options.allowOrigin ?? false;
-    if (!refs || !label || !visible || (!allowOrigin && vector3.length() < EPSILON)) {
+    if (!refs || !label || !visible || !isFiniteVector3(vector3) || (!allowOrigin && vector3.length() < EPSILON)) {
       if (label) label.style.display = 'none';
       return;
     }
@@ -3726,6 +5798,10 @@ export default function App() {
     const y = (projected.y * -0.5 + 0.5) * height;
     const labelX = x + offset[0];
     const labelY = y + offset[1];
+    if (!Number.isFinite(labelX) || !Number.isFinite(labelY)) {
+      label.style.display = 'none';
+      return;
+    }
     setAxisLabelText(label, text);
     label.dataset.labelX = String(labelX);
     label.dataset.labelY = String(labelY);
@@ -3747,6 +5823,30 @@ export default function App() {
       if (delay <= 0) patchCameraStateInUrl(next, locale);
     }, delay);
   }, [locale]);
+
+  const snapCameraToAutoView = useCallback(() => {
+    if (!cameraAutoRef.current || cameraLockedRef.current) return false;
+    const refs = threeRef.current;
+    const viewKey = autoCameraTargetViewRef.current;
+    if (!refs || !viewPresets[viewKey]) return false;
+
+    const destination = cameraStateForView(viewKey, refs.camera.position, refs.controls.target);
+    setActiveView(viewKey);
+    setCameraState({
+      position: cameraVectorToShareArray(destination.position),
+      target: cameraVectorToShareArray(destination.target),
+    });
+    configureControlsForView(refs.controls, viewKey, controlLocksFromRefs());
+    cameraMoveRef.current = {
+      active: true,
+      startTime: null,
+      positionFrom: refs.camera.position.clone(),
+      targetFrom: refs.controls.target.clone(),
+      positionTo: destination.position,
+      targetTo: destination.target,
+    };
+    return true;
+  }, [controlLocksFromRefs]);
 
   const animate = useCallback((time) => {
     frameIdRef.current = requestAnimationFrame(animate);
@@ -3798,6 +5898,11 @@ export default function App() {
     const matrix = currentMatrixRef.current;
     const coordMode = viewKeyForMatrix(matrix);
     const isSystemMode = workspaceModeRef.current === 'system' || vectorToolModeRef.current === 'system';
+    const vectorSceneAllowed = !isSystemMode || notebookHasVisualVectorsRef.current;
+    const vectorMatrix =
+      isSystemMode && notebookHasVisualVectorsRef.current
+        ? notebookVectorTransformRef.current
+        : matrix;
     const isSystem3D = isSystemMode && systemDimensionRef.current === '3d';
     const kAxisBlend = clamp01(new THREE.Vector3(matrix[2], matrix[5], matrix[8]).length());
     const flatBlend = 1 - kAxisBlend;
@@ -3840,40 +5945,83 @@ export default function App() {
     refs.areaEdges.visible = areaVisible;
     const showBaseGrid = uiStateRef.current.showGrid;
     const showRelativeGrid = uiStateRef.current.showRelativeGrid;
+    const relativeGridStrength = normalizeRelativeGridStrength(uiStateRef.current.relativeGridStrength);
     const showStaticGrid = showBaseGrid && ((!isSystemMode && (coordMode === '3d' || kAxisBlend > 0.04)) || isSystem3D);
     const showReferenceGrid =
       showBaseGrid &&
       ((!isSystemMode && (coordMode !== '3d' || flatBlend > 0.02)) || (isSystemMode && !isSystem3D));
-    const showDynamicGrid3D = showRelativeGrid && coordMode === '3d' && !isSystemMode && kAxisBlend > 0.04;
+    const relativeGridMode = coordMode === '3d' || (isSystemMode && isSystem3D) ? '3d' : 'plane';
+    const showDynamicGrid3D =
+      showRelativeGrid &&
+      relativeGridMode === '3d' &&
+      (isSystemMode || kAxisBlend > 0.04);
     const showDynamicGrid2D =
       showRelativeGrid &&
-      coordMode === '2d' &&
-      !isSystemMode &&
+      relativeGridMode === 'plane' &&
       (iVector.lengthSq() > EPSILON || jVector.lengthSq() > EPSILON);
     refs.staticGrid.visible = showStaticGrid;
     refs.referenceGrid.visible = showReferenceGrid;
-    refs.axesHelper.visible = uiStateRef.current.showAxes && (!isSystemMode || isSystem3D);
+    refs.axesHelper.visible = uiStateRef.current.showAxes;
     refs.dynamicGrid.visible = showDynamicGrid3D;
     refs.dynamicPlaneGrid.visible = showDynamicGrid2D;
     setMaterialOpacity(refs.staticGrid.material, isSystem3D ? 0.22 : 0.07 + kAxisBlend * 0.14);
-    refs.referenceGrid.material.opacity = isSystemMode ? 0.34 : Math.max(0.04, flatBlend * 0.14);
-    refs.dynamicGrid.material.opacity = 0.06 + kAxisBlend * 0.22;
-    refs.dynamicPlaneGrid.material.opacity = coordMode === '2d' ? 0.38 : 0.24;
+    refs.referenceGrid.material.color.setHex(isSystemMode ? 0x6b7280 : 0x22c1b6);
+    refs.dynamicGrid.material.color.setHex(isSystemMode ? 0x22d3c6 : 0x22c1b6);
+    refs.dynamicPlaneGrid.material.color.setHex(isSystemMode ? 0x22d3c6 : 0x22c1b6);
+    refs.referenceGrid.material.opacity = isSystemMode ? 0.18 : Math.max(0.04, flatBlend * 0.14);
+    refs.dynamicGrid.material.opacity =
+      (isSystemMode ? 0.46 : 0.06 + kAxisBlend * 0.22) * relativeGridStrength;
+    refs.dynamicPlaneGrid.material.opacity =
+      (isSystemMode ? 0.58 : coordMode === '2d' ? 0.38 : 0.24) * relativeGridStrength;
     refs.equationGroup.visible = isSystemMode;
+    if (isSystemMode) {
+      refs.equationGroup.matrix.copy(matrix4);
+    } else {
+      refs.equationGroup.matrix.identity();
+    }
+    refs.equationGroup.matrixWorldNeedsUpdate = true;
     refs.equationPoint.visible = isSystemMode && refs.equationPoint.userData.visible;
+    if (refs.equationPoint.visible && refs.equationPoint.userData.inputPoint) {
+      const transformedPoint = transformVector3(matrix, refs.equationPoint.userData.inputPoint);
+      refs.equationPoint.position.set(transformedPoint[0], transformedPoint[1], transformedPoint[2]);
+    }
 
-    const basisVisible = uiStateRef.current.showBasis && !isSystemMode;
+    const equationSpawnTimes = refs.equationSpawnTimes ?? new Map();
+    refs.equationSpawnTimes = equationSpawnTimes;
+    const activeEquationRevealKeys = new Set();
+    if (isSystemMode) {
+      refs.equationGroup.traverse((object) => {
+        const revealKey = object.userData?.revealKey;
+        if (!revealKey) return;
+        activeEquationRevealKeys.add(revealKey);
+        if (!equationSpawnTimes.has(revealKey)) equationSpawnTimes.set(revealKey, time);
+        setObjectRevealOpacity(object, (time - (equationSpawnTimes.get(revealKey) ?? time)) / VECTOR_SPAWN_MS);
+      });
+      const pointRevealKey = refs.equationPoint.userData.revealKey;
+      if (refs.equationPoint.visible && pointRevealKey) {
+        activeEquationRevealKeys.add(pointRevealKey);
+        if (!equationSpawnTimes.has(pointRevealKey)) equationSpawnTimes.set(pointRevealKey, time);
+        setObjectRevealOpacity(
+          refs.equationPoint,
+          (time - (equationSpawnTimes.get(pointRevealKey) ?? time)) / VECTOR_SPAWN_MS
+        );
+      }
+    }
+    equationSpawnTimes.forEach((_, revealKey) => {
+      if (!activeEquationRevealKeys.has(revealKey)) equationSpawnTimes.delete(revealKey);
+    });
+
+    const basisVisible = uiStateRef.current.showRelativeAxes;
     const basisVisibility = uiStateRef.current.basisVisibility ?? { i: true, j: true, k: true };
     const basisLengthByKey = {
       i: Math.hypot(matrix[0], matrix[3], matrix[6]),
       j: Math.hypot(matrix[1], matrix[4], matrix[7]),
       k: Math.hypot(matrix[2], matrix[5], matrix[8]),
     };
-    const independentBasisKeys = independentBasisKeysForMatrix(matrix);
     const basisVisibleByKey = {
-      i: basisVisible && basisVisibility.i !== false && basisLengthByKey.i > EPSILON && independentBasisKeys.has('i'),
-      j: basisVisible && basisVisibility.j !== false && basisLengthByKey.j > EPSILON && independentBasisKeys.has('j'),
-      k: basisVisible && basisVisibility.k !== false && basisLengthByKey.k > EPSILON && independentBasisKeys.has('k'),
+      i: basisVisible && basisVisibility.i !== false && basisLengthByKey.i > EPSILON,
+      j: basisVisible && basisVisibility.j !== false && basisLengthByKey.j > EPSILON,
+      k: basisVisible && basisVisibility.k !== false && basisLengthByKey.k > EPSILON,
     };
     setArrowVector(refs.iArrow, matrix[0], matrix[3], matrix[6], basisVisibleByKey.i);
     setArrowVector(refs.jArrow, matrix[1], matrix[4], matrix[7], basisVisibleByKey.j);
@@ -3903,17 +6051,45 @@ export default function App() {
       }
     });
 
+    const vectorSpawnTimes = refs.vectorSpawnTimes ?? new Map();
+    refs.vectorSpawnTimes = vectorSpawnTimes;
+    const liveVectorIds = new Set(vectorsRef.current.map((item) => item.id));
+    vectorsRef.current.forEach((item) => {
+      if (!vectorSpawnTimes.has(item.id)) vectorSpawnTimes.set(item.id, time);
+    });
+    vectorSpawnTimes.forEach((_, id) => {
+      if (!liveVectorIds.has(id)) vectorSpawnTimes.delete(id);
+    });
+    const vectorSpawnEase = (id) =>
+      easeOutCubic((time - (vectorSpawnTimes.get(id) ?? time)) / VECTOR_SPAWN_MS);
+
+    const scalarSpawnTimes = refs.scalarSpawnTimes ?? new Map();
+    refs.scalarSpawnTimes = scalarSpawnTimes;
+    const liveScalarIds = new Set(
+      vectorsRef.current
+        .filter((item) => item.visible !== false && item.scalarEnabled)
+        .map((item) => item.id)
+    );
+    liveScalarIds.forEach((id) => {
+      if (!scalarSpawnTimes.has(id)) scalarSpawnTimes.set(id, time);
+    });
+    scalarSpawnTimes.forEach((_, id) => {
+      if (!liveScalarIds.has(id)) scalarSpawnTimes.delete(id);
+    });
+    const scalarSpawnEase = (id) =>
+      easeOutCubic((time - (scalarSpawnTimes.get(id) ?? time)) / VECTOR_SPAWN_MS);
+
     let frameScalarSolution = null;
     if (refs.vectorScalarGroup) {
       clearEquationGroup(refs.vectorScalarGroup);
-      const scalarGroupVisible = !isSystemMode && uiStateRef.current.showVector;
+      const scalarGroupVisible = vectorSceneAllowed && uiStateRef.current.showVector;
       refs.vectorScalarGroup.visible = scalarGroupVisible;
       if (scalarGroupVisible) {
         const scalarConstraints = vectorsRef.current
           .filter((item) => item.visible !== false && item.scalarEnabled)
           .map((item) => {
             const values = renderedVectorValues.get(item.id) ?? item.values;
-            const transformed = transformVector3(matrix, values);
+            const transformed = transformVector3(vectorMatrix, values);
             const scalarSpace = item.scalarSpace === 'input' ? 'input' : 'output';
             const normal = scalarSpace === 'input' ? values : transformed;
             const lengthSquared = dotValues(normal, normal);
@@ -3921,16 +6097,21 @@ export default function App() {
               color: item.color,
               lengthSquared,
               normal,
+              spawnEase: scalarSpawnEase(item.id),
               scalar: hasScalarText(item.scalar) ? parseNumber(item.scalar) : lengthSquared,
               scalarSpace,
             };
           })
-          .filter((constraint) => constraint.lengthSquared > EPSILON);
+          .filter((constraint) =>
+            constraint.lengthSquared > EPSILON &&
+            Number.isFinite(constraint.scalar) &&
+            constraint.normal.every(Number.isFinite)
+          );
 
         const rawScalarSolution = solveScalarConstraintPoint(scalarConstraints, coordMode);
         frameScalarSolution =
           rawScalarSolution && scalarConstraints.every((constraint) => constraint.scalarSpace === 'input')
-            ? transformVector3(matrix, rawScalarSolution)
+            ? transformVector3(vectorMatrix, rawScalarSolution)
             : rawScalarSolution;
         scalarConstraints.forEach((constraint) => {
           if (coordMode === '1d') {
@@ -3938,9 +6119,12 @@ export default function App() {
             const anchorInput = new THREE.Vector3(constraint.scalar / constraint.normal[0], 0, 0);
             const anchor =
               constraint.scalarSpace === 'input'
-                ? transformedPointForMatrix(matrix, anchorInput)
+                ? transformedPointForMatrix(vectorMatrix, anchorInput)
                 : anchorInput;
-            createScalarPointObjects(anchor, constraint.color).forEach((object) => refs.vectorScalarGroup.add(object));
+            createScalarPointObjects(anchor, constraint.color).forEach((object) => {
+              scaleObjectOpacity(object, constraint.spawnEase);
+              refs.vectorScalarGroup.add(object);
+            });
             return;
           }
 
@@ -3953,9 +6137,12 @@ export default function App() {
             };
             const objects =
               constraint.scalarSpace === 'input'
-                ? createTransformedLineObjects(line, matrix, SCALAR_CONSTRAINT_LINE_RANGE)
+                ? createTransformedLineObjects(line, vectorMatrix, SCALAR_CONSTRAINT_LINE_RANGE)
                 : createLineObjects(line, SCALAR_CONSTRAINT_LINE_RANGE);
-            objects.forEach((object) => refs.vectorScalarGroup.add(object));
+            objects.forEach((object) => {
+              scaleObjectOpacity(object, constraint.spawnEase);
+              refs.vectorScalarGroup.add(object);
+            });
             return;
           }
 
@@ -3968,9 +6155,12 @@ export default function App() {
           };
           const objects =
             constraint.scalarSpace === 'input'
-              ? createTransformedPlaneObjects(plane, matrix, 5.8, scalarConstraints.length > 1)
+              ? createTransformedPlaneObjects(plane, vectorMatrix, 5.8, scalarConstraints.length > 1)
               : createPlaneObjects(plane, 5.8, scalarConstraints.length > 1);
-          objects.forEach((object) => refs.vectorScalarGroup.add(object));
+          objects.forEach((object) => {
+            scaleObjectOpacity(object, constraint.spawnEase);
+            refs.vectorScalarGroup.add(object);
+          });
         });
       }
     }
@@ -3979,7 +6169,7 @@ export default function App() {
       (item) => item.id === activeVectorIdRef.current && item.visible !== false && !item.scalarEnabled
     );
     const activeVectorWorld = activeVectorItem
-      ? new THREE.Vector3(...transformVector3(matrix, renderedVectorValues.get(activeVectorItem.id) ?? activeVectorItem.values))
+      ? new THREE.Vector3(...transformVector3(vectorMatrix, renderedVectorValues.get(activeVectorItem.id) ?? activeVectorItem.values))
       : null;
     refs.userArrow.visible = false;
     refs.dotLine.visible = false;
@@ -3988,6 +6178,80 @@ export default function App() {
     const coordinatesVisible = uiStateRef.current.showCoordinateNumbers;
     const labelsVisible = true;
     const vectorLabelsVisible = true;
+    const frameLineSystem = lineSystemRef.current;
+    const frameEquationSolution = frameLineSystem?.solution;
+    const equationSolutionInputPoint = refs.equationPoint.userData.inputPoint;
+    const equationSolutionPoint = refs.equationPoint.userData.solutionPoint ?? equationSolutionInputPoint;
+    const equationSolutionMode = refs.equationPoint.userData.mode ?? systemDimensionRef.current;
+    let equationSolutionWorld =
+      refs.equationPoint.visible && equationSolutionInputPoint
+        ? new THREE.Vector3(...transformVector3(matrix, equationSolutionInputPoint))
+        : new THREE.Vector3();
+    let equationSolutionText = equationSolutionPoint
+      ? `${t(locale, 'solution')} x = ${formatCoord(equationSolutionPoint, equationSolutionMode)}`
+      : '';
+    let equationSolutionVisible = refs.equationPoint.visible && labelsVisible;
+
+    if (!equationSolutionVisible && isSystemMode && frameEquationSolution?.status === 'infinite') {
+      const anchor = solutionLabelAnchor(frameEquationSolution);
+      const labelKindKey = solutionGeometryLabelKey(frameEquationSolution);
+      if (anchor && labelKindKey) {
+        equationSolutionWorld = new THREE.Vector3(...transformVector3(matrix, anchor));
+        equationSolutionText = coordinatesVisible
+          ? `${t(locale, 'solution')} ${t(locale, labelKindKey)} ${formatGeneralSolution(frameEquationSolution)}`
+          : `${t(locale, 'solution')} ${t(locale, labelKindKey)}`;
+        equationSolutionVisible = true;
+      }
+    }
+
+    updateLabel(
+      equationSolutionLabelRef,
+      equationSolutionWorld,
+      equationSolutionText,
+      equationSolutionVisible && labelsVisible,
+      [38, -20],
+      { allowOrigin: true }
+    );
+
+    const equationLabels = isSystemMode
+      ? (frameLineSystem?.mode === '3d'
+          ? frameLineSystem?.planes ?? []
+          : frameLineSystem?.lines ?? [])
+      : [];
+    const equationLabelMode = frameLineSystem?.mode === '3d' ? '3d' : '2d';
+    const activeEquationLabelKeys = new Set();
+    equationLabels.forEach((item, index) => {
+      const key = equationSceneLabelKey(item, equationLabelMode, index);
+      const labelNode = equationLabelRefs.current.get(key);
+      if (!labelNode) return;
+      const anchor = equationAnchorPoint(item, equationLabelMode);
+      activeEquationLabelKeys.add(key);
+      if (!anchor) {
+        labelNode.style.display = 'none';
+        return;
+      }
+      const [x, y, z] = transformVector3(matrix, [anchor.x, anchor.y, anchor.z]);
+      const revealKey = equationRevealKey(item, equationLabelMode, index);
+      const revealStart = equationSpawnTimes.get(revealKey);
+      const revealEase = revealStart ? easeOutCubic((time - revealStart) / VECTOR_SPAWN_MS) : 1;
+      updateLabel(
+        labelNode,
+        new THREE.Vector3(x, y, z),
+        equationSceneLabelText(item, equationLabelMode, index, coordinatesVisible),
+        labelsVisible,
+        equationLabelMode === '3d'
+          ? [34, -22 - (index % 3) * 12]
+          : [28, -20 - (index % 3) * 10],
+        { allowOrigin: true, keepNameWhenCoordinatesHidden: true }
+      );
+      labelNode.style.opacity = String(0.18 + revealEase * 0.82);
+    });
+    equationLabelRefs.current.forEach((labelNode, key) => {
+      if (activeEquationLabelKeys.has(key)) return;
+      labelNode.style.display = 'none';
+      labelNode.style.opacity = '1';
+    });
+
     const dragHandles = refs.dragHandles ?? {};
     const handleTargets = {
       i: new THREE.Vector3(matrix[0], matrix[3], matrix[6]),
@@ -4001,7 +6265,7 @@ export default function App() {
         const values = renderedVectorValues.get(item.id) ?? item.values;
         return {
           ...item,
-          world: new THREE.Vector3(...transformVector3(matrix, values)),
+          world: new THREE.Vector3(...transformVector3(vectorMatrix, values)),
         };
       });
     const vectorMeasureVisible = false && visibleMeasureVectors.length >= 2;
@@ -4045,8 +6309,17 @@ export default function App() {
       { allowOrigin: true }
     );
 
-    clearEquationGroup(refs.measurementGroup);
     const activeMeasurementLabels = new Set();
+    const activeMeasurementVisuals = new Set();
+    const measurementSpawnTimes = refs.measurementSpawnTimes ?? new Map();
+    refs.measurementSpawnTimes = measurementSpawnTimes;
+    const measurementRevealEase = (id) => {
+      if (!measurementSpawnTimes.has(id)) measurementSpawnTimes.set(id, time);
+      return easeOutCubic((time - (measurementSpawnTimes.get(id) ?? time)) / VECTOR_SPAWN_MS);
+    };
+    refs.measurementVisuals?.forEach((visual) => {
+      visual.group.visible = false;
+    });
     const getMeasureTargetName = (targetId) => {
       if (targetId === 'b:i') return 'i′';
       if (targetId === 'b:j') return 'j′';
@@ -4074,17 +6347,17 @@ export default function App() {
     ));
     const getMeasureTargetWorld = (targetId) => {
       if (targetId === 'b:i') {
-        if (!uiStateRef.current.showBasis || uiStateRef.current.basisVisibility?.i === false) return null;
+        if (!uiStateRef.current.showRelativeAxes || uiStateRef.current.basisVisibility?.i === false) return null;
         const vector = new THREE.Vector3(matrix[0], matrix[3], matrix[6]);
         return vector.lengthSq() > EPSILON ? vector : null;
       }
       if (targetId === 'b:j') {
-        if (!uiStateRef.current.showBasis || uiStateRef.current.basisVisibility?.j === false) return null;
+        if (!uiStateRef.current.showRelativeAxes || uiStateRef.current.basisVisibility?.j === false) return null;
         const vector = new THREE.Vector3(matrix[1], matrix[4], matrix[7]);
         return vector.lengthSq() > EPSILON ? vector : null;
       }
       if (targetId === 'b:k') {
-        if (!uiStateRef.current.showBasis || uiStateRef.current.basisVisibility?.k === false) return null;
+        if (!uiStateRef.current.showRelativeAxes || uiStateRef.current.basisVisibility?.k === false) return null;
         const vector = new THREE.Vector3(matrix[2], matrix[5], matrix[8]);
         return vector.lengthSq() > EPSILON ? vector : null;
       }
@@ -4092,151 +6365,147 @@ export default function App() {
       const vectorItem = vectorsRef.current.find((item) => item.id === vectorId);
       if (!vectorItem || vectorItem.visible === false || vectorItem.scalarEnabled || !uiStateRef.current.showVector) return null;
       const values = renderedVectorValues.get(vectorItem.id) ?? vectorItem.values;
-      return new THREE.Vector3(...transformVector3(matrix, values));
+      return new THREE.Vector3(...transformVector3(vectorMatrix, values));
     };
 
-    if (!isSystemMode) {
-      measurementsRef.current
-        .filter((item) => item.visible !== false)
-        .forEach((item, index) => {
-          const targets = item.targets.map(getMeasureTargetWorld).filter(Boolean);
+    measurementsRef.current
+      .filter((item) => item.visible !== false)
+      .forEach((item, index) => {
+          const targetEntries = item.targets
+            .map((targetId) => ({ id: targetId, vector: getMeasureTargetWorld(targetId) }))
+            .filter((entry) => entry.vector);
+          const targets = targetEntries.map((entry) => entry.vector);
+          const visibleTargetIds = targetEntries.map((entry) => entry.id);
           if (item.type === 'dot' && targets.length >= 2) {
             const [secondary, primary] = targets;
+            const visual = getMeasurementVisual(refs, item, 'dot');
+            activeMeasurementVisuals.add(item.id);
+            const revealEase = measurementRevealEase(item.id);
             const dotValue = primary.dot(secondary);
             const projection = primary.lengthSq() > EPSILON
               ? primary.clone().multiplyScalar(dotValue / primary.lengthSq())
               : new THREE.Vector3();
-            const mainGeometry = new THREE.BufferGeometry();
-            mainGeometry.setAttribute(
-              'position',
-              new THREE.Float32BufferAttribute([
-                primary.x, primary.y, primary.z, secondary.x, secondary.y, secondary.z,
-              ], 3)
-            );
-            const guideGeometry = new THREE.BufferGeometry();
-            guideGeometry.setAttribute(
-              'position',
-              new THREE.Float32BufferAttribute([
-                projection.x, projection.y, projection.z, secondary.x, secondary.y, secondary.z,
-              ], 3)
-            );
-            const mainMaterial = new THREE.LineBasicMaterial({
-              color: MEASURE_DOT_HEX,
-              transparent: true,
-              opacity: 0.96,
-              depthTest: false,
-              depthWrite: false,
-            });
-            const guideMaterial = new THREE.LineDashedMaterial({
-              color: MEASURE_DOT_GUIDE_HEX,
-              transparent: true,
-              opacity: 0.32,
-              dashSize: 0.12,
-              gapSize: 0.08,
-              depthTest: false,
-              depthWrite: false,
-            });
-            const mainLine = new THREE.LineSegments(mainGeometry, mainMaterial);
-            mainLine.renderOrder = 19 + index;
-            refs.measurementGroup.add(mainLine);
-            const guideLine = new THREE.LineSegments(guideGeometry, guideMaterial);
-            guideLine.computeLineDistances();
-            guideLine.renderOrder = 18 + index;
-            refs.measurementGroup.add(guideLine);
-            const point = new THREE.Mesh(
-              new THREE.SphereGeometry(0.055, 18, 12),
-              new THREE.MeshBasicMaterial({ color: MEASURE_DOT_HEX, depthTest: false, depthWrite: false })
-            );
-            point.position.copy(projection);
-            point.renderOrder = 19 + index;
-            refs.measurementGroup.add(point);
+            setGeometryPositions(visual.mainLine.geometry, [
+              primary.x, primary.y, primary.z, secondary.x, secondary.y, secondary.z,
+            ]);
+            setGeometryPositions(visual.guideLine.geometry, [
+              projection.x, projection.y, projection.z, secondary.x, secondary.y, secondary.z,
+            ]);
+            visual.mainLine.renderOrder = 19 + index;
+            visual.mainLine.material.opacity = 0.96 * revealEase;
+            visual.guideLine.computeLineDistances();
+            visual.guideLine.renderOrder = 18 + index;
+            visual.guideLine.material.opacity = 0.32 * revealEase;
+            visual.point.position.copy(projection);
+            visual.point.renderOrder = 19 + index;
+            visual.point.material.opacity = revealEase;
             const labelPosition = primary.clone().lerp(secondary, 0.46).lerp(projection, 0.18);
             activeMeasurementLabels.add(item.id);
+            const labelNode = measurementLabelRefs.current.get(item.id);
             updateLabel(
-              measurementLabelRefs.current.get(item.id),
+              labelNode,
               labelPosition,
               [
                 { text: 'Σ ', className: 'measurement-symbol' },
-                measureTargetToken(item.targets[1]),
+                measureTargetToken(visibleTargetIds[1]),
                 { text: ' · ', className: 'measurement-operator' },
-                measureTargetToken(item.targets[0]),
+                measureTargetToken(visibleTargetIds[0]),
                 { text: ` = ${formatNumber(dotValue)}`, className: 'measurement-value-token' },
               ],
               labelsVisible,
               [0, -30 - (index % 3) * 10],
               { allowOrigin: true }
             );
+            if (labelNode) labelNode.style.opacity = String(0.18 + revealEase * 0.82);
           }
-          if (item.type === 'volume' && targets.length >= 2) {
-            const [a, b, c] = targets;
-            const meshGeometry = new THREE.BufferGeometry();
-            const edgeGeometry = new THREE.BufferGeometry();
-            const isVolume3D = targets.length >= 3;
+          if (item.type === 'volume' && targets.length >= 1) {
+            const targetCount = effectiveVolumeTargetCount(targets.length, coordMode);
+            const measureTargets = targets.slice(0, targetCount);
+            const measureTargetIds = visibleTargetIds.slice(0, targetCount);
+            const [a, b, c] = measureTargets;
+            const visual = getMeasurementVisual(refs, item, 'volume');
+            activeMeasurementVisuals.add(item.id);
+            const revealEase = measurementRevealEase(item.id);
+            const isVolume3D = targetCount >= 3;
+            const isArea2D = targetCount === 2;
             if (isVolume3D) {
-              updateVolumeGeometry(meshGeometry, edgeGeometry, a, b, c);
+              updateVolumeGeometry(visual.mesh.geometry, visual.edges.geometry, a, b, c);
+            } else if (isArea2D) {
+              updateAreaGeometry(visual.mesh.geometry, visual.edges.geometry, a, b);
             } else {
-              updateAreaGeometry(meshGeometry, edgeGeometry, a, b);
+              updateLengthGeometry(visual.mesh.geometry, visual.edges.geometry, a);
             }
-            const mesh = new THREE.Mesh(
-              meshGeometry,
-              new THREE.MeshBasicMaterial({
-                color: isVolume3D ? MEASURE_VOLUME_HEX : MEASURE_AREA_HEX,
-                transparent: true,
-                opacity: isVolume3D ? 0.23 : 0.2,
-                side: THREE.DoubleSide,
-                depthWrite: false,
-              })
+            visual.mesh.visible = isArea2D || isVolume3D;
+            visual.edges.visible = true;
+            visual.mesh.material.color.setHex(isVolume3D ? MEASURE_VOLUME_HEX : MEASURE_AREA_HEX);
+            visual.mesh.material.opacity = (isVolume3D ? 0.23 : 0.2) * revealEase;
+            visual.mesh.renderOrder = 16 + index;
+            visual.edges.material.color.setHex(
+              isVolume3D ? MEASURE_VOLUME_EDGE_HEX : isArea2D ? MEASURE_AREA_EDGE_HEX : MEASURE_LENGTH_HEX
             );
-            mesh.renderOrder = 16 + index;
-            refs.measurementGroup.add(mesh);
-            const edges = new THREE.LineSegments(
-              edgeGeometry,
-              new THREE.LineBasicMaterial({
-                color: isVolume3D ? MEASURE_VOLUME_EDGE_HEX : MEASURE_AREA_EDGE_HEX,
-                transparent: true,
-                opacity: 0.86,
-                depthTest: false,
-                depthWrite: false,
-              })
-            );
-            edges.renderOrder = 17 + index;
-            refs.measurementGroup.add(edges);
-            const value = targets.length >= 3
+            visual.edges.material.opacity = 0.86 * revealEase;
+            visual.edges.renderOrder = 17 + index;
+            const value = isVolume3D
               ? Math.abs(a.clone().cross(b).dot(c))
-              : a.clone().cross(b).length();
-            const labelPosition = targets
+              : isArea2D
+                ? a.clone().cross(b).length()
+                : a.length();
+            const labelPosition = (targetCount === 1
+              ? a.clone().multiplyScalar(0.5)
+              : measureTargets
               .reduce((sum, vector) => sum.add(vector), new THREE.Vector3())
-              .multiplyScalar(1 / targets.length);
-            const labelPrefix = targets.length >= 3 ? t(locale, 'volume') : t(locale, 'area');
+              .multiplyScalar(1 / measureTargets.length));
+            const labelPrefix = t(locale, isVolume3D ? 'volume' : isArea2D ? 'area' : 'length');
             activeMeasurementLabels.add(item.id);
+            const labelNode = measurementLabelRefs.current.get(item.id);
             updateLabel(
-              measurementLabelRefs.current.get(item.id),
+              labelNode,
               labelPosition,
               [
                 { text: `${labelPrefix} `, className: 'measurement-symbol' },
-                ...joinMeasureTargetTokens(item.targets.slice(0, targets.length)),
+                ...joinMeasureTargetTokens(measureTargetIds),
                 { text: ` = ${formatNumber(value)}`, className: 'measurement-value-token' },
               ],
               labelsVisible,
               [0, -32 - (index % 3) * 10],
               { allowOrigin: true }
             );
+            if (labelNode) labelNode.style.opacity = String(0.18 + revealEase * 0.82);
           }
-        });
-    }
+      });
+    refs.measurementVisuals?.forEach((visual, id) => {
+      if (!activeMeasurementVisuals.has(id)) {
+        disposeMeasurementVisual(visual);
+        refs.measurementVisuals.delete(id);
+      }
+    });
+    measurementSpawnTimes.forEach((_, id) => {
+      if (!activeMeasurementVisuals.has(id)) measurementSpawnTimes.delete(id);
+    });
     measurementLabelRefs.current.forEach((label, id) => {
-      if (!activeMeasurementLabels.has(id)) label.style.display = 'none';
+      if (!activeMeasurementLabels.has(id)) {
+        label.style.display = 'none';
+        label.style.opacity = '1';
+      }
     });
 
     const activeVectorKeys = new Set();
     const vectorVisuals = refs.vectorVisuals ?? new Map();
-    vectorsRef.current.forEach((vectorItem) => {
+    vectorsRef.current.forEach((vectorItem, vectorRenderIndex) => {
       activeVectorKeys.add(vectorItem.id);
       let visual = vectorVisuals.get(vectorItem.id);
       if (!visual) {
         visual = createVectorVisual(refs.scene, refs.dragHandleGeometry, vectorItem);
         vectorVisuals.set(vectorItem.id, visual);
       }
+
+      const vectorRenderOrder = 20 + vectorRenderIndex * 3;
+      visual.arrow.renderOrder = vectorRenderOrder;
+      visual.arrow.line.renderOrder = vectorRenderOrder;
+      visual.arrow.cone.renderOrder = vectorRenderOrder + 1;
+      visual.dotLine.renderOrder = vectorRenderOrder + 2;
+      visual.dotPoint.renderOrder = vectorRenderOrder + 2;
+      visual.handle.renderOrder = vectorRenderOrder + 10;
 
       visual.arrow.line.material.color.setHex(vectorItem.color);
       visual.arrow.cone.material.color.setHex(vectorItem.color);
@@ -4252,8 +6521,9 @@ export default function App() {
       visual.handle.userData.dragKey = vectorDragKey;
 
       const renderValues = renderedVectorValues.get(vectorItem.id) ?? vectorItem.values;
-      const [vx, vy, vz] = transformVector3(matrix, renderValues);
+      const [vx, vy, vz] = transformVector3(vectorMatrix, renderValues);
       const userVector = new THREE.Vector3(vx, vy, vz);
+      const spawnEase = vectorSpawnEase(vectorItem.id);
       const vectorItemVisible = vectorItem.visible !== false;
       const isActiveVector = vectorItem.id === activeVectorIdRef.current;
       const baseLengthSquared = userVector.lengthSq();
@@ -4271,16 +6541,18 @@ export default function App() {
           ? scalarNormal.clone().multiplyScalar(scalarValue / scalarBaseLengthSquared)
           : new THREE.Vector3(0, 0, 0);
       const scalarAnchor = scalarSpace === 'input'
-        ? new THREE.Vector3(...transformVector3(matrix, [scalarAnchorInput.x, scalarAnchorInput.y, scalarAnchorInput.z]))
+        ? new THREE.Vector3(...transformVector3(vectorMatrix, [scalarAnchorInput.x, scalarAnchorInput.y, scalarAnchorInput.z]))
         : scalarAnchorInput;
       const projection =
         activeVectorWorld && baseLengthSquared > EPSILON
           ? userVector.clone().multiplyScalar(activeVectorWorld.dot(userVector) / baseLengthSquared)
           : new THREE.Vector3(0, 0, 0);
-      const vectorVisible = uiStateRef.current.showVector && vectorItemVisible && !isSystemMode;
+      const vectorVisible = uiStateRef.current.showVector && vectorItemVisible && vectorSceneAllowed;
       const arrowVisible = vectorVisible && !scalarEnabled;
       const dotDisplayVisible = uiStateRef.current.showDot && vectorItemVisible;
       setArrowVector(visual.arrow, vx, vy, vz, arrowVisible);
+      setMaterialOpacity(visual.arrow.line.material, spawnEase);
+      setMaterialOpacity(visual.arrow.cone.material, spawnEase);
       const dotVisible =
         dotDisplayVisible &&
         arrowVisible &&
@@ -4297,22 +6569,39 @@ export default function App() {
       dotPositions.setXYZ(3, activeVectorWorld?.x ?? 0, activeVectorWorld?.y ?? 0, activeVectorWorld?.z ?? 0);
       dotPositions.needsUpdate = true;
       visual.dotLine.visible = dotVisible;
+      visual.dotMaterial.opacity = 0.86 * spawnEase;
       visual.dotPoint.position.copy(projection);
       visual.dotPoint.visible = dotVisible;
+      setMaterialOpacity(visual.dotPointMaterial, spawnEase);
       handleTargets[vectorDragKey] = scalarEnabled ? scalarAnchor : userVector;
-
-      updateLabel(
-        vectorLabelRefs.current.get(vectorItem.id),
-        scalarEnabled
-          ? scalarAnchor.clone()
-          : new THREE.Vector3(vx * 1.06, vy * 1.06, vz * 1.06),
-        scalarEnabled
-          ? `${scalarSpace === 'input' ? '' : 'A'}${vectorItem.name}·x = ${formatNumber(scalarValue)}`
-          : `${vectorItem.name}′${coordinatesVisible ? ` ${formatCoord([vx, vy, vz], coordMode)}` : ''}`,
-        vectorLabelsVisible && vectorVisible,
-        scalarEnabled ? [0, -20] : [0, -18],
-        { keepNameWhenCoordinatesHidden: !scalarEnabled }
+      const scalarHighlightIndices = scalarEnabled
+        ? scalarLockHighlightIndices(
+            [scalarNormal.x, scalarNormal.y, scalarNormal.z],
+            coordMode
+          )
+        : [];
+      const vectorLabelText = coordLabelText(
+        vectorItem.name,
+        [vx, vy, vz],
+        coordMode,
+        coordinatesVisible,
+        scalarHighlightIndices
       );
+
+      const vectorLabel = vectorLabelRefs.current.get(vectorItem.id);
+      updateLabel(
+        vectorLabel,
+        new THREE.Vector3(vx * 1.06, vy * 1.06, vz * 1.06),
+        vectorLabelText,
+        vectorLabelsVisible && vectorVisible,
+        [0, -18],
+        { keepNameWhenCoordinatesHidden: true }
+      );
+      if (vectorLabel) {
+        vectorLabel.style.opacity = vectorLabelsVisible && vectorVisible
+          ? String(0.18 + spawnEase * 0.82)
+          : '';
+      }
       updateLabel(
         vectorDotLabelRefs.current.get(vectorItem.id),
         projection.clone().lerp(activeVectorWorld ?? userVector, 0.22),
@@ -4339,7 +6628,7 @@ export default function App() {
     });
 
     const scalarSolution = frameScalarSolution ?? scalarSolutionRef.current;
-    const scalarSolutionVisible = !!scalarSolution && uiStateRef.current.showVector && !isSystemMode;
+    const scalarSolutionVisible = !!scalarSolution && uiStateRef.current.showVector && vectorSceneAllowed;
     const scalarSolutionVector = scalarSolution
       ? new THREE.Vector3(scalarSolution[0], scalarSolution[1], scalarSolution[2])
       : new THREE.Vector3();
@@ -4364,12 +6653,11 @@ export default function App() {
         ? vectorsRef.current.find((item) => item.id === dragVectorId)?.visible !== false
         : true;
       const isAvailable =
-        !isSystemMode &&
         !!target &&
         target.length() > EPSILON &&
         (isVectorHandle
-          ? uiStateRef.current.showVector && dragVectorVisible
-          : basisVisibleByKey[key] && (key !== 'k' || coordMode === '3d'));
+          ? vectorSceneAllowed && uiStateRef.current.showVector && dragVectorVisible
+          : !isSystemMode && basisVisibleByKey[key] && (key !== 'k' || coordMode === '3d'));
       const isHot = arrowDragRef.current.hovered === key || arrowDragRef.current.key === key;
       if (target) handle.position.copy(target);
       handle.visible = isAvailable;
@@ -4440,8 +6728,13 @@ export default function App() {
       cameraMoveRef.current.active = false;
       setActiveView(null);
     };
-    const handleControlsChange = () => queueCameraShareUpdate(220);
-    const handleControlsEnd = () => queueCameraShareUpdate(0);
+    const handleControlsChange = () => {
+      if (!cameraAutoRef.current) queueCameraShareUpdate(220);
+    };
+    const handleControlsEnd = () => {
+      if (snapCameraToAutoView()) return;
+      queueCameraShareUpdate(0);
+    };
     controls.addEventListener('start', handleControlsStart);
     controls.addEventListener('change', handleControlsChange);
     controls.addEventListener('end', handleControlsEnd);
@@ -4557,6 +6850,7 @@ export default function App() {
     scene.add(dotPoint);
 
     const equationGroup = new THREE.Group();
+    equationGroup.matrixAutoUpdate = false;
     equationGroup.visible = false;
     scene.add(equationGroup);
 
@@ -4743,6 +7037,9 @@ export default function App() {
       equationGroup,
       vectorScalarGroup,
       measurementGroup,
+      measurementVisuals: new Map(),
+      measurementSpawnTimes: new Map(),
+      equationSpawnTimes: new Map(),
       scalarSolutionPoint,
       equationPoint,
       dragHandles,
@@ -4967,6 +7264,21 @@ export default function App() {
       return hits[0]?.object ?? null;
     };
 
+    const isSceneChromeTarget = (event) => (
+      event.target instanceof Element &&
+      !!event.target.closest(
+        'button, input, select, textarea, .axis-label, .scene-control-dock, .measure-draft-guide, .ad-slot'
+      )
+    );
+
+    const cancelMeasurementPick = () => {
+      setMeasureMode(null);
+      setMeasureDraft([]);
+      setMeasureAnchorId(null);
+      setMeasurePointer(null);
+      setHoveredMeasureTargetId(null);
+    };
+
     const handleArrowPointerMove = (event) => {
       const dragState = arrowDragRef.current;
       if (dragState.active) {
@@ -5023,7 +7335,15 @@ export default function App() {
       const labelKey = getLabelDragKey(event);
       const hit = labelKey ? null : pickDragHandle(event);
       const dragKey = labelKey ?? hit?.userData.dragKey ?? null;
-      if (!dragKey) return;
+      if (!dragKey) {
+        if (
+          (measureModeRef.current || measureDraftRef.current.length > 0) &&
+          !isSceneChromeTarget(event)
+        ) {
+          cancelMeasurementPick();
+        }
+        return;
+      }
       event.preventDefault();
       event.stopPropagation();
       setDragSnapGuide(null);
@@ -5139,6 +7459,7 @@ export default function App() {
       controls.dispose();
       clearEquationGroup(equationGroup);
       clearEquationGroup(vectorScalarGroup);
+      threeRef.current?.measurementVisuals?.forEach(disposeMeasurementVisual);
       threeRef.current?.vectorVisuals?.forEach((visual) => disposeVectorVisual(scene, visual));
       threeRef.current?.disposable.forEach((item) => item.dispose?.());
       renderer.dispose();
@@ -5147,7 +7468,7 @@ export default function App() {
       }
       threeRef.current = null;
     };
-  }, [animate, queueCameraShareUpdate]);
+  }, [animate, queueCameraShareUpdate, snapCameraToAutoView]);
 
   const moveCameraToView = useCallback((viewKey) => {
     const refs = threeRef.current;
@@ -5180,16 +7501,19 @@ export default function App() {
   const switchWorkspaceMode = useCallback((mode) => {
     setWorkspaceMode(mode);
     if (mode === 'system') {
+      setCameraAuto(true);
       moveCameraToView(systemDimensionRef.current === '3d' ? '3d' : '2d');
+    } else {
+      setCameraAuto(false);
     }
   }, [moveCameraToView]);
 
   useEffect(() => {
-    systemDimensionRef.current = lineSystem.mode ?? '2d';
+    systemDimensionRef.current = effectiveSystemMode;
     if (workspaceMode === 'system') {
-      moveCameraToView(lineSystem.mode === '3d' ? '3d' : '2d');
+      moveCameraToView(effectiveSystemMode);
     }
-  }, [lineSystem.mode, moveCameraToView, workspaceMode]);
+  }, [effectiveSystemMode, moveCameraToView, workspaceMode]);
 
   const moveCameraForMatrix = useCallback((matrix) => {
     moveCameraToView(viewKeyForMatrix(matrix));
@@ -5246,6 +7570,907 @@ export default function App() {
     });
     moveCameraForMatrix(next);
   }, [moveCameraForMatrix, startAnimationTo]);
+
+  const applyNotebookCursor = useCallback((rawCursor, sourceCells = notebookScript.cells, options = {}) => {
+    const cells = sourceCells.length ? sourceCells : [];
+    const clamped = Math.max(0, Math.min(100, Number(rawCursor) || 0));
+    const hasLineMetadata = cells.some(
+      (cell) => Number.isFinite(cell.lineStart) && Number.isFinite(cell.lineEnd)
+    );
+    let activeCell = clamped <= 0 ? null : cells[0];
+    let equationText = '';
+    let hasEquationText = false;
+    let captionText = '';
+    const notebookMode = notebookModeForCells(cells, notebookScript.mode);
+    const notebookIdentity = identityMatrixForMode(notebookMode);
+    let startMatrix = [...notebookIdentity];
+    let targetMatrix = [...notebookIdentity];
+    let progressWithinCell = 1;
+    const scriptHasVectorCells = hasLineMetadata && cells.some(
+      (cell) =>
+        !cell.hidden &&
+        ((cell.type === 'vector' && cell.execute !== false && !cell.remove) ||
+          (cell.type === 'calc' && cell.resultKind === 'vector' && cell.execute === true) ||
+          (cell.type === 'ref' && cell.refKind === 'vector' && !cell.remove))
+    );
+    const revealedVectors = [];
+    const notebookVectorEnv = new Map();
+    const notebookMatrixEnv = new Map();
+    const notebookEquationEnv = new Map();
+    const equationLineItems = [];
+
+    const upsertNotebookEquation = (entry, options = {}) => {
+      if (!entry?.name && options.allowAnonymous !== true) return null;
+      const equationName = normalizeNotebookVariableName(entry.name, `L${equationLineItems.length + 1}`);
+      if (!equationName) return null;
+      const parsed = entry.coeffs
+        ? entry
+        : parsedEquationLine(entry.text ?? '');
+      if (!parsed) return null;
+      const nextEntry = {
+        name: equationName,
+        text: entry.text ?? formatEquationFromCoefficients(parsed.coeffs, parsed.value),
+        coeffs: parsed.coeffs,
+        value: parsed.value,
+        color: entry.color ?? equationLineColors[equationLineItems.length % equationLineColors.length],
+        dimension: entry.dimension ?? (Math.abs(parsed.coeffs[2]) > EPSILON ? 3 : 2),
+      };
+      const key = notebookVariableKey(equationName);
+      notebookEquationEnv.set(key, nextEntry);
+      if (options.reveal !== false) {
+        const existingIndex = equationLineItems.findIndex((item) => notebookVariableKey(item.name) === key);
+        if (existingIndex >= 0) equationLineItems[existingIndex] = nextEntry;
+        else equationLineItems.push(nextEntry);
+      }
+      return nextEntry;
+    };
+
+    const removeNotebookEquation = (name) => {
+      const key = notebookVariableKey(name);
+      const index = equationLineItems.findIndex((item) => notebookVariableKey(item.name) === key);
+      if (index >= 0) equationLineItems.splice(index, 1);
+    };
+
+    const upsertNotebookVector = (name, values, color, options = {}) => {
+      if (!name && options.allowAnonymous !== true) return null;
+      const vectorName = normalizeNotebookVariableName(name, `v${revealedVectors.length + 1}`);
+      if (!vectorName) return null;
+      const reveal = options.reveal ?? true;
+      const key = notebookVariableKey(vectorName);
+      const existingIndex = revealedVectors.findIndex((item) => notebookVariableKey(item.name) === key);
+      const vectorIndex = existingIndex >= 0 ? existingIndex : revealedVectors.length;
+      const nextVector = createVectorState(vectorIndex, {
+        id: notebookVectorIdForName(vectorName, vectorIndex),
+        name: vectorName,
+        color: color ?? vectorPalette[vectorIndex % vectorPalette.length],
+        x: values[0] ?? '0',
+        y: values[1] ?? '0',
+        z: values[2] ?? '0',
+        visible: true,
+      });
+      if (reveal) {
+        if (existingIndex >= 0) revealedVectors[existingIndex] = nextVector;
+        else revealedVectors.push(nextVector);
+      }
+      notebookVectorEnv.set(key, {
+        name: vectorName,
+        values: [nextVector.x, nextVector.y, nextVector.z],
+        color: nextVector.color,
+      });
+      return nextVector;
+    };
+
+    const removeNotebookVector = (name) => {
+      const key = notebookVariableKey(name);
+      const index = revealedVectors.findIndex((item) => notebookVariableKey(item.name) === key);
+      if (index >= 0) revealedVectors.splice(index, 1);
+    };
+
+    const evaluateNotebookCalculation = (cell) => {
+      const leftKey = notebookVariableKey(cell.left);
+      const rightKey = notebookVariableKey(cell.right);
+      const leftMatrix = notebookMatrixEnv.get(leftKey);
+      const rightMatrix = notebookMatrixEnv.get(rightKey);
+      const leftVector = notebookVectorEnv.get(leftKey);
+      const rightVector = notebookVectorEnv.get(rightKey);
+      const leftEquation = notebookEquationEnv.get(leftKey);
+      const rightEquation = notebookEquationEnv.get(rightKey);
+      if (leftMatrix && rightVector) {
+        return {
+          type: 'vector',
+          values: multiplyNotebookMatrixVector(leftMatrix.values, rightVector.values),
+          color: cell.color ?? rightVector.color,
+        };
+      }
+      if (leftMatrix && rightMatrix) {
+        return multiplyNotebookMatrices(leftMatrix, rightMatrix);
+      }
+      if (rightMatrix && leftVector) {
+        return {
+          type: 'vector',
+          values: multiplyNotebookMatrixVector(rightMatrix.values, leftVector.values),
+          color: cell.color ?? leftVector.color,
+        };
+      }
+      if (leftMatrix && rightEquation) {
+        const result = transformNotebookEquation(rightEquation, leftMatrix);
+        return result ? { ...result, color: cell.color ?? rightEquation.color } : null;
+      }
+      if (rightMatrix && leftEquation) {
+        const result = transformNotebookEquation(leftEquation, rightMatrix);
+        return result ? { ...result, color: cell.color ?? leftEquation.color } : null;
+      }
+      return null;
+    };
+
+    const matrixEntryForCell = (cell) => {
+      const matrixMode = notebookMatrixModeFromText(cell.text, cell.mode);
+      const rows = cell.rows ?? dimensionForMode(matrixMode);
+      const columns = cell.columns ?? rows;
+      const values = cell.values ?? matrixValuesFromNotebookText(cell.text, matrixMode);
+      const shapeValues = Array.from({ length: rows * columns }, (_, index) =>
+        formatPresetInputValue(parseNumber(values[index] ?? (index % (columns + 1) === 0 ? '1' : '0')))
+      );
+      return {
+        name: cell.name,
+        rows,
+        columns,
+        mode: operationModeForShape(rows, columns),
+        shapeValues,
+        values: operationMatrixFromInputValues(shapeValues, rows, columns),
+      };
+    };
+
+    const setMatrixCalculation = (cell, result) => {
+      if (result?.type !== 'matrix') return null;
+      const entry = {
+        name: cell.name,
+        rows: result.rows,
+        columns: result.columns,
+        mode: result.mode,
+        shapeValues: result.shapeValues,
+        values: result.values,
+      };
+      if (cell.name) notebookMatrixEnv.set(notebookVariableKey(cell.name), entry);
+      return entry;
+    };
+
+    const upsertNotebookCalculationResult = (cell, result, options = {}) => {
+      const localProgress = Number.isFinite(options.localProgress) ? clamp01(options.localProgress) : 1;
+      const easedProgress = easeInOut(localProgress);
+      if (result?.type === 'vector') {
+        const key = cell.name ? notebookVariableKey(cell.name) : '';
+        const previous = key ? notebookVectorEnv.get(key) : null;
+        const values = previous && localProgress < 1
+          ? interpolateValueStrings(previous.values, result.values, easedProgress)
+          : result.values;
+        return upsertNotebookVector(cell.name, values, result.color, { reveal: cell.execute === true });
+      }
+      if (result?.type === 'equation') {
+        const key = cell.name ? notebookVariableKey(cell.name) : '';
+        const previous = key ? notebookEquationEnv.get(key) : null;
+        const target = { ...result, name: cell.name };
+        const entry = previous && localProgress < 1
+          ? interpolateEquationEntry(previous, target, easedProgress)
+          : target;
+        return upsertNotebookEquation(entry, { reveal: cell.execute === true });
+      }
+      if (result?.type === 'matrix') return setMatrixCalculation(cell, result);
+      return null;
+    };
+
+    if (hasLineMetadata) {
+      const lastLineFromCells = Math.max(
+        0,
+        ...cells.map((cell, index) => Number.isFinite(cell.lineEnd) ? cell.lineEnd : index)
+      );
+      const lineCount = Math.max(NOTEBOOK_MIN_VISIBLE_LINES, notebookScript.lineCount, lastLineFromCells + 1);
+      const linePosition = (clamped / 100) * lineCount;
+      const activeLine = clamped <= 0 ? -1 : Math.min(lineCount - 1, Math.max(0, Math.floor(linePosition)));
+      const activeByLine = activeLine < 0
+        ? null
+        : cells.find((cell, index) => {
+            const start = Number.isFinite(cell.lineStart) ? cell.lineStart : index;
+            const end = Number.isFinite(cell.lineEnd) ? cell.lineEnd : start;
+            return activeLine >= start && activeLine <= end;
+          });
+      activeCell = activeByLine
+        ?? [...cells].reverse().find((cell, reverseIndex) => {
+          const originalIndex = cells.length - 1 - reverseIndex;
+          const start = Number.isFinite(cell.lineStart) ? cell.lineStart : originalIndex;
+          return activeLine >= 0 && start <= activeLine;
+        })
+        ?? null;
+
+      let isInsidePartialMatrix = false;
+
+      for (let index = 0; index < cells.length; index += 1) {
+        const cell = cells[index];
+        const lineStart = Number.isFinite(cell.lineStart) ? cell.lineStart : index;
+        const lineEnd = Number.isFinite(cell.lineEnd) ? cell.lineEnd : lineStart;
+        const span = Math.max(1, lineEnd - lineStart + 1);
+        const hasReachedCell = clamped >= 100 || linePosition > lineStart;
+        if (!hasReachedCell) continue;
+        if (cell.hidden) continue;
+
+        if (cell.type === 'caption') {
+          captionText = cell.remove ? '' : cell.text ?? '';
+          continue;
+        }
+
+        if (cell.type === 'equation') {
+          const sourceLines = cell.text.replace(/\r/g, '').split('\n').filter((line) => line.trim());
+          const lineLimit = clamped >= 100
+            ? sourceLines.length
+            : Math.max(1, Math.min(sourceLines.length, Math.floor(linePosition - lineStart) + 1));
+          const equationItems = cell.equations?.length
+            ? cell.equations
+            : sourceLines.map((text, itemIndex) => {
+                const parsed = parsedEquationLine(text);
+                return parsed
+                  ? {
+                      name: `L${itemIndex + 1}`,
+                      text,
+                      coeffs: parsed.coeffs,
+                      value: parsed.value,
+                      color: equationLineColors[itemIndex % equationLineColors.length],
+                    }
+                  : null;
+              }).filter(Boolean);
+          equationItems.slice(0, lineLimit).forEach((item) => upsertNotebookEquation(item));
+          continue;
+        }
+
+      if (cell.type === 'vector') {
+        const values = cell.values ?? ['0', '0', '0'];
+          if (cell.remove) {
+            removeNotebookVector(cell.name);
+            continue;
+          }
+          upsertNotebookVector(cell.name, values, cell.color, { reveal: cell.execute !== false });
+          continue;
+        }
+
+        if (cell.type === 'calc') {
+          if (cell.remove) {
+            if (cell.resultKind === 'vector') removeNotebookVector(cell.name);
+            if (cell.resultKind === 'equation') removeNotebookEquation(cell.name);
+            if (cell.resultKind === 'matrix') notebookMatrixEnv.delete(notebookVariableKey(cell.name));
+            continue;
+          }
+          const result = evaluateNotebookCalculation(cell);
+          const localProgress = clamp01((linePosition - lineStart) / span);
+          if (result?.type === 'vector') {
+            upsertNotebookCalculationResult(cell, result, { localProgress });
+          }
+          if (result?.type === 'equation') {
+            upsertNotebookCalculationResult(cell, result, { localProgress });
+          }
+          if (result?.type === 'matrix') {
+            setMatrixCalculation(cell, result);
+          }
+          continue;
+        }
+
+        if (cell.type === 'ref') {
+          if (cell.remove) {
+            if (cell.refKind === 'vector') removeNotebookVector(cell.name);
+            if (cell.refKind === 'equation') removeNotebookEquation(cell.name);
+            if (cell.refKind === 'matrix') notebookMatrixEnv.delete(notebookVariableKey(cell.name));
+            continue;
+          }
+          if (cell.refKind === 'matrix') {
+            const entry = notebookMatrixEnv.get(notebookVariableKey(cell.name));
+            const localProgress = clamp01(linePosition - lineStart);
+            const isComplete = localProgress >= 1 || clamped >= 100;
+            if (entry && isComplete) {
+              startMatrix = multiplyMatrix3(entry.values, startMatrix);
+              targetMatrix = [...startMatrix];
+            } else if (entry) {
+              targetMatrix = multiplyMatrix3(entry.values, startMatrix);
+              progressWithinCell = localProgress;
+              activeCell = cell;
+              isInsidePartialMatrix = true;
+              break;
+            }
+          }
+          if (cell.refKind === 'vector') {
+            const entry = notebookVectorEnv.get(notebookVariableKey(cell.name));
+            if (entry) upsertNotebookVector(entry.name, entry.values, entry.color);
+          }
+          if (cell.refKind === 'equation') {
+            const entry = notebookEquationEnv.get(notebookVariableKey(cell.name));
+            if (entry) upsertNotebookEquation(entry);
+          }
+          continue;
+        }
+
+        if (cell.type === 'matrix') {
+          const entry = matrixEntryForCell(cell);
+          const matrix = entry.values;
+          const localProgress = clamp01((linePosition - lineStart) / span);
+          const isComplete = localProgress >= 1 || clamped >= 100;
+          if (cell.remove) {
+            if (isComplete) notebookMatrixEnv.delete(notebookVariableKey(cell.name));
+            continue;
+          }
+          if (isComplete) {
+            notebookMatrixEnv.set(notebookVariableKey(cell.name), entry);
+          }
+          if (cell.execute === true && isComplete) {
+            startMatrix = multiplyMatrix3(matrix, startMatrix);
+            targetMatrix = [...startMatrix];
+          } else if (cell.execute === true) {
+            targetMatrix = multiplyMatrix3(matrix, startMatrix);
+            progressWithinCell = localProgress;
+            activeCell = cell;
+            isInsidePartialMatrix = true;
+            break;
+          }
+        }
+      }
+
+      if (!isInsidePartialMatrix) {
+        targetMatrix = [...startMatrix];
+        progressWithinCell = 1;
+      }
+      equationText = equationLineItems.map((item) => item.text).join('\n');
+      hasEquationText = equationLineItems.length > 0;
+    } else {
+      const scaled = (clamped / 100) * cells.length;
+      const roundedBoundary = Math.round(scaled);
+      const isCellBoundary = clamped > 0 && Math.abs(scaled - roundedBoundary) < 0.0001;
+      const activeIndex = Math.min(
+        cells.length - 1,
+        Math.max(0, isCellBoundary ? roundedBoundary - 1 : Math.floor(scaled))
+      );
+      const localProgress = isCellBoundary
+        ? 1
+        : activeIndex === cells.length - 1
+          ? Math.min(1, scaled - activeIndex)
+          : scaled - activeIndex;
+      activeCell = cells[activeIndex];
+
+      for (let index = 0; index < activeIndex; index += 1) {
+        const cell = cells[index];
+        if (cell.hidden) continue;
+        if (cell.type === 'caption') {
+          captionText = cell.remove ? '' : cell.text ?? '';
+        }
+        if (cell.type === 'equation') {
+          const sourceLines = cell.text.replace(/\r/g, '').split('\n').filter((line) => line.trim());
+          const equationItems = cell.equations?.length
+            ? cell.equations
+            : sourceLines.map((text, itemIndex) => {
+                const parsed = parsedEquationLine(text);
+                return parsed
+                  ? {
+                      name: `L${itemIndex + 1}`,
+                      text,
+                      coeffs: parsed.coeffs,
+                      value: parsed.value,
+                      color: equationLineColors[itemIndex % equationLineColors.length],
+                    }
+                  : null;
+              }).filter(Boolean);
+          equationItems.forEach((item) => upsertNotebookEquation(item));
+        }
+        if (cell.type === 'matrix') {
+          const entry = matrixEntryForCell(cell);
+          if (cell.remove) {
+            notebookMatrixEnv.delete(notebookVariableKey(cell.name));
+            continue;
+          }
+          notebookMatrixEnv.set(notebookVariableKey(cell.name), entry);
+          if (cell.execute === true) startMatrix = multiplyMatrix3(entry.values, startMatrix);
+        }
+        if (cell.type === 'vector') {
+          if (cell.remove) {
+            removeNotebookVector(cell.name);
+            continue;
+          }
+          upsertNotebookVector(cell.name, cell.values ?? ['0', '0', '0'], cell.color, { reveal: cell.execute !== false });
+        }
+        if (cell.type === 'calc') {
+          if (cell.remove) {
+            if (cell.resultKind === 'vector') removeNotebookVector(cell.name);
+            if (cell.resultKind === 'equation') removeNotebookEquation(cell.name);
+            if (cell.resultKind === 'matrix') notebookMatrixEnv.delete(notebookVariableKey(cell.name));
+            continue;
+          }
+          const result = evaluateNotebookCalculation(cell);
+          if (result?.type === 'vector') {
+            upsertNotebookCalculationResult(cell, result, { localProgress: 1 });
+          }
+          if (result?.type === 'equation') {
+            upsertNotebookCalculationResult(cell, result, { localProgress: 1 });
+          }
+          if (result?.type === 'matrix') {
+            setMatrixCalculation(cell, result);
+          }
+        }
+        if (cell.type === 'ref') {
+          if (cell.remove) {
+            if (cell.refKind === 'vector') removeNotebookVector(cell.name);
+            if (cell.refKind === 'equation') removeNotebookEquation(cell.name);
+            if (cell.refKind === 'matrix') notebookMatrixEnv.delete(notebookVariableKey(cell.name));
+          } else if (cell.refKind === 'matrix') {
+            const entry = notebookMatrixEnv.get(notebookVariableKey(cell.name));
+            if (entry) startMatrix = multiplyMatrix3(entry.values, startMatrix);
+          } else if (cell.refKind === 'vector') {
+            const entry = notebookVectorEnv.get(notebookVariableKey(cell.name));
+            if (entry) upsertNotebookVector(entry.name, entry.values, entry.color);
+          } else if (cell.refKind === 'equation') {
+            const entry = notebookEquationEnv.get(notebookVariableKey(cell.name));
+            if (entry) upsertNotebookEquation(entry);
+          }
+        }
+      }
+
+      targetMatrix = [...startMatrix];
+      if (!activeCell || activeCell.hidden) {
+        progressWithinCell = 1;
+      } else if (activeCell.type === 'equation') {
+        const sourceLines = activeCell.text.replace(/\r/g, '').split('\n').filter((line) => line.trim());
+        const equationItems = activeCell.equations?.length
+          ? activeCell.equations
+          : sourceLines.map((text, itemIndex) => {
+              const parsed = parsedEquationLine(text);
+              return parsed
+                ? {
+                    name: `L${itemIndex + 1}`,
+                    text,
+                    coeffs: parsed.coeffs,
+                    value: parsed.value,
+                    color: equationLineColors[itemIndex % equationLineColors.length],
+                  }
+                : null;
+            }).filter(Boolean);
+        equationItems.forEach((item) => upsertNotebookEquation(item));
+      } else if (activeCell.type === 'caption') {
+        captionText = activeCell.remove ? '' : activeCell.text ?? '';
+      }
+      if (activeCell?.type === 'vector') {
+        const values = activeCell.values ?? ['0', '0', '0'];
+        if (activeCell.remove) removeNotebookVector(activeCell.name);
+        else upsertNotebookVector(activeCell.name, values, activeCell.color, { reveal: activeCell.execute !== false });
+      }
+      if (activeCell?.type === 'calc') {
+        if (activeCell.remove) {
+          if (activeCell.resultKind === 'vector') removeNotebookVector(activeCell.name);
+          if (activeCell.resultKind === 'equation') removeNotebookEquation(activeCell.name);
+          if (activeCell.resultKind === 'matrix') notebookMatrixEnv.delete(notebookVariableKey(activeCell.name));
+        } else {
+        const result = evaluateNotebookCalculation(activeCell);
+        if (result?.type === 'vector') {
+          upsertNotebookCalculationResult(activeCell, result, { localProgress });
+        }
+        if (result?.type === 'equation') {
+          upsertNotebookCalculationResult(activeCell, result, { localProgress });
+        }
+        if (result?.type === 'matrix') {
+          setMatrixCalculation(activeCell, result);
+        }
+        }
+      }
+      if (activeCell?.type === 'matrix') {
+        const entry = matrixEntryForCell(activeCell);
+        if (activeCell.remove) {
+          notebookMatrixEnv.delete(notebookVariableKey(activeCell.name));
+        } else {
+          notebookMatrixEnv.set(notebookVariableKey(activeCell.name), entry);
+        if (activeCell.execute === true) {
+          targetMatrix = multiplyMatrix3(entry.values, startMatrix);
+          progressWithinCell = localProgress;
+        }
+        }
+      }
+      if (activeCell?.type === 'ref') {
+        if (activeCell.remove) {
+          if (activeCell.refKind === 'vector') removeNotebookVector(activeCell.name);
+          if (activeCell.refKind === 'equation') removeNotebookEquation(activeCell.name);
+          if (activeCell.refKind === 'matrix') notebookMatrixEnv.delete(notebookVariableKey(activeCell.name));
+        } else if (activeCell.refKind === 'matrix') {
+          const entry = notebookMatrixEnv.get(notebookVariableKey(activeCell.name));
+          if (entry) {
+            targetMatrix = multiplyMatrix3(entry.values, startMatrix);
+            progressWithinCell = localProgress;
+          }
+        } else if (activeCell.refKind === 'vector') {
+          const entry = notebookVectorEnv.get(notebookVariableKey(activeCell.name));
+          if (entry) upsertNotebookVector(entry.name, entry.values, entry.color);
+        } else if (activeCell.refKind === 'equation') {
+          const entry = notebookEquationEnv.get(notebookVariableKey(activeCell.name));
+          if (entry) upsertNotebookEquation(entry);
+        }
+      }
+    }
+
+    equationText = equationLineItems.map((item) => item.text).join('\n');
+    hasEquationText = equationLineItems.length > 0;
+
+    setNotebookCursor(clamped);
+    setActiveNotebookCellId(activeCell?.id ?? null);
+    setActiveNotebookCaption(captionText);
+    if (hasLineMetadata || hasEquationText) {
+      const normalized = equationText.replace(/\r/g, '');
+      setEquations(normalized === '' ? [''] : normalized.split('\n'));
+    }
+    if (scriptHasVectorCells) {
+      const notebookVectorMatrix = startMatrix.map((value, matrixIndex) =>
+        value + progressWithinCell * (targetMatrix[matrixIndex] - value)
+      );
+      notebookVectorTransformRef.current = [...notebookVectorMatrix];
+      setVectors((previous) => {
+        const same = previous.length === revealedVectors.length && previous.every((item, index) => {
+          const next = revealedVectors[index];
+          return (
+            next &&
+            item.id === next.id &&
+            item.name === next.name &&
+            item.color === next.color &&
+            item.x === next.x &&
+            item.y === next.y &&
+            item.z === next.z &&
+            item.visible === next.visible
+          );
+        });
+        return same ? previous : revealedVectors;
+      });
+      setActiveVectorId(revealedVectors.at(-1)?.id ?? null);
+    } else {
+      notebookVectorTransformRef.current = [...notebookIdentity];
+    }
+
+    if (options.animate) {
+      const easedLocal = easeInOut(progressWithinCell);
+      const desiredMatrix = startMatrix.map((value, matrixIndex) =>
+        value + easedLocal * (targetMatrix[matrixIndex] - value)
+      );
+      startMatrixRef.current = [...currentMatrixRef.current];
+      targetMatrixRef.current = desiredMatrix;
+      animationViewFromRef.current = viewKeyForMatrix(currentMatrixRef.current);
+      animationViewToRef.current = viewKeyForMatrix(desiredMatrix);
+      animationStartRef.current = null;
+      lastUiSyncRef.current = 0;
+      isAnimatingRef.current = true;
+      setProgress(0);
+      setBasisControlMatrix(desiredMatrix);
+      return;
+    }
+
+    stopAutoAnimation();
+    startMatrixRef.current = [...startMatrix];
+    targetMatrixRef.current = [...targetMatrix];
+    animationViewFromRef.current = viewKeyForMatrix(startMatrix);
+    animationViewToRef.current = viewKeyForMatrix(targetMatrix);
+    animationStartRef.current = null;
+    lastUiSyncRef.current = 0;
+    setMatrixAtProgress(progressWithinCell);
+  }, [notebookScript.cells, notebookScript.lineCount, notebookScript.mode, setMatrixAtProgress, stopAutoAnimation]);
+
+  const runNotebookCell = useCallback((cellId) => {
+    const index = notebookCells.findIndex((cell) => cell.id === cellId);
+    if (index < 0) return;
+    const cursor = ((index + 1) / notebookCells.length) * 100;
+    applyNotebookCursor(cursor, notebookCells);
+  }, [applyNotebookCursor, notebookCells]);
+
+  const cancelNotebookPlayback = useCallback(() => {
+    if (notebookPlaybackFrameRef.current) {
+      window.cancelAnimationFrame(notebookPlaybackFrameRef.current);
+      notebookPlaybackFrameRef.current = null;
+    }
+    setNotebookPlaying(false);
+  }, []);
+
+  const playNotebookCursorRange = useCallback((startCursor, endCursor, sourceCells = notebookScript.cells, duration = 900, onComplete) => {
+    cancelNotebookPlayback();
+    const startValue = Math.max(0, Math.min(100, Number(startCursor) || 0));
+    const endValue = Math.max(0, Math.min(100, Number(endCursor) || 0));
+    const delta = endValue - startValue;
+    const direction = Math.sign(delta) || 1;
+    const lastLineFromCells = Math.max(
+      0,
+      ...sourceCells.map((cell, index) => Number.isFinite(cell.lineEnd) ? cell.lineEnd : index)
+    );
+    const lineCount = Math.max(NOTEBOOK_MIN_VISIBLE_LINES, notebookScript.lineCount, lastLineFromCells + 1);
+    const speed = getNotebookPlaybackRate(notebookSpeed);
+    const timedCells = direction > 0
+      ? [...sourceCells]
+        .flatMap((cell, index) => {
+          const lineDurations = Array.isArray(cell.lineDurations) ? cell.lineDurations : [];
+          if (lineDurations.length) {
+            return lineDurations
+              .filter((item) => Number.isFinite(item.durationSec) && item.durationSec > 0)
+              .map((item) => {
+                const line = Number.isFinite(item.line)
+                  ? item.line
+                  : (Number.isFinite(cell.lineStart) ? cell.lineStart : index);
+                const start = (line / lineCount) * 100;
+                const end = ((line + 1) / lineCount) * 100;
+                return {
+                  start: Math.max(startValue, Math.min(endValue, start)),
+                  end: Math.max(startValue, Math.min(endValue, end)),
+                  duration: Math.max(120, item.durationSec * 1000 / speed),
+                };
+              });
+          }
+          if (!Number.isFinite(cell.durationSec) || cell.durationSec <= 0) return [];
+          const start = ((Number.isFinite(cell.lineStart) ? cell.lineStart : index) / lineCount) * 100;
+          const end = (((Number.isFinite(cell.lineEnd) ? cell.lineEnd : cell.lineStart ?? index) + 1) / lineCount) * 100;
+          return [{
+            start: Math.max(startValue, Math.min(endValue, start)),
+            end: Math.max(startValue, Math.min(endValue, end)),
+            duration: Math.max(120, cell.durationSec * 1000 / speed),
+          }];
+        })
+        .filter((segment) => segment.end - segment.start > 0.001)
+        .sort((a, b) => a.start - b.start)
+      : [];
+    const defaultMsPerCursor = Math.max(1, duration / Math.max(1, Math.abs(delta)));
+    const segments = [];
+    let cursor = startValue;
+    timedCells.forEach((cellSegment) => {
+      if (cellSegment.start > cursor + 0.001) {
+        segments.push({
+          from: cursor,
+          to: cellSegment.start,
+          duration: Math.max(80, (cellSegment.start - cursor) * defaultMsPerCursor),
+        });
+      }
+      segments.push({
+        from: cellSegment.start,
+        to: cellSegment.end,
+        duration: cellSegment.duration,
+      });
+      cursor = Math.max(cursor, cellSegment.end);
+    });
+    if (endValue > cursor + 0.001) {
+      segments.push({
+        from: cursor,
+        to: endValue,
+        duration: Math.max(80, (endValue - cursor) * defaultMsPerCursor),
+      });
+    }
+    const effectiveSegments = segments.length
+      ? segments
+      : [{ from: startValue, to: endValue, duration: Math.max(1, duration) }];
+    const totalDuration = effectiveSegments.reduce((sum, segment) => sum + segment.duration, 0);
+    let startTime = null;
+    applyNotebookCursor(startValue, sourceCells);
+    setNotebookPlaying(true);
+
+    const tick = (time) => {
+      if (startTime === null) startTime = time;
+      const elapsed = Math.min(totalDuration, time - startTime);
+      let passed = 0;
+      let currentSegment = effectiveSegments[effectiveSegments.length - 1];
+      for (const segment of effectiveSegments) {
+        if (elapsed <= passed + segment.duration) {
+          currentSegment = segment;
+          break;
+        }
+        passed += segment.duration;
+      }
+      const segmentRatio = currentSegment.duration > 0
+        ? Math.min(1, Math.max(0, (elapsed - passed) / currentSegment.duration))
+        : 1;
+      applyNotebookCursor(
+        currentSegment.from + easeInOut(segmentRatio) * (currentSegment.to - currentSegment.from),
+        sourceCells
+      );
+      if (elapsed < totalDuration) {
+        notebookPlaybackFrameRef.current = window.requestAnimationFrame(tick);
+      } else {
+        notebookPlaybackFrameRef.current = null;
+        onComplete?.();
+        if (!notebookPlaybackFrameRef.current) {
+          setNotebookPlaying(false);
+        }
+      }
+    };
+
+    notebookPlaybackFrameRef.current = window.requestAnimationFrame(tick);
+  }, [applyNotebookCursor, cancelNotebookPlayback, notebookScript.cells, notebookScript.lineCount, notebookSpeed]);
+
+  const runSmartNotebook = useCallback(() => {
+    const speed = getNotebookPlaybackRate(notebookSpeed);
+    const duration = Math.max(900, Math.min(5600, notebookScript.lineCount * 420)) / speed;
+    playNotebookCursorRange(0, 100, notebookScript.cells, duration);
+  }, [notebookScript.cells, notebookScript.lineCount, notebookSpeed, playNotebookCursorRange]);
+
+  const playNotebookMatrixCell = useCallback((cell, options = {}) => {
+    if (
+      !cell ||
+      (
+        cell.type !== 'matrix' &&
+        !(cell.type === 'calc' && cell.resultKind === 'matrix') &&
+        !(cell.type === 'ref' && cell.refKind === 'matrix')
+      )
+    ) return;
+    const lineCount = Math.max(NOTEBOOK_MIN_VISIBLE_LINES, notebookScript.lineCount, (cell.lineEnd ?? 0) + 1);
+    const startCursor = ((cell.lineStart ?? 0) / lineCount) * 100;
+    const endCursor = (((cell.lineEnd ?? cell.lineStart ?? 0) + 1) / lineCount) * 100;
+    const span = Math.max(1, (cell.lineEnd ?? cell.lineStart ?? 0) - (cell.lineStart ?? 0) + 1);
+    const speed = getNotebookPlaybackRate(notebookSpeed);
+    const duration = Math.max(520, Math.min(2600, span * 420)) / speed;
+    const continueToEnd = Boolean(options.continueToEnd);
+    const playRestOfNotebook = () => {
+      if (!continueToEnd || endCursor >= 99.8) return;
+      const remainingLines = Math.max(1, lineCount - ((cell.lineEnd ?? cell.lineStart ?? 0) + 1));
+      const restDuration = Math.max(520, Math.min(3600, remainingLines * 320)) / speed;
+      playNotebookCursorRange(endCursor, 100, notebookScript.cells, restDuration);
+    };
+    playNotebookCursorRange(startCursor, endCursor, notebookScript.cells, duration, playRestOfNotebook);
+  }, [notebookScript.cells, notebookScript.lineCount, notebookSpeed, playNotebookCursorRange]);
+
+  const playSmartNotebookFromLine = useCallback((lineIndex) => {
+    const lineCount = Math.max(NOTEBOOK_MIN_VISIBLE_LINES, notebookScript.lineCount, lineIndex + 1);
+    const startCursor = (Math.max(0, lineIndex) / lineCount) * 100;
+    const remainingLines = Math.max(1, lineCount - Math.max(0, lineIndex));
+    const speed = getNotebookPlaybackRate(notebookSpeed);
+    const duration = Math.max(620, Math.min(5200, remainingLines * 360)) / speed;
+    playNotebookCursorRange(startCursor, 100, notebookScript.cells, duration);
+  }, [notebookScript.cells, notebookScript.lineCount, notebookSpeed, playNotebookCursorRange]);
+
+  const toggleSmartNotebookPlayback = useCallback(() => {
+    if (notebookPlaying) {
+      cancelNotebookPlayback();
+      return;
+    }
+    runSmartNotebook();
+  }, [cancelNotebookPlayback, notebookPlaying, runSmartNotebook]);
+
+  const scrubNotebookToClientY = useCallback((clientY) => {
+    cancelNotebookPlayback();
+    const track = notebookProgressRef.current;
+    if (!track) return;
+    const rect = track.getBoundingClientRect();
+    const raw = rect.height > 0 ? ((clientY - rect.top) / rect.height) * 100 : 0;
+    applyNotebookCursor(raw, notebookScript.cells);
+  }, [applyNotebookCursor, cancelNotebookPlayback, notebookScript.cells]);
+
+  const scrubNotebookToClientX = useCallback((clientX, track = notebookSceneProgressRef.current) => {
+    cancelNotebookPlayback();
+    if (!track) return;
+    const rect = track.getBoundingClientRect();
+    const raw = rect.width > 0 ? ((clientX - rect.left) / rect.width) * 100 : 0;
+    applyNotebookCursor(raw, notebookScript.cells);
+  }, [applyNotebookCursor, cancelNotebookPlayback, notebookScript.cells]);
+
+  const stepNotebookCursor = useCallback((delta) => {
+    cancelNotebookPlayback();
+    applyNotebookCursor(notebookCursor + delta, notebookScript.cells);
+  }, [applyNotebookCursor, cancelNotebookPlayback, notebookCursor, notebookScript.cells]);
+
+  const handleNotebookProgressKeyDown = useCallback((event) => {
+    if (event.key === 'Home') {
+      event.preventDefault();
+      cancelNotebookPlayback();
+      applyNotebookCursor(0, notebookScript.cells);
+      return;
+    }
+    if (event.key === 'End') {
+      event.preventDefault();
+      cancelNotebookPlayback();
+      applyNotebookCursor(100, notebookScript.cells);
+      return;
+    }
+    if (event.key === 'ArrowDown' || event.key === 'ArrowLeft') {
+      event.preventDefault();
+      stepNotebookCursor(event.shiftKey ? -10 : -2);
+      return;
+    }
+    if (event.key === 'ArrowUp' || event.key === 'ArrowRight') {
+      event.preventDefault();
+      stepNotebookCursor(event.shiftKey ? 10 : 2);
+    }
+  }, [applyNotebookCursor, cancelNotebookPlayback, notebookScript.cells, stepNotebookCursor]);
+
+  useEffect(() => () => cancelNotebookPlayback(), [cancelNotebookPlayback]);
+
+  const handleNotebookProgressPointerDown = useCallback((event) => {
+    event.preventDefault();
+    const input = event.currentTarget;
+    input.setPointerCapture?.(event.pointerId);
+    scrubNotebookToClientY(event.clientY);
+
+    const handleMove = (moveEvent) => scrubNotebookToClientY(moveEvent.clientY);
+    const handleUp = (upEvent) => {
+      scrubNotebookToClientY(upEvent.clientY);
+      input.releasePointerCapture?.(event.pointerId);
+      window.removeEventListener('pointermove', handleMove);
+      window.removeEventListener('pointerup', handleUp);
+    };
+
+    window.addEventListener('pointermove', handleMove);
+    window.addEventListener('pointerup', handleUp, { once: true });
+  }, [scrubNotebookToClientY]);
+
+  const handleNotebookSceneProgressPointerDown = useCallback((event) => {
+    event.preventDefault();
+    const track = event.currentTarget;
+    track.setPointerCapture?.(event.pointerId);
+    scrubNotebookToClientX(event.clientX, track);
+
+    const handleMove = (moveEvent) => scrubNotebookToClientX(moveEvent.clientX, track);
+    const handleUp = (upEvent) => {
+      scrubNotebookToClientX(upEvent.clientX, track);
+      track.releasePointerCapture?.(event.pointerId);
+      window.removeEventListener('pointermove', handleMove);
+      window.removeEventListener('pointerup', handleUp);
+    };
+
+    window.addEventListener('pointermove', handleMove);
+    window.addEventListener('pointerup', handleUp, { once: true });
+  }, [scrubNotebookToClientX]);
+
+  const jumpNotebookToLine = useCallback((lineIndex) => {
+    cancelNotebookPlayback();
+    const cursor = Math.max(0, Math.min(100, ((lineIndex + 1) / notebookLineCount) * 100));
+    applyNotebookCursor(cursor, notebookScript.cells);
+  }, [applyNotebookCursor, cancelNotebookPlayback, notebookLineCount, notebookScript.cells]);
+
+  useEffect(() => {
+    const previousVisualKey = notebookVisualSignatureRef.current;
+    notebookVisualSignatureRef.current = notebookVisualSignatureKey;
+    const previousKey = notebookMatrixSignatureRef.current;
+    notebookMatrixSignatureRef.current = notebookMatrixSignatureKey;
+    const didVisualChange = previousVisualKey !== null && previousVisualKey !== notebookVisualSignatureKey;
+
+    if (notebookReplayFromStartRef.current) {
+      notebookReplayFromStartRef.current = false;
+      if (workspaceMode !== 'system') return undefined;
+      const timer = window.setTimeout(() => {
+        runSmartNotebook();
+      }, 70);
+      return () => window.clearTimeout(timer);
+    }
+
+    if (workspaceMode !== 'system' || !didVisualChange) {
+      return undefined;
+    }
+
+    if (previousKey === null || previousKey === notebookMatrixSignatureKey) {
+      const timer = window.setTimeout(() => {
+        applyNotebookCursor(notebookCursor, notebookScript.cells);
+      }, 50);
+      return () => window.clearTimeout(timer);
+    }
+
+    const previousSignatures = previousKey ? previousKey.split('\n') : [];
+    const changedMatrixIndex = notebookMatrixSignatureList.findIndex(
+      (signature, index) => signature !== previousSignatures[index]
+    );
+    const matrixCells = notebookScript.cells.filter((cell) =>
+      !cell.hidden &&
+      (
+        cell.type === 'matrix' ||
+        (cell.type === 'calc' && cell.resultKind === 'matrix') ||
+        (cell.type === 'ref' && cell.refKind === 'matrix')
+      )
+    );
+    const targetCell = matrixCells[
+      changedMatrixIndex >= 0 ? changedMatrixIndex : Math.max(0, matrixCells.length - 1)
+    ];
+    if (!targetCell) return undefined;
+
+    const timer = window.setTimeout(() => {
+      playNotebookMatrixCell(targetCell, { continueToEnd: true });
+    }, 90);
+    return () => window.clearTimeout(timer);
+  }, [
+    notebookMatrixSignatureKey,
+    notebookMatrixSignatureList,
+    notebookScript.cells,
+    notebookVisualSignatureKey,
+    applyNotebookCursor,
+    notebookCursor,
+    playNotebookMatrixCell,
+    runSmartNotebook,
+    workspaceMode,
+  ]);
 
   const updateMatrixInputValues = useCallback((values) => {
     setHoveredMatrixPresetId(null);
@@ -5385,11 +8610,219 @@ export default function App() {
     window.setTimeout(() => setClipboardStatus(''), 1200);
   }, [inputColumns, locale, matrixInputValues]);
 
+  const renderSmartNotebookSyntaxLine = useCallback((line, lineIndex) => {
+    const source = String(line ?? '');
+    const pieces = [];
+    let cursor = 0;
+    const lineMark = notebookScript.marks[lineIndex];
+    const muteMatch = source.match(/^(\s*)!(\s*)/u);
+
+    if (muteMatch) {
+      const prefix = muteMatch[1] ?? '';
+      if (prefix) pieces.push(prefix);
+      pieces.push(
+        <span className="smart-inline-mute" key={`mute-${lineIndex}`}>
+          !
+        </span>
+      );
+      if (muteMatch[2]) pieces.push(muteMatch[2]);
+      cursor = muteMatch[0].length;
+    }
+
+    const captionSource = source.slice(cursor);
+    const captionMatch = captionSource.match(/^(\s*)(\/\/.*)$/u);
+    if (captionMatch) {
+      if (captionMatch[1]) pieces.push(captionMatch[1]);
+      pieces.push(
+        <span className="smart-inline-caption" key={`caption-${lineIndex}`}>
+          {captionMatch[2]}
+        </span>
+      );
+      return pieces;
+    }
+
+    const tokenPattern = new RegExp(`#${NOTEBOOK_IDENTIFIER_PATTERN}(?:!@?|@)?|${NOTEBOOK_IDENTIFIER_PATTERN}`, 'gu');
+    tokenPattern.lastIndex = cursor;
+
+    let match;
+    while ((match = tokenPattern.exec(source))) {
+      const token = match[0];
+      const start = match.index;
+      const end = start + token.length;
+      if (start > cursor) pieces.push(source.slice(cursor, start));
+
+      const isAlias = token.startsWith('#');
+      let aliasToken = isAlias ? token.slice(1) : token;
+      const aliasExecute = isAlias && aliasToken.endsWith('@');
+      if (aliasExecute) aliasToken = aliasToken.slice(0, -1);
+      const aliasHidden = isAlias && aliasToken.endsWith('!');
+      if (aliasHidden) aliasToken = aliasToken.slice(0, -1);
+      const tokenName = aliasToken;
+      const lineMarkMatches =
+        lineMark?.label &&
+        notebookVariableKey(lineMark.label) === notebookVariableKey(tokenName);
+      const tokenStyle = lineMarkMatches
+        ? {
+            label: lineMark.label,
+            kind: lineMark.kind,
+            color: lineMark.color ?? 0x8b5cf6,
+            hidden: Boolean(lineMark.hidden),
+          }
+        : notebookTokenStyles.get(notebookVariableKey(tokenName));
+
+      if (tokenStyle) {
+        pieces.push(
+          <span
+            className={`smart-inline-token ${tokenStyle.kind} ${tokenStyle.hidden ? 'hidden' : ''}`}
+            key={`token-${lineIndex}-${start}`}
+            style={{ '--line-color': colorToHex(tokenStyle.color) }}
+          >
+            {`${isAlias ? '#' : ''}${tokenStyle.label}${aliasHidden ? '!' : ''}${aliasExecute ? '@' : ''}`}
+          </span>
+        );
+      } else {
+        pieces.push(token);
+      }
+
+      cursor = end;
+    }
+
+    if (cursor < source.length) pieces.push(source.slice(cursor));
+    return pieces.length ? pieces : ' ';
+  }, [notebookScript.marks, notebookTokenStyles]);
+
   const updateEquation = useCallback((index, value) => {
     setEquations((previous) => previous.map((equation, equationIndex) =>
       equationIndex === index ? value : equation
     ));
   }, []);
+
+  const updateEquationNote = useCallback((value) => {
+    const normalized = value.replace(/\r/g, '');
+    setEquations(normalized === '' ? [''] : normalized.split('\n'));
+  }, []);
+
+  const updateSmartNotebookText = useCallback((value, options = {}) => {
+    const normalized = String(value ?? '').replace(/\r/g, '');
+    setNotebookText(normalized);
+    const parsed = parseNotebookScript(normalized);
+    const equationLines = parsed.cells
+      .filter((cell) => cell.type === 'equation' && !cell.hidden)
+      .flatMap((cell) => cell.text.split('\n'))
+      .filter((line) => parsedEquationLine(line));
+    setEquations(equationLines.length ? equationLines : ['']);
+    if (options.revealAll && !notebookReplayFromStartRef.current) {
+      applyNotebookCursor(100, parsed.cells);
+    }
+  }, [applyNotebookCursor]);
+
+  const renameSmartNotebookVariable = useCallback((lineIndex, currentName) => {
+    if (typeof window === 'undefined') return;
+    const nextName = normalizeNotebookVariableName(window.prompt('변수명', currentName) ?? '', currentName);
+    if (!nextName || nextName === currentName) return;
+    const lines = String(notebookText ?? '').replace(/\r/g, '').split('\n');
+    const sourceLine = lines[lineIndex] ?? '';
+    const vectorLine = parseNotebookVectorLine(sourceLine);
+    const calculationLine = parseNotebookCalculationLine(sourceLine);
+    if (vectorLine) {
+      const vectorText = vectorLine.values.slice(0, vectorLine.dimension).join(', ');
+      lines[lineIndex] = `${nextName} = ${vectorText}`;
+      updateSmartNotebookText(lines.join('\n'));
+      return;
+    }
+    if (calculationLine) {
+      lines[lineIndex] = `${nextName} = ${calculationLine.left} * ${calculationLine.right}`;
+      updateSmartNotebookText(lines.join('\n'));
+    }
+  }, [notebookText, updateSmartNotebookText]);
+
+  const handleSmartNotebookKeyDown = useCallback((event) => {
+    const textarea = event.currentTarget;
+    const current = textarea.value;
+    const starter = notebookStarterText(locale);
+
+    if (event.key === 'Enter' && !event.shiftKey) {
+      event.preventDefault();
+      const start = textarea.selectionStart ?? current.length;
+      const end = textarea.selectionEnd ?? start;
+      const lineIndex = current.slice(0, start).split('\n').length - 1;
+      const next = prettifyNotebookScriptText(`${current.slice(0, start)}\n${current.slice(end)}`);
+      const nextLines = next.split('\n');
+      const cursor = nextLines.slice(0, lineIndex + 1).join('\n').length + 1;
+      updateSmartNotebookText(next);
+      window.requestAnimationFrame(() => {
+        textarea.selectionStart = cursor;
+        textarea.selectionEnd = cursor;
+      });
+      return;
+    }
+
+    if (event.key !== 'Tab') return;
+    event.preventDefault();
+
+    if (!current.trim()) {
+      const next = starter;
+      notebookReplayFromStartRef.current = true;
+      updateSmartNotebookText(next, { revealAll: true });
+      window.requestAnimationFrame(() => {
+        textarea.selectionStart = next.length;
+        textarea.selectionEnd = next.length;
+      });
+      return;
+    }
+
+    const start = textarea.selectionStart ?? current.length;
+    const end = textarea.selectionEnd ?? start;
+    const next = `${current.slice(0, start)}  ${current.slice(end)}`;
+    updateSmartNotebookText(next, { revealAll: true });
+    window.requestAnimationFrame(() => {
+      textarea.selectionStart = start + 2;
+      textarea.selectionEnd = start + 2;
+    });
+  }, [locale, updateSmartNotebookText]);
+
+  const handleEquationNoteKeyDown = useCallback((event) => {
+    const textarea = event.currentTarget;
+    const current = textarea.value;
+    const placeholder = t(locale, 'equationNotePlaceholder');
+
+    if (event.key === 'Enter' && !event.shiftKey) {
+      event.preventDefault();
+      const start = textarea.selectionStart ?? current.length;
+      const end = textarea.selectionEnd ?? start;
+      const lineIndex = current.slice(0, start).split('\n').length - 1;
+      const next = prettifyEquationNoteText(`${current.slice(0, start)}\n${current.slice(end)}`);
+      const nextLines = next.split('\n');
+      const cursor = nextLines.slice(0, lineIndex + 1).join('\n').length + 1;
+      updateEquationNote(next);
+      window.requestAnimationFrame(() => {
+        textarea.selectionStart = cursor;
+        textarea.selectionEnd = cursor;
+      });
+      return;
+    }
+
+    if (event.key !== 'Tab') return;
+    event.preventDefault();
+
+    if (!current.trim()) {
+      updateEquationNote(placeholder);
+      window.requestAnimationFrame(() => {
+        textarea.selectionStart = placeholder.length;
+        textarea.selectionEnd = placeholder.length;
+      });
+      return;
+    }
+
+    const start = textarea.selectionStart ?? current.length;
+    const end = textarea.selectionEnd ?? start;
+    const next = `${current.slice(0, start)}  ${current.slice(end)}`;
+    updateEquationNote(next);
+    window.requestAnimationFrame(() => {
+      textarea.selectionStart = start + 2;
+      textarea.selectionEnd = start + 2;
+    });
+  }, [locale, updateEquationNote]);
 
   const addEquation = useCallback(() => {
     setEquations((previous) => [...previous, '']);
@@ -5398,6 +8831,126 @@ export default function App() {
   const removeEquation = useCallback((index) => {
     setEquations((previous) => previous.filter((_, equationIndex) => equationIndex !== index));
   }, []);
+
+  const insertNotebookCell = useCallback((afterId, type) => {
+    const nextCell =
+      type === 'matrix'
+        ? createNotebookMatrixCell(systemMatrixMode)
+        : type === 'note'
+          ? createNotebookNoteCell('')
+          : createNotebookEquationCell('');
+    setNotebookCells((previous) => {
+      const insertIndex = Math.max(0, previous.findIndex((cell) => cell.id === afterId));
+      const next = [...previous];
+      next.splice(insertIndex + 1, 0, nextCell);
+      return next;
+    });
+    setActiveNotebookCellId(nextCell.id);
+  }, [systemMatrixMode]);
+
+  const addNotebookCellToEnd = useCallback((type) => {
+    const nextCell =
+      type === 'matrix'
+        ? createNotebookMatrixCell(systemMatrixMode)
+        : type === 'note'
+          ? createNotebookNoteCell('')
+          : createNotebookEquationCell('');
+    setNotebookCells((previous) => [...previous, nextCell]);
+    setActiveNotebookCellId(nextCell.id);
+  }, [systemMatrixMode]);
+
+  const updateNotebookCellText = useCallback((cellId, text) => {
+    setNotebookCells((previous) =>
+      previous.map((cell) => (cell.id === cellId ? { ...cell, text } : cell))
+    );
+    if (cellId === activeNotebookCellId) {
+      const cell = notebookCells.find((item) => item.id === cellId);
+      if (cell?.type === 'equation') updateEquationNote(text);
+    }
+  }, [activeNotebookCellId, notebookCells, updateEquationNote]);
+
+  const prettifyNotebookEquationCell = useCallback((cellId) => {
+    const sourceCell = notebookCells.find((cell) => cell.id === cellId && cell.type === 'equation');
+    if (!sourceCell) return;
+    const nextText = prettifyEquationNoteText(sourceCell.text);
+    setNotebookCells((previous) =>
+      previous.map((cell) => (cell.id === cellId ? { ...cell, text: nextText } : cell))
+    );
+    if (cellId === activeNotebookCellId) updateEquationNote(nextText);
+  }, [activeNotebookCellId, notebookCells, updateEquationNote]);
+
+  const applyPresetToNotebook = useCallback((preset) => {
+    const text = preset.join('\n');
+    setNotebookText(text);
+    const activeEquation = notebookCells.find((cell) => cell.id === activeNotebookCellId && cell.type === 'equation');
+    const fallbackEquation = notebookCells.find((cell) => cell.type === 'equation');
+    const targetId = activeEquation?.id ?? fallbackEquation?.id;
+
+    if (targetId) {
+      setNotebookCells((previous) =>
+        previous.map((cell) => (cell.id === targetId ? { ...cell, text } : cell))
+      );
+      setActiveNotebookCellId(targetId);
+    } else {
+      const nextCell = createNotebookEquationCell(text);
+      setNotebookCells((previous) => [...previous, nextCell]);
+      setActiveNotebookCellId(nextCell.id);
+    }
+
+    updateEquationNote(text);
+  }, [activeNotebookCellId, notebookCells, updateEquationNote]);
+
+  const removeNotebookCell = useCallback((cellId) => {
+    setNotebookCells((previous) => {
+      if (previous.length <= 1) return previous;
+      const next = previous.filter((cell) => cell.id !== cellId);
+      if (cellId === activeNotebookCellId) setActiveNotebookCellId(next[0]?.id ?? null);
+      return next;
+    });
+  }, [activeNotebookCellId]);
+
+  const handleNotebookEquationKeyDown = useCallback((cellId, event) => {
+    const textarea = event.currentTarget;
+    const current = textarea.value;
+    const placeholder = t(locale, 'equationNotePlaceholder');
+
+    if (event.key === 'Enter' && !event.shiftKey) {
+      event.preventDefault();
+      const start = textarea.selectionStart ?? current.length;
+      const end = textarea.selectionEnd ?? start;
+      const lineIndex = current.slice(0, start).split('\n').length - 1;
+      const next = prettifyEquationNoteText(`${current.slice(0, start)}\n${current.slice(end)}`);
+      const nextLines = next.split('\n');
+      const cursor = nextLines.slice(0, lineIndex + 1).join('\n').length + 1;
+      updateNotebookCellText(cellId, next);
+      window.requestAnimationFrame(() => {
+        textarea.selectionStart = cursor;
+        textarea.selectionEnd = cursor;
+      });
+      return;
+    }
+
+    if (event.key !== 'Tab') return;
+    event.preventDefault();
+
+    const start = textarea.selectionStart ?? current.length;
+    const end = textarea.selectionEnd ?? start;
+    const next = current.trim()
+      ? `${current.slice(0, start)}  ${current.slice(end)}`
+      : placeholder;
+    const cursor = current.trim() ? start + 2 : placeholder.length;
+
+    updateNotebookCellText(cellId, next);
+    window.requestAnimationFrame(() => {
+      textarea.selectionStart = cursor;
+      textarea.selectionEnd = cursor;
+    });
+  }, [locale, updateNotebookCellText]);
+
+  const notebookCellCursor = useCallback((index, cell) => {
+    if (!notebookCells.length) return 0;
+    return ((index + 1) / notebookCells.length) * 100;
+  }, [notebookCells.length]);
 
   const applyEquationSolutionToVector = useCallback(() => {
     const solution = equationSolution.solution;
@@ -5457,10 +9010,13 @@ export default function App() {
     showBasis,
     showGrid,
     showRelativeGrid,
+    relativeGridStrength,
     showCoordinates,
     showDot,
     showAxes,
+    showRelativeAxes,
     snapToInteger,
+    notebookSpeed,
     camera: cameraState,
   }), [
     cameraState,
@@ -5475,9 +9031,12 @@ export default function App() {
     showDot,
     showGrid,
     showRelativeGrid,
+    showRelativeAxes,
+    relativeGridStrength,
     showVector,
     showVolume,
     snapToInteger,
+    notebookSpeed,
     vectors,
     workspaceMode,
   ]);
@@ -5502,46 +9061,12 @@ export default function App() {
     }
   }, [buildShareUrl, locale]);
 
-  useEffect(() => {
-    timelinePinnedRef.current = isTimelinePinned;
-  }, [isTimelinePinned]);
-
   useEffect(() => () => {
-    if (timelineCloseTimerRef.current) {
-      window.clearTimeout(timelineCloseTimerRef.current);
-      timelineCloseTimerRef.current = null;
-    }
     if (cameraShareTimerRef.current) {
       window.clearTimeout(cameraShareTimerRef.current);
       cameraShareTimerRef.current = null;
     }
   }, []);
-
-  const openTimelineDrawer = useCallback(() => {
-    if (timelineCloseTimerRef.current) {
-      window.clearTimeout(timelineCloseTimerRef.current);
-      timelineCloseTimerRef.current = null;
-    }
-    setIsTimelineOpen(true);
-  }, []);
-
-  const closeTimelineDrawerNow = useCallback(() => {
-    if (timelineCloseTimerRef.current) {
-      window.clearTimeout(timelineCloseTimerRef.current);
-      timelineCloseTimerRef.current = null;
-    }
-    timelinePinnedRef.current = false;
-    setIsTimelinePinned(false);
-    setIsTimelineOpen(false);
-  }, []);
-
-  const toggleTimelineDrawer = useCallback(() => {
-    if (isTimelineExpanded) {
-      closeTimelineDrawerNow();
-      return;
-    }
-    openTimelineDrawer();
-  }, [closeTimelineDrawerNow, isTimelineExpanded, openTimelineDrawer]);
 
   useEffect(() => {
     window.localStorage?.setItem('linearAlgebraLocale', locale);
@@ -5577,16 +9102,24 @@ export default function App() {
     setShowVolume(false);
     setShowGrid(true);
     setShowRelativeGrid(true);
+    setRelativeGridStrength(DEFAULT_RELATIVE_GRID_STRENGTH);
     setShowCoordinates(true);
     setShowVector(true);
     setShowBasis(true);
     setBasisVisibility({ i: true, j: true, k: true });
     setShowDot(false);
     setShowAxes(true);
+    setShowRelativeAxes(true);
     setSnapToInteger(true);
     setMeasureMode(null);
     setMeasureDraft([]);
+    setMeasureAnchorId(null);
     setMeasurements([]);
+    setEquations(['']);
+    setNotebookText('');
+    setNotebookCells([createNotebookEquationCell('')]);
+    setActiveNotebookCellId(null);
+    setNotebookCursor(0);
     setWorkspaceMode('transform');
     setVectorToolMode('vector');
     const initialVector = createVectorState(0, { id: 'v1', name: 'v1' });
@@ -5598,8 +9131,12 @@ export default function App() {
     nextVectorIndexRef.current = 2;
   }, [locale, moveCameraToView, startAnimationTo]);
 
+  const lineSystemInfo = buildLineSystemInfo(lineSystem);
+  const resolvedActiveNotebookCellId = activeNotebookCellId ?? notebookCells[0]?.id ?? null;
+  const isPanelVisible = isSidebarOpen && !isAnimationFocus;
+
   return (
-    <main className="app-shell">
+    <main className={`app-shell ${isAnimationFocus ? 'animation-focus' : ''}`}>
       <Toaster
         duration={1300}
         gap={8}
@@ -5612,7 +9149,7 @@ export default function App() {
       />
       <AdBlockGate locale={locale} />
       <AdSlot placement="top" locale={locale} />
-      <div className={`workspace-shell ${isTimelineExpanded ? 'timeline-open' : ''}`}>
+      <div className="workspace-shell">
       <section className="scene-area" aria-label={t(locale, 'title')}>
         {!isLoaded && (
           <div className="loader">
@@ -5671,6 +9208,22 @@ export default function App() {
                 );
               })}
               <div className="camera-lock-group" aria-label={t(locale, 'lockControls')}>
+                <button
+                  aria-pressed={cameraAuto}
+                  className={`camera-lock-button camera-auto-button ${cameraAuto ? 'active' : ''}`}
+                  onClick={() => {
+                    const next = !cameraAuto;
+                    setCameraAuto(next);
+                    cameraAutoRef.current = next;
+                    autoCameraTargetViewRef.current = workspaceMode === 'system' ? effectiveSystemMode : displayMode;
+                    if (next) snapCameraToAutoView();
+                  }}
+                  title={cameraAuto ? t(locale, 'cameraAutoOffTitle') : t(locale, 'cameraAutoTitle')}
+                  type="button"
+                >
+                  <Magnet size={13} />
+                  <span>{t(locale, 'cameraAuto')}</span>
+                </button>
                 <button
                   aria-pressed={allLocked}
                   className={`camera-lock-button ${allLocked ? 'active' : ''}`}
@@ -5745,6 +9298,23 @@ export default function App() {
                     <Grid3X3 size={14} />
                     <span>{t(locale, 'relativeGrid')}</span>
                   </label>
+                  <label
+                    className="scene-strength-control"
+                    title={t(locale, 'relativeGridStrengthTitle')}
+                  >
+                    <SlidersHorizontal size={13} />
+                    <span>{t(locale, 'strength')}</span>
+                    <input
+                      aria-label={t(locale, 'relativeGridStrengthTitle')}
+                      max="1"
+                      min="0.2"
+                      onChange={(event) => setRelativeGridStrength(normalizeRelativeGridStrength(event.target.value))}
+                      step="0.05"
+                      type="range"
+                      value={relativeGridStrength}
+                    />
+                    <em>{Math.round(relativeGridStrength * 100)}</em>
+                  </label>
                   <label className={showAxes ? 'active' : ''} title={t(locale, 'axesTitle')}>
                     <input
                       checked={showAxes}
@@ -5753,6 +9323,15 @@ export default function App() {
                     />
                     <VectorSquare size={14} />
                     <span>{t(locale, 'axes')}</span>
+                  </label>
+                  <label className={showRelativeAxes ? 'active' : ''} title={t(locale, 'relativeAxesTitle')}>
+                    <input
+                      checked={showRelativeAxes}
+                      onChange={(event) => setShowRelativeAxes(event.target.checked)}
+                      type="checkbox"
+                    />
+                    <VectorSquare size={14} />
+                    <span>{t(locale, 'relativeAxes')}</span>
                   </label>
                   <label className={showCoordinates ? 'active' : ''} title={t(locale, 'coordinatesTitle')}>
                     <input
@@ -5896,7 +9475,13 @@ export default function App() {
                     </div>
                     {measureMode && (
                       <span className="measure-draft-chip">
-                        {measureMode === 'dot' ? t(locale, 'dot') : displayMode === '3d' ? t(locale, 'volume') : t(locale, 'area')}
+                        {measureMode === 'dot'
+                          ? t(locale, 'dot')
+                          : displayMode === '3d'
+                            ? t(locale, 'volume')
+                            : displayMode === '2d'
+                              ? t(locale, 'area')
+                              : t(locale, 'length')}
                         <strong>
                           {measureDraft
                             .map((id) => measureTargetMap.get(id)?.name)
@@ -5970,17 +9555,12 @@ export default function App() {
                 />
                 <circle cx={dragSnapGuide.x2} cy={dragSnapGuide.y2} r="4" />
               </svg>
-              {dragSnapGuide.label && (
-                <span
-                  className="drag-snap-badge"
-                  style={{
-                    transform: `translate(-50%, -100%) translate(${dragSnapGuide.x2}px, ${dragSnapGuide.y2 - 12}px)`,
-                  }}
-                >
-                  {dragSnapGuide.label}
-                </span>
-              )}
             </>
+          )}
+          {workspaceMode === 'system' && activeNotebookCaption && (
+            <div className="scene-caption" aria-live="polite">
+              <span>{activeNotebookCaption}</span>
+            </div>
           )}
           <span ref={vectorVolumeLabelRef} className="axis-label vector-volume-label">
             {t(locale, 'volume')} = 0
@@ -6081,21 +9661,42 @@ export default function App() {
               A{activeVector.name}·A{item.name}
             </span>
           ))}
-          {measurements.map((item) => (
+          {measurements.map((item) => {
+            const measureKind = item.type === 'volume'
+              ? volumeMeasureKind(item.targets?.length ?? 0, displayMode)
+              : item.type;
+            return (
+              <span
+                className={`axis-label measurement-label measurement-${measureKind}`}
+                key={`measurement-${item.id}`}
+                ref={(node) => {
+                  if (node) measurementLabelRefs.current.set(item.id, node);
+                  else measurementLabelRefs.current.delete(item.id);
+                }}
+              >
+                <span className="axis-label-text">{item.type === 'dot' ? t(locale, 'dot') : t(locale, measureKind)}</span>
+                {renderMeasurementLabelTools(item)}
+              </span>
+            );
+          })}
+          {equationLabelItems.map((item) => (
             <span
-              className={`axis-label measurement-label measurement-${item.type} ${item.type === 'volume' && item.targets?.length === 2 ? 'measurement-area' : ''}`}
-              key={`measurement-${item.id}`}
+              className="axis-label equation-schema-label"
+              key={`equation-label-${item.key}`}
               ref={(node) => {
-                if (node) measurementLabelRefs.current.set(item.id, node);
-                else measurementLabelRefs.current.delete(item.id);
+                if (node) equationLabelRefs.current.set(item.key, node);
+                else equationLabelRefs.current.delete(item.key);
               }}
+              style={{ color: colorToHex(item.color) }}
             >
-              <span className="axis-label-text">{item.type === 'dot' ? t(locale, 'dot') : t(locale, 'volume')}</span>
-              {renderMeasurementLabelTools(item)}
+              <span className="axis-label-text">{item.name}</span>
             </span>
           ))}
           <span ref={scalarSolutionLabelRef} className="axis-label scalar-solution-label">
             {t(locale, 'solution')} x = (0, 0, 0)
+          </span>
+          <span ref={equationSolutionLabelRef} className="axis-label equation-solution-label">
+            {t(locale, 'solution')} x = (0, 0)
           </span>
         </div>
 
@@ -6130,21 +9731,101 @@ export default function App() {
               <span className="progress-scrubber-thumb" style={{ left: `${progress * 100}%` }} />
             </div>
           </div>
+          <button
+            aria-pressed={isAnimationFocus}
+            className={`icon-text-button animation-focus-button ${isAnimationFocus ? 'active' : ''}`}
+            onClick={() => setIsAnimationFocus((value) => !value)}
+            title={t(locale, isAnimationFocus ? 'animationFocusExitTitle' : 'animationFocusTitle')}
+            type="button"
+          >
+            {isAnimationFocus ? <EyeOff size={17} /> : <Eye size={17} />}
+            <span>{t(locale, isAnimationFocus ? 'animationFocusExit' : 'animationFocus')}</span>
+          </button>
         </div>
+        )}
+
+        {workspaceMode === 'system' && (
+          <div className="notebook-scene-dock">
+            <button
+              className={`notebook-scene-play ${notebookPlaying ? 'playing' : ''}`}
+              onClick={toggleSmartNotebookPlayback}
+              title={t(locale, notebookPlaying ? 'stopNotebookCell' : 'runNotebookCell')}
+              type="button"
+            >
+              {notebookPlaying ? <Square size={13} /> : <Play size={14} />}
+            </button>
+            <div className="notebook-scene-progress">
+              <div className="progress-meta notebook-scene-meta">
+                <span>{t(locale, 'notebookProgress')}</span>
+                <strong>{Math.round(notebookCursor)}%</strong>
+              </div>
+              <div
+                aria-label={t(locale, 'notebookProgress')}
+                aria-valuemax="100"
+                aria-valuemin="0"
+                aria-valuenow={Math.round(notebookCursor)}
+                className="notebook-scene-scrubber"
+                onKeyDown={handleNotebookProgressKeyDown}
+                onPointerDown={handleNotebookSceneProgressPointerDown}
+                ref={notebookSceneProgressRef}
+                role="slider"
+                tabIndex={0}
+              >
+                <span className="notebook-scene-track" />
+                <span className="notebook-scene-fill" style={{ width: `${notebookCursor}%` }} />
+                {notebookTimelineMarks.map((mark) => (
+                  <button
+                    className={`notebook-scene-mark ${mark.kind ?? ''} ${mark.lineIndex <= notebookActiveLineIndex ? 'revealed' : 'future'}`}
+                    key={`${mark.lineIndex}-${mark.label}`}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      jumpNotebookToLine(mark.lineIndex);
+                    }}
+                    onPointerDown={(event) => event.stopPropagation()}
+                    style={{
+                      left: `${mark.percent}%`,
+                      '--line-color': mark.color ? colorToHex(mark.color) : '#8b5cf6',
+                    }}
+                    title={mark.label}
+                    type="button"
+                  >
+                    {mark.label}
+                  </button>
+                ))}
+                <span className="notebook-scene-thumb" style={{ left: `${notebookCursor}%` }} />
+              </div>
+            </div>
+            <button
+              aria-pressed={isAnimationFocus}
+              className={`icon-text-button animation-focus-button ${isAnimationFocus ? 'active' : ''}`}
+              onClick={() => setIsAnimationFocus((value) => !value)}
+              title={t(locale, isAnimationFocus ? 'animationFocusExitTitle' : 'animationFocusTitle')}
+              type="button"
+            >
+              {isAnimationFocus ? <EyeOff size={17} /> : <Eye size={17} />}
+              <span>{t(locale, isAnimationFocus ? 'animationFocusExit' : 'animationFocus')}</span>
+            </button>
+          </div>
         )}
       </section>
 
       <aside
-        className={`control-panel ${isSidebarOpen ? 'open' : 'closed'}`}
+        className={`control-panel ${isPanelVisible ? 'open' : 'closed'}`}
+        onDragStart={preventPanelNativeDrag}
+        onPointerCancel={stopPanelPointerPropagation}
+        onPointerDown={handlePanelPointerDown}
+        onPointerMove={stopPanelPointerPropagation}
+        onPointerUp={stopPanelPointerPropagation}
+        onWheel={stopPanelPointerPropagation}
         style={{
           bottom: '0px',
-          clipPath: isSidebarOpen ? 'inset(0 0 0 0)' : 'inset(100% 0 0 0)',
-          opacity: isSidebarOpen ? 1 : 0,
-          pointerEvents: isSidebarOpen ? 'auto' : 'none',
+          clipPath: isPanelVisible ? 'inset(0 0 0 0)' : 'inset(100% 0 0 0)',
+          opacity: isPanelVisible ? 1 : 0,
+          pointerEvents: isPanelVisible ? 'auto' : 'none',
           transform: 'none',
-          '--panel-mobile-clip': isSidebarOpen ? 'inset(0 0 0 0)' : 'inset(100% 0 0 0)',
-          '--panel-mobile-opacity': isSidebarOpen ? 1 : 0,
-          '--panel-mobile-pointer': isSidebarOpen ? 'auto' : 'none',
+          '--panel-mobile-clip': isPanelVisible ? 'inset(0 0 0 0)' : 'inset(100% 0 0 0)',
+          '--panel-mobile-opacity': isPanelVisible ? 1 : 0,
+          '--panel-mobile-pointer': isPanelVisible ? 'auto' : 'none',
         }}
       >
         <header className="panel-header">
@@ -6177,158 +9858,14 @@ export default function App() {
         </div>
 
         <div className={`panel-scroll mode-${workspaceMode}`} ref={panelScrollRef}>
-          <section className="panel system-main-panel">
-            <div className="section-heading spread">
-              <span className="heading-left">
-                <Braces size={17} />
-                <h3>{t(locale, 'systemTitle')}</h3>
-              </span>
-              <button className="tiny-add-button" onClick={addEquation} title={t(locale, 'addEquation')}>
-                <Plus size={14} />
-              </button>
-            </div>
-
-            <div className="equation-presets line-presets" aria-label={t(locale, 'systemExamples')}>
-              <button onClick={() => setEquations(equationExamples.unique)}>{t(locale, 'intersection')}</button>
-              <button onClick={() => setEquations(equationExamples.none)}>{t(locale, 'parallel')}</button>
-              <button onClick={() => setEquations(equationExamples.infinite)}>{t(locale, 'overlap')}</button>
-              <button onClick={() => setEquations(equationExamples.space3d)}>3D</button>
-              <button onClick={() => setEquations(equationExamples.overlap3d)}>{t(locale, 'overlap3d')}</button>
-            </div>
-
-            <div className="equation-list line-equation-list">
-              {equations.map((equation, index) => {
-                const item =
-                  lineSystem.mode === '3d'
-                    ? lineSystem.planes.find((plane) => plane.index === index)
-                    : lineSystem.lines.find((line) => line.index === index);
-                const color = item?.color ?? equationLineColors[index % equationLineColors.length];
-                const prefix = lineSystem.mode === '3d' ? 'P' : 'L';
-                return (
-                  <label key={index}>
-                    <span style={{ '--line-color': `#${color.toString(16).padStart(6, '0')}` }}>
-                      {prefix}{index + 1}
-                    </span>
-                    <input
-                      value={equation}
-                      placeholder={index === 0 ? '2x + 3y + z = 5' : 'x - y - 1'}
-                      onChange={(event) => updateEquation(index, event.target.value)}
-                    />
-                    {equations.length > 1 && (
-                      <button
-                        className="line-remove"
-                        onClick={() => removeEquation(index)}
-                        title={t(locale, 'deleteEquation')}
-                        type="button"
-                      >
-                        <X size={13} />
-                      </button>
-                    )}
-                  </label>
-                );
-              })}
-            </div>
-
-            <div className={`line-status-card ${lineSystem.status}`}>
-              <div className="solver-topline">
-                <span>{t(locale, 'status')}</span>
-                <strong>{t(locale, statusKeyForLineSystem(lineSystem.status))}</strong>
-              </div>
-              {lineSystem.point && (
-                <div className="line-solution">
-                  <span>{t(locale, 'linePoint')}</span>
-                  <strong>{formatCoord(lineSystem.point, lineSystem.mode)}</strong>
-                </div>
-              )}
-              {lineSystem.mode === '3d' && lineSystem.solution?.rankA !== undefined && (
-                <div className="solver-rank-row">
-                  <span>rank(A) <strong>{lineSystem.solution.rankA}</strong></span>
-                  <span>rank([A|b]) <strong>{lineSystem.solution.rankAugmented}</strong></span>
-                </div>
-              )}
-              {lineSystem.status === 'invalid' && (
-                <p className="solver-note">{t(locale, 'invalidLineNote', { items: lineSystem.errors.join(', L') })}</p>
-              )}
-              {lineSystem.status === 'same' && (
-                <p className="line-note">{t(locale, 'sameLineNote')}</p>
-              )}
-              {lineSystem.status === 'parallel' && (
-                <p className="line-note">{t(locale, 'parallelLineNote')}</p>
-              )}
-              {lineSystem.status === 'none' && (
-                <p className="line-note">{t(locale, 'noCommonLineNote')}</p>
-              )}
-              {lineSystem.status === 'single3d' && (
-                <p className="line-note">{t(locale, 'single3dNote')}</p>
-              )}
-              {lineSystem.status === 'infinite3d' && (
-                <>
-                  <p className="line-note">{t(locale, 'infinite3dNote')}</p>
-                  <div className="line-solution solution-rail">
-                    <span>{lineSystem.solution?.nullspaceBasis?.length === 1 ? t(locale, 'commonLine') : t(locale, 'commonPlane')}</span>
-                    <strong>{formatGeneralSolution(lineSystem.solution)}</strong>
-                  </div>
-                </>
-              )}
-              {lineSystem.status === 'none3d' && (
-                <p className="line-note">{t(locale, 'no3dNote')}</p>
-              )}
-              {!!lineSystem.relations.length && (
-                <div className="relation-list">
-                  {lineSystem.relations.map((relation, index) => (
-                    <span key={index}>{relationText(relation, lineSystem.lines)}</span>
-                  ))}
-                </div>
-              )}
-              {lineSystem.point && (
-                <button className="secondary-action compact-action" onClick={applyLineSystemPointToVector}>
-                  {t(locale, 'applyPointToVector', { name: activeVector.name })}
-                </button>
-              )}
-            </div>
-          </section>
-
-          <section className="panel current-space-panel">
-            <div className="section-heading spread current-space-heading">
-              <span className="heading-left">
-                <Grid3X3 size={17} />
-                <h3>{t(locale, 'currentSpace')}</h3>
-              </span>
-              <button
-                aria-expanded={isTimelineExpanded}
-                className="timeline-open-button"
-                onClick={toggleTimelineDrawer}
-                type="button"
-              >
-                {t(locale, 'timeline')}
-                <span>{history.length}</span>
-              </button>
-            </div>
-            {previewHistory && (
-              <HistoryDetail
-                entry={previewHistory}
-                index={previewIndex}
-                isActive={previewIndex === activeHistoryIndex}
-                locale={locale}
-              />
-            )}
-          </section>
-
-          <section className="panel timeline-panel">
-            <div className="section-heading spread timeline-heading">
-              <span className="heading-left">
-                <History size={17} />
-                <h3>{t(locale, 'spaceTimeline')}</h3>
-              </span>
-              <span className="timeline-count">{history.length}</span>
-            </div>
-            <div className="timeline-body">
+          {workspaceMode === 'transform' && (
+            <section className="panel transform-inline-timeline" aria-label={t(locale, 'spaceTimeline')}>
               <div
-                className="history-strip"
+                className="drawer-history-list"
                 aria-label={t(locale, 'transformHistory')}
                 ref={historyStripRef}
               >
-                {history.map((step, index) => (
+                {displayedHistoryEntries.map(({ step, index }) => (
                   <div
                     className={`history-item ${index === activeHistoryIndex ? 'active' : ''} ${
                       index === previewIndex && index !== activeHistoryIndex ? 'preview' : ''
@@ -6370,17 +9907,410 @@ export default function App() {
                   </div>
                 ))}
               </div>
-              <div className="timeline-detail-slot">
-                {previewHistory && (
-                  <HistoryDetail
-                    entry={previewHistory}
-                    index={previewIndex}
-                    isActive={previewIndex === activeHistoryIndex}
-                    locale={locale}
+            </section>
+          )}
+
+          <section className="panel system-main-panel">
+            <div className="section-heading spread">
+              <span className="heading-left">
+                <Braces size={17} />
+                <h3>{t(locale, 'notebook')}</h3>
+              </span>
+              <div className="notebook-add-top">
+                <button
+                  className={`tiny-add-button notebook-play-toggle ${notebookPlaying ? 'playing' : ''}`}
+                  onClick={toggleSmartNotebookPlayback}
+                  title={t(locale, notebookPlaying ? 'stopNotebookCell' : 'runNotebookCell')}
+                  type="button"
+                >
+                  {notebookPlaying ? <Square size={13} /> : <Play size={14} />}
+                  <span>{t(locale, notebookPlaying ? 'stopNotebookCell' : 'runNotebookCell')}</span>
+                </button>
+                <label className="notebook-speed-control" title={t(locale, 'notebookSpeedTitle')}>
+                  <span>{t(locale, 'speed')}</span>
+                  <input
+                    aria-label={t(locale, 'notebookSpeedTitle')}
+                    max="1.25"
+                    min="0.35"
+                    onChange={(event) => setNotebookSpeed(normalizeNotebookSpeed(event.target.value))}
+                    step="0.05"
+                    type="range"
+                    value={notebookSpeed}
                   />
+                  <em>{formatNotebookSpeedLabel(notebookSpeed)}</em>
+                </label>
+              </div>
+            </div>
+
+            <div
+              className="notebook-runner"
+              style={{
+                '--notebook-progress': notebookProgressRatio,
+                '--notebook-progress-y': `${Math.max(0, Math.min(100, notebookCursor))}%`,
+              }}
+            >
+              <div
+                aria-label={t(locale, 'notebookProgress')}
+                aria-valuemax="100"
+                aria-valuemin="0"
+                aria-valuenow={Math.round(notebookCursor)}
+                className="notebook-vertical-progress"
+                onKeyDown={handleNotebookProgressKeyDown}
+                onPointerDown={handleNotebookProgressPointerDown}
+                ref={notebookProgressRef}
+                role="slider"
+                tabIndex={0}
+              >
+                <span>{Math.round(notebookCursor)}%</span>
+              </div>
+              <div className="notebook-flow-stack">
+                <div className="notebook-cell notebook-smart active">
+                  <div className="notebook-cell-index">*</div>
+                  <div className="notebook-cell-main">
+                    <div
+                      className="equation-note-editor smart-notebook-editor"
+                      style={{ '--note-lines': notebookLineCount }}
+                    >
+                      <div className="equation-note-rail smart-note-rail" aria-label={t(locale, 'notebookProgress')}>
+                        {Array.from({ length: notebookLineCount }).map((_, lineIndex) => {
+                          const mark = notebookScript.marks[lineIndex];
+                          const lineState = lineIndex <= notebookActiveLineIndex ? 'revealed' : 'future';
+                          const markClassName = mark?.kind
+                            ? `smart-mark ${mark.kind} ${lineState} ${mark.hidden ? 'hidden' : ''}`
+                            : `smart-mark blank ${lineState}`;
+                          if (!mark?.label) {
+                            return (
+                              <span
+                                aria-hidden="true"
+                                className={markClassName}
+                                key={lineIndex}
+                                style={mark?.color ? { '--line-color': `#${mark.color.toString(16).padStart(6, '0')}` } : undefined}
+                              />
+                            );
+                          }
+                          return (
+                            <button
+                              aria-label={`${mark.label} ${t(locale, 'runNotebookCell')}`}
+                              className={markClassName}
+                              key={lineIndex}
+                              onDoubleClick={mark?.kind === 'vector' ? () => renameSmartNotebookVariable(lineIndex, mark.label) : undefined}
+                              onClick={() => playSmartNotebookFromLine(lineIndex)}
+                              style={mark?.color ? { '--line-color': `#${mark.color.toString(16).padStart(6, '0')}` } : undefined}
+                              title={mark?.kind === 'vector' ? '더블클릭해서 변수명 수정' : mark?.kind === 'matrix' ? t(locale, 'notebookMatrixCell') : undefined}
+                              type="button"
+                            >
+                              {mark.label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                      {!notebookText.trim() && (
+                        <div className="smart-tab-hint" aria-hidden="true">
+                          <kbd>Tab</kbd>
+                          <span>자동완성</span>
+                        </div>
+                      )}
+                      {!notebookText.trim() && (
+                        <div className="smart-placeholder-overlay" aria-hidden="true">
+                          {notebookStarterText(locale).split('\n').map((line, lineIndex, lines) => (
+                            <span className="smart-placeholder-line" key={`${lineIndex}-${line}`}>
+                              {line || ' '}
+                              {lineIndex === lines.length - 1 && <kbd>Tab</kbd>}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                      {notebookText.trim() && (
+                        <div className="smart-syntax-overlay" aria-hidden="true">
+                          {notebookText.split('\n').map((line, lineIndex) => (
+                            <span className="smart-syntax-line" key={`syntax-${lineIndex}`}>
+                              {renderSmartNotebookSyntaxLine(line, lineIndex)}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                      <textarea
+                        aria-label={t(locale, 'notebook')}
+                        className="smart-notebook-textarea"
+                        onBlur={(event) => updateSmartNotebookText(prettifyNotebookScriptText(event.target.value))}
+                        onChange={(event) => updateSmartNotebookText(event.target.value, { revealAll: true })}
+                        onFocus={(event) => {
+                          const textarea = event.currentTarget;
+                          if (!textarea.value.trim()) {
+                            window.requestAnimationFrame(() => {
+                              textarea.selectionStart = 0;
+                              textarea.selectionEnd = 0;
+                            });
+                          }
+                        }}
+                        onKeyDown={handleSmartNotebookKeyDown}
+                        onPaste={() => {
+                          notebookReplayFromStartRef.current = true;
+                        }}
+                        placeholder=""
+                        spellCheck="false"
+                        value={notebookText}
+                        wrap="off"
+                      />
+                    </div>
+                  </div>
+                  <div className="notebook-cell-actions">
+                    <button
+                      className={`notebook-run-button ${notebookPlaying ? 'playing' : ''}`}
+                      onClick={toggleSmartNotebookPlayback}
+                      type="button"
+                    >
+                      {notebookPlaying ? <Square size={12} /> : <Play size={13} />}
+                      <span>{t(locale, notebookPlaying ? 'stopNotebookCell' : 'runNotebookCell')}</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="notebook-status-slot">
+              <div className={`line-status-card ${lineSystem.status}`}>
+                <div className="solver-topline">
+                  <span>{t(locale, 'status')}</span>
+                  <strong>{t(locale, statusKeyForLineSystem(lineSystem.status))}</strong>
+                </div>
+                {lineSystemInfo.kindKey && (
+                  <div className="system-solution-readout">
+                    <span>{t(locale, 'solution')}</span>
+                    <strong>{t(locale, lineSystemInfo.kindKey)}</strong>
+                    {lineSystemInfo.solutionText && <code>{lineSystemInfo.solutionText}</code>}
+                  </div>
+                )}
+                {typeof lineSystemInfo.rankA === 'number' && (
+                  <div className="system-fact-grid">
+                    <span><em>{t(locale, 'systemFactRank')}</em><strong>{lineSystemInfo.rankA} {'->'} {lineSystemInfo.rankAugmented}</strong></span>
+                    <span><em>{t(locale, 'systemFactDimension')}</em><strong>{lineSystemInfo.solutionDimension === null ? '-' : `${lineSystemInfo.solutionDimension}D`}</strong></span>
+                    <span><em>{t(locale, 'systemFactFree')}</em><strong>{lineSystemInfo.freeCount}</strong></span>
+                    <span><em>{t(locale, 'systemFactEquations')}</em><strong>{lineSystemInfo.equationCount}/{lineSystemInfo.variableCount}</strong></span>
+                  </div>
+                )}
+                <p className="system-education-note">{t(locale, lineSystemInfo.noteKey)}</p>
+                {!!lineSystem.relations.length && (
+                  <div className="relation-list">
+                    {lineSystem.relations.map((relation, relationIndex) => (
+                      <span key={relationIndex}>{relationText(relation, lineSystem.lines)}</span>
+                    ))}
+                  </div>
+                )}
+                {lineSystem.point && (
+                  <button className="secondary-action compact-action" onClick={applyLineSystemPointToVector}>
+                    {t(locale, 'applyPointToVector', { name: activeVector.name })}
+                  </button>
                 )}
               </div>
             </div>
+
+            <div className="notebook-example-bank">
+              <div className="notebook-example-label">{t(locale, 'systemExamples')}</div>
+              <div className="equation-presets line-presets" aria-label={t(locale, 'systemExamples')}>
+                <button onClick={() => applyPresetToNotebook(equationExamples.unique)}>{t(locale, 'intersection')}</button>
+                <button onClick={() => applyPresetToNotebook(equationExamples.none)}>{t(locale, 'parallel')}</button>
+                <button onClick={() => applyPresetToNotebook(equationExamples.infinite)}>{t(locale, 'overlap')}</button>
+                <button onClick={() => applyPresetToNotebook(equationExamples.space3d)}>3D</button>
+                <button onClick={() => applyPresetToNotebook(equationExamples.overlap3d)}>{t(locale, 'overlap3d')}</button>
+              </div>
+            </div>
+
+            <div className="equation-presets line-presets" aria-label={t(locale, 'systemExamples')}>
+              <button onClick={() => setEquations(equationExamples.unique)}>{t(locale, 'intersection')}</button>
+              <button onClick={() => setEquations(equationExamples.none)}>{t(locale, 'parallel')}</button>
+              <button onClick={() => setEquations(equationExamples.infinite)}>{t(locale, 'overlap')}</button>
+              <button onClick={() => setEquations(equationExamples.space3d)}>3D</button>
+              <button onClick={() => setEquations(equationExamples.overlap3d)}>{t(locale, 'overlap3d')}</button>
+            </div>
+
+            <div
+              className="equation-note-editor"
+              style={{ '--note-lines': Math.max(5, equations.length) }}
+            >
+              <div className="equation-note-rail" aria-hidden="true">
+                {equations.map((equation, index) => {
+                  const item =
+                    lineSystem.mode === '3d'
+                      ? lineSystem.planes.find((plane) => plane.index === index)
+                      : lineSystem.lines.find((line) => line.index === index);
+                  const color = item?.color ?? equationLineColors[index % equationLineColors.length];
+                  const prefix = lineSystem.mode === '3d' ? 'P' : 'L';
+                  const invalid = lineSystem.errors?.includes(index + 1);
+                  return (
+                    <span
+                      className={invalid ? 'invalid' : ''}
+                      key={index}
+                      style={{ '--line-color': `#${color.toString(16).padStart(6, '0')}` }}
+                    >
+                      {prefix}{index + 1}
+                    </span>
+                  );
+                })}
+              </div>
+              <textarea
+                aria-label={t(locale, 'equationNote')}
+                spellCheck="false"
+                wrap="off"
+                value={equations.join('\n')}
+                placeholder={t(locale, 'equationNotePlaceholder')}
+                onKeyDown={handleEquationNoteKeyDown}
+                onBlur={(event) => updateEquationNote(prettifyEquationNoteText(event.target.value))}
+                onChange={(event) => updateEquationNote(event.target.value)}
+              />
+            </div>
+
+            <div className={`line-status-card ${lineSystem.status}`}>
+              <div className="solver-topline">
+                <span>{t(locale, 'status')}</span>
+                <strong>{t(locale, statusKeyForLineSystem(lineSystem.status))}</strong>
+              </div>
+              {lineSystemInfo.kindKey && (
+                <div className="system-solution-readout">
+                  <span>{t(locale, 'solution')}</span>
+                  <strong>{t(locale, lineSystemInfo.kindKey)}</strong>
+                  {lineSystemInfo.solutionText && <code>{lineSystemInfo.solutionText}</code>}
+                </div>
+              )}
+              {typeof lineSystemInfo.rankA === 'number' && (
+                <div className="system-fact-grid">
+                  <span>
+                    <em>{t(locale, 'systemFactRank')}</em>
+                    <strong>{lineSystemInfo.rankA} → {lineSystemInfo.rankAugmented}</strong>
+                  </span>
+                  <span>
+                    <em>{t(locale, 'systemFactDimension')}</em>
+                    <strong>{lineSystemInfo.solutionDimension === null ? '-' : `${lineSystemInfo.solutionDimension}D`}</strong>
+                  </span>
+                  <span>
+                    <em>{t(locale, 'systemFactFree')}</em>
+                    <strong>{lineSystemInfo.freeCount}</strong>
+                  </span>
+                  <span>
+                    <em>{t(locale, 'systemFactEquations')}</em>
+                    <strong>{lineSystemInfo.equationCount}/{lineSystemInfo.variableCount}</strong>
+                  </span>
+                </div>
+              )}
+              {lineSystem.status === 'invalid' && (
+                <p className="solver-note">{t(locale, 'invalidLineNote', { items: lineSystem.errors.join(', L') })}</p>
+              )}
+              {lineSystem.status === 'same' && (
+                <p className="line-note">{t(locale, 'sameLineNote')}</p>
+              )}
+              {lineSystem.status === 'parallel' && (
+                <p className="line-note">{t(locale, 'parallelLineNote')}</p>
+              )}
+              {lineSystem.status === 'none' && (
+                <p className="line-note">{t(locale, 'noCommonLineNote')}</p>
+              )}
+              {lineSystem.status === 'single3d' && (
+                <p className="line-note">{t(locale, 'single3dNote')}</p>
+              )}
+              {lineSystem.status === 'infinite3d' && (
+                <>
+                  <p className="line-note">{t(locale, 'infinite3dNote')}</p>
+                </>
+              )}
+              {lineSystem.status === 'none3d' && (
+                <p className="line-note">{t(locale, 'no3dNote')}</p>
+              )}
+              <p className="system-education-note">{t(locale, lineSystemInfo.noteKey)}</p>
+              {!!lineSystem.relations.length && (
+                <div className="relation-list">
+                  {lineSystem.relations.map((relation, index) => (
+                    <span key={index}>{relationText(relation, lineSystem.lines)}</span>
+                  ))}
+                </div>
+              )}
+              {lineSystem.point && (
+                <button className="secondary-action compact-action" onClick={applyLineSystemPointToVector}>
+                  {t(locale, 'applyPointToVector', { name: activeVector.name })}
+                </button>
+              )}
+            </div>
+
+            {false && (
+            <div className="notebook-cell-stack">
+              <div className="notebook-cell-head">
+                <span>{t(locale, 'notebook')}</span>
+                <button className="tiny-add-button" onClick={addNotebookMatrixCell} title={t(locale, 'addNotebookCell')} type="button">
+                  <Plus size={14} />
+                </button>
+              </div>
+              {notebookCells.map((cell, index) => (
+                <div className="notebook-matrix-cell" key={cell.id}>
+                  <div className="notebook-cell-index">{index + 1}</div>
+                  <div className="notebook-cell-main">
+                    <div className="notebook-cell-title">
+                      <strong>{t(locale, 'notebookMatrixCell')}</strong>
+                      <span>{notebookMatrixModeFromText(cell.text, cell.mode).toUpperCase()}</span>
+                    </div>
+                    <MatrixInput
+                      values={cell.values}
+                      columns={systemMatrixDimension}
+                      accent={cell.mode === '3d' ? 'teal' : 'red'}
+                      onChange={(values) => updateNotebookCellValues(cell.id, values)}
+                      onEnter={() => runNotebookMatrixCell(cell)}
+                      locale={locale}
+                    />
+                  </div>
+                  <div className="notebook-cell-actions">
+                    <button className="notebook-run-button" onClick={() => runNotebookMatrixCell(cell)} type="button">
+                      <Play size={13} />
+                      <span>{t(locale, 'runNotebookCell')}</span>
+                    </button>
+                    <label className="notebook-progress-control">
+                      <span>{Math.round(progress * 100)}%</span>
+                      <input
+                        aria-label={t(locale, 'notebookProgress')}
+                        max="100"
+                        min="0"
+                        onChange={(event) => scrubNotebookProgress(event.target.value)}
+                        type="range"
+                        value={Math.round(progress * 100)}
+                      />
+                    </label>
+                    <button
+                      className="notebook-remove-button"
+                      disabled={notebookCells.length <= 1}
+                      onClick={() => removeNotebookCell(cell.id)}
+                      title={t(locale, 'deleteEquation')}
+                      type="button"
+                    >
+                      <X size={13} />
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+            )}
+          </section>
+
+          <section className="panel current-space-panel">
+            <div className="section-heading spread current-space-heading">
+              <span className="heading-left">
+                <Grid3X3 size={17} />
+                <h3>{t(locale, 'currentSpace')}</h3>
+              </span>
+              <button
+                aria-expanded="true"
+                className="timeline-open-button"
+                onClick={() => historyStripRef.current?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })}
+                type="button"
+              >
+                {t(locale, 'timeline')}
+                <span>{history.length}</span>
+              </button>
+            </div>
+            {previewHistory && (
+              <HistoryDetail
+                entry={previewHistory}
+                index={previewIndex}
+                isActive={previewIndex === activeHistoryIndex}
+                locale={locale}
+              />
+            )}
           </section>
 
           <section className="panel matrix-panel">
@@ -6616,7 +10546,7 @@ export default function App() {
                                 aria-label={t(locale, 'scalarValue', { name: item.name })}
                                 inputMode="decimal"
                                 placeholder={t(locale, 'auto')}
-                                value={item.scalar}
+                                value={cleanScalarText(item.scalar)}
                                 onChange={(event) => updateVectorScalar(item.id, event.target.value)}
                                 onFocus={() => setActiveVectorId(item.id)}
                               />
@@ -6664,7 +10594,7 @@ export default function App() {
                           disabled={!item.scalarEnabled}
                           inputMode="decimal"
                           placeholder={t(locale, 'auto')}
-                          value={item.scalar}
+                          value={cleanScalarText(item.scalar)}
                           onChange={(event) => updateVectorScalar(item.id, event.target.value)}
                         />
                         <span className="scalar-equation">
@@ -6883,96 +10813,6 @@ export default function App() {
         </div>
       </aside>
 
-      <button
-        aria-label={t(locale, 'timelineClose')}
-        className={`timeline-drawer-backdrop ${isTimelineExpanded ? 'open' : ''}`}
-        onClick={closeTimelineDrawerNow}
-        type="button"
-      />
-      <aside
-        aria-expanded="true"
-        aria-label={t(locale, 'spaceTimeline')}
-        className="timeline-drawer open pinned"
-      >
-        <div className="timeline-drawer-head">
-          <button
-            aria-label={t(locale, 'timelineClose')}
-            className="icon-button timeline-drawer-close"
-            onClick={(event) => {
-              event.preventDefault();
-              event.stopPropagation();
-              closeTimelineDrawerNow();
-            }}
-            type="button"
-          >
-            <X size={12} />
-          </button>
-        </div>
-        <div className="timeline-drawer-body">
-          <div className="drawer-history-list" ref={historyStripRef}>
-            {history.map((step, index) => (
-              <div
-                className={`history-item ${index === activeHistoryIndex ? 'active' : ''} ${
-                  index === previewIndex && index !== activeHistoryIndex ? 'preview' : ''
-                }`}
-                data-history-index={index}
-                key={`${step.name}-${index}`}
-                onFocus={() => setHoveredHistoryIndex(index)}
-                onMouseEnter={() => setHoveredHistoryIndex(index)}
-                onMouseMove={() => setHoveredHistoryIndex(index)}
-                onMouseLeave={() => setHoveredHistoryIndex(null)}
-                onPointerEnter={() => setHoveredHistoryIndex(index)}
-                onPointerMove={() => setHoveredHistoryIndex(index)}
-                onPointerLeave={() => setHoveredHistoryIndex(null)}
-              >
-                <button
-                  className="history-pill"
-                  onBlur={() => setHoveredHistoryIndex(null)}
-                  onFocus={() => setHoveredHistoryIndex(index)}
-                  onMouseEnter={() => setHoveredHistoryIndex(index)}
-                  onMouseMove={() => setHoveredHistoryIndex(index)}
-                  onMouseLeave={() => setHoveredHistoryIndex(null)}
-                  onClick={() => jumpToHistory(index)}
-                  onPointerEnter={() => setHoveredHistoryIndex(index)}
-                  onPointerMove={() => setHoveredHistoryIndex(index)}
-                  onPointerLeave={() => setHoveredHistoryIndex(null)}
-                  title={step.name}
-                  type="button"
-                >
-                  <span className="history-index">{index}</span>
-                  <strong>{step.name}</strong>
-                  <MatrixMini
-                    matrix={step.matrix}
-                    mode={step.stateMode ?? modeForMatrix(step.matrix)}
-                    className="compact"
-                  />
-                </button>
-                {history.length > 1 && (
-                  <button
-                    className="history-delete"
-                    onClick={(event) => deleteHistoryEntry(index, event)}
-                    onPointerDown={(event) => event.stopPropagation()}
-                    title={t(locale, 'deleteHistory')}
-                    type="button"
-                  >
-                    <X size={13} />
-                  </button>
-                )}
-              </div>
-            ))}
-          </div>
-          <div className="timeline-detail-slot">
-            {previewHistory && (
-              <HistoryDetail
-                entry={previewHistory}
-                index={previewIndex}
-                isActive={previewIndex === activeHistoryIndex}
-                locale={locale}
-              />
-            )}
-          </div>
-        </div>
-      </aside>
       </div>
       <AdSlot placement="bottom" locale={locale} />
     </main>
