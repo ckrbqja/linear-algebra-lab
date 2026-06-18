@@ -78,16 +78,11 @@ pnpm run deploy:pages:dist
 Do not use `npx wrangler deploy` for this project. That command is for Workers
 and fails on Pages with a missing Worker entry point or assets directory.
 
-If the Cloudflare dashboard is set up as a Workers Git deployment instead of a
-Pages deployment, keep the same build output and use Wrangler assets:
-
-- Build command: `pnpm run build`
-- Deploy command: `npx wrangler deploy` or blank if Cloudflare supplies it
-- Root/path: `/`
-
-`wrangler.toml` must keep both `pages_build_output_dir = "./dist"` and an
-`[assets]` block with `directory = "./dist"` so Workers Git does not fall back
-to the default Hello World Worker.
+Do not add a Worker `[assets]` block to `wrangler.toml` while using
+`wrangler pages deploy`; Pages configuration validation rejects Worker-only
+keys. If the Cloudflare dashboard shows Workers Git settings, prefer switching
+the project to Pages or keep the deploy command as `pnpm run deploy:pages:dist`
+so the Pages deploy path is explicit.
 
 ## Browser Testing Notes
 
