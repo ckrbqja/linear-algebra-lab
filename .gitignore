@@ -4,6 +4,38 @@ vite-dev.log
 .codex-vite*.log
 qa-*.png
 
+.env
+.env.*
+!.env.example
+.dev.vars
+.dev.vars.*
+!.dev.vars.example
+
 .idea/
 .DS_Store
 Thumbs.db
+
+backend/.wrangler/
+
+# Local dev server / preview logs and package cache
+/*.log
+/*.err.log
+/.pnpm-store/
+
+# JVM / runtime crash dumps
+backend/hs_err_pid*.log
+backend/replay_pid*.log
+
+# backend/ is a separate nested git repo (its own history); don't embed as submodule
+/backend/
+
+# Android release signing and generated build output
+android/.gradle/
+android/local.properties
+android/app/build/
+android/build/
+android/android.keystore
+android/signing-credentials.properties
+android/app-release-*.apk
+android/app-release-*.aab
+android/app-release-*.idsig

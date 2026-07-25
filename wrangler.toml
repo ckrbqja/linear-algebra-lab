@@ -1,3 +1,3 @@
-name = "flow-math"
+name = "linear-algebra-lab"
 pages_build_output_dir = "./dist"
 compatibility_date = "2026-06-18"

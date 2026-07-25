@@ -1,0 +1,63 @@
+{
+  "packageId": "com.madebyneed.mathflow",
+  "host": "flow-math.com",
+  "name": "Flow Math",
+  "launcherName": "Flow Math",
+  "display": "standalone",
+  "themeColor": "#0F1715",
+  "themeColorDark": "#000000",
+  "navigationColor": "#000000",
+  "navigationColorDark": "#000000",
+  "navigationDividerColor": "#000000",
+  "navigationDividerColorDark": "#000000",
+  "backgroundColor": "#0B0C0A",
+  "enableNotifications": false,
+  "startUrl": "/",
+  "iconUrl": "https://flow-math.com/pwa-icon-512.png",
+  "maskableIconUrl": "https://flow-math.com/pwa-icon-maskable-512.png",
+  "splashScreenFadeOutDuration": 300,
+  "signingKey": {
+    "path": "android.keystore",
+    "alias": "mathflow-upload"
+  },
+  "appVersionName": "1",
+  "appVersionCode": 1,
+  "shortcuts": [
+    {
+      "name": "Open Flow Math lab",
+      "shortName": "Open lab",
+      "url": "https://flow-math.com/?app=linear",
+      "chosenIconUrl": "https://flow-math.com/pwa-icon-192.png"
+    }
+  ],
+  "generatorApp": "bubblewrap-cli",
+  "webManifestUrl": "https://flow-math.com/manifest.webmanifest",
+  "fallbackType": "customtabs",
+  "features": {},
+  "alphaDependencies": {
+    "enabled": false
+  },
+  "enableSiteSettingsShortcut": true,
+  "isChromeOSOnly": false,
+  "isMetaQuest": false,
+  "fullScopeUrl": "https://flow-math.com/",
+  "minSdkVersion": 21,
+  "orientation": "any",
+  "fingerprints": [
+    {
+      "name": "upload",
+      "value": "3F:47:58:E7:4C:C4:AC:8A:DE:B0:3E:9B:8F:AE:97:D2:F6:C8:1A:B5:E1:60:A5:6D:4E:F7:46:D3:10:FB:A0:59"
+    }
+  ],
+  "additionalTrustedOrigins": [],
+  "retainedBundles": [],
+  "protocolHandlers": [],
+  "fileHandlers": [],
+  "launchHandlerClientMode": "",
+  "displayOverride": [
+    "window-controls-overlay",
+    "standalone",
+    "minimal-ui"
+  ],
+  "appVersion": "1"
+}

@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://flow-math.com/sitemap.xml

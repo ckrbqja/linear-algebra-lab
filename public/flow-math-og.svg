@@ -1,0 +1,78 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img" aria-labelledby="title desc">
+  <title id="title">Flow Math linear algebra visualizer</title>
+  <desc id="desc">A dark notebook and animated vector scene for an interactive linear algebra lab.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0b0c0a"/>
+      <stop offset="1" stop-color="#111512"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="72%" cy="38%" r="58%">
+      <stop offset="0" stop-color="#22c1b6" stop-opacity=".18"/>
+      <stop offset="1" stop-color="#22c1b6" stop-opacity="0"/>
+    </radialGradient>
+    <pattern id="grid" width="34" height="34" patternUnits="userSpaceOnUse">
+      <path d="M 34 0 L 0 0 0 34" fill="none" stroke="#356963" stroke-opacity=".22" stroke-width="1"/>
+    </pattern>
+    <filter id="shadow" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="22" stdDeviation="28" flood-color="#000" flood-opacity=".5"/>
+    </filter>
+  </defs>
+  <rect width="1200" height="630" fill="url(#bg)"/>
+  <rect width="1200" height="630" fill="url(#glow)"/>
+  <path d="M0 116H1200M0 524H1200" stroke="#f7f4eb" stroke-opacity=".08"/>
+  <g transform="translate(70 76)">
+    <g transform="scale(1.5)">
+      <rect x="1" y="1" width="30" height="30" rx="9" fill="#0f1715" stroke="#2a6e68"/>
+      <path d="M8 7.5h16l-3.2 4.2h-7.7v3.55h6.15l-3.05 4H13.1v5.25H8V7.5Z" fill="#58e0d7"/>
+      <path d="M19.45 7.5H24l-3.2 4.2h-4.55l3.2-4.2Z" fill="#f1b434"/>
+    </g>
+    <text x="65" y="24" fill="#ffffff" font-family="Arial, sans-serif" font-weight="800" font-size="25">Flow Math</text>
+    <text x="65" y="45" fill="#8f9187" font-family="Arial, sans-serif" font-weight="700" font-size="12" letter-spacing="2">LINEAR ALGEBRA VISUALIZER</text>
+  </g>
+  <g transform="translate(70 188)">
+    <text fill="#ffffff" font-family="Arial, 'Noto Sans KR', sans-serif" font-size="64" font-weight="800" letter-spacing="-3">
+      <tspan x="0" y="0">Write the math.</tspan>
+      <tspan x="0" y="74" fill="#4ddbd2">Watch linear algebra move.</tspan>
+    </text>
+    <text x="2" y="136" fill="#aaa69b" font-family="Arial, sans-serif" font-size="22">
+      Matrix transformations · 3D vectors · Systems of equations
+    </text>
+  </g>
+  <g transform="translate(695 116)" filter="url(#shadow)">
+    <rect width="430" height="390" rx="18" fill="#11120f" stroke="#f7f4eb" stroke-opacity=".18"/>
+    <rect width="430" height="42" rx="18" fill="#181915"/>
+    <path d="M0 42H430" stroke="#f7f4eb" stroke-opacity=".12"/>
+    <circle cx="20" cy="21" r="5" fill="#bd5963"/>
+    <circle cx="38" cy="21" r="5" fill="#c79635"/>
+    <circle cx="56" cy="21" r="5" fill="#379a85"/>
+    <text x="78" y="26" fill="#89867d" font-family="monospace" font-size="11">linear-map.flow</text>
+    <rect x="0" y="42" width="168" height="300" fill="#131410"/>
+    <path d="M168 42V342" stroke="#f7f4eb" stroke-opacity=".1"/>
+    <text x="16" y="76" fill="#9c998f" font-family="monospace" font-size="11">NOTEBOOK</text>
+    <text x="16" y="112" fill="#b8b4aa" font-family="monospace" font-size="12">v1 = [2, 1, 0]</text>
+    <text x="16" y="144" fill="#b8b4aa" font-family="monospace" font-size="12">M = [[1,1],[0,2]]</text>
+    <rect x="0" y="159" width="168" height="34" fill="#22c1b6" fill-opacity=".12"/>
+    <rect x="0" y="159" width="3" height="34" fill="#4ddbd2"/>
+    <text x="16" y="181" fill="#edfffb" font-family="monospace" font-size="12">transform M</text>
+    <text x="16" y="220" fill="#b8b4aa" font-family="monospace" font-size="12">det M = 2</text>
+    <g transform="translate(168 42)">
+      <rect width="262" height="300" fill="#0c0d0b"/>
+      <rect width="262" height="300" fill="url(#grid)"/>
+      <path d="M18 170L245 142M132 16L148 284" stroke="#f7f4eb" stroke-opacity=".28"/>
+      <path d="M140 166L226 85" stroke="#4ddbd2" stroke-width="5" stroke-linecap="round"/>
+      <path d="M140 166L185 42" stroke="#f1b434" stroke-width="5" stroke-linecap="round"/>
+      <path d="M140 166L226 85L207 31L185 42Z" fill="#22c1b6" fill-opacity=".1" stroke="#4ddbd2" stroke-opacity=".45"/>
+      <text x="209" y="78" fill="#4ddbd2" font-family="monospace" font-size="11">v1</text>
+      <text x="160" y="32" fill="#f1b434" font-family="monospace" font-size="11">Mv1</text>
+      <rect x="166" y="256" width="80" height="25" rx="5" fill="#11120f" stroke="#f1b434" stroke-opacity=".28"/>
+      <text x="177" y="273" fill="#ddc47f" font-family="monospace" font-size="10">det M = 2</text>
+    </g>
+    <rect y="342" width="430" height="48" rx="0" fill="#181915"/>
+    <circle cx="25" cy="366" r="13" fill="#4ddbd2"/>
+    <path d="M22 360V372M28 360V372" stroke="#071312" stroke-width="2"/>
+    <rect x="52" y="364" width="145" height="4" rx="2" fill="#393b34"/>
+    <rect x="52" y="364" width="78" height="4" rx="2" fill="#4ddbd2"/>
+    <circle cx="130" cy="366" r="6" fill="#e4fffb"/>
+    <text x="340" y="371" fill="#d9fff9" font-family="Arial, sans-serif" font-size="11" font-weight="700">OPEN SCENE →</text>
+  </g>
+</svg>

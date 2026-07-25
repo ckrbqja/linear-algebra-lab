@@ -1,30 +1,38 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { flushSync } from 'react-dom';
 import {
   ArrowLeftRight,
   Box,
   Braces,
   Camera,
+  Check,
   ClipboardPaste,
   Copy,
+  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   Eye,
   EyeOff,
   Grid3X3,
+  GripHorizontal,
   History,
+  LogOut,
   Lock,
   Magnet,
-  Menu,
-  PanelRightClose,
+  Mail,
+  NotebookPen,
   Play,
   Plus,
   RotateCcw,
   Sigma,
   SlidersHorizontal,
-  Square,
+  User,
   VectorSquare,
   X,
   ZoomIn,
 } from 'lucide-react';
 import { Toaster, toast } from 'sonner';
+import posthog from 'posthog-js';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import {
@@ -37,3871 +45,471 @@ import {
   rank3,
   transformVector3,
 } from './linearAlgebra.js';
-import { managedLocaleMessages, managedPresetLocaleNames } from './i18n.js';
-
-const ANIMATION_MS = 1001;
-const CAMERA_MOVE_MS = 850;
-const UI_SYNC_MS = 16;
-const VECTOR_SPAWN_MS = 280;
-const SNAP_DISTANCE = 0.08;
-const DRAG_SNAP_DISTANCE = 0.12;
-const AXIS_LOCK_RATIO_3D = 0.045;
-const PLANE_LOCK_RATIO_3D = 0.018;
-const AXIS_LOCK_MAX_3D = 0.14;
-const PLANE_LOCK_MAX_3D = 0.07;
-const SHIFT_AXIS_LOCK_PX = 22;
-const MEASURE_DOT_HEX = 0xf1b434;
-const MEASURE_DOT_GUIDE_HEX = 0xffd66b;
-const MEASURE_LENGTH_HEX = 0x8bd3ff;
-const MEASURE_AREA_HEX = 0xff4fd8;
-const MEASURE_AREA_EDGE_HEX = 0xff9bea;
-const MEASURE_VOLUME_HEX = 0xff7a59;
-const MEASURE_VOLUME_EDGE_HEX = 0xffb199;
-const NOTEBOOK_MIN_VISIBLE_LINES = 10;
-const NOTEBOOK_NORMAL_SPEED = 0.5;
-const DEFAULT_NOTEBOOK_SPEED = NOTEBOOK_NORMAL_SPEED;
-const SCALAR_CONSTRAINT_LINE_RANGE = 5.6;
-const DEFAULT_RELATIVE_GRID_STRENGTH = 0.45;
-const monetizationConfig = {
-  adProvider: import.meta.env.VITE_AD_PROVIDER || 'adsense',
-  adClient: import.meta.env.VITE_AD_CLIENT || '',
-  topAdSlot: import.meta.env.VITE_AD_TOP_SLOT || import.meta.env.VITE_AD_SLOT_TOP || '',
-  bottomAdSlot: import.meta.env.VITE_AD_BOTTOM_SLOT || import.meta.env.VITE_AD_SLOT_BOTTOM || '',
-  admobAppId: import.meta.env.VITE_ADMOB_APP_ID || '',
-  donationUrl: import.meta.env.VITE_DONATION_URL || '',
-  donationLabel: import.meta.env.VITE_DONATION_LABEL || '',
-};
-const urlStateKey = 'linearAlgebraShareState';
-const urlDbKey = 'linearAlgebraUrlDb';
-const CAMERA_HOME_POSITION = new THREE.Vector3(5.25, 4.05, 6.45);
-const CAMERA_HOME_TARGET = new THREE.Vector3(0.35, 0.35, 0.35);
-
-const viewPresets = {
-  '3d': {
-    labelKey: 'view3d',
-    position: CAMERA_HOME_POSITION,
-    target: CAMERA_HOME_TARGET,
-  },
-  '2d': {
-    labelKey: 'view2d',
-    position: new THREE.Vector3(0, 0, 8.35),
-    target: new THREE.Vector3(0, 0, 0),
-  },
-  '1d': {
-    labelKey: 'view1d',
-    position: new THREE.Vector3(0, 2.65, 7.15),
-    target: new THREE.Vector3(0, 0, 0),
-  },
-};
-
-function viewDirectionForKey(viewKey) {
-  const preset = viewPresets[viewKey] ?? viewPresets['3d'];
-  const direction = preset.position.clone().sub(preset.target);
-  if (direction.lengthSq() < EPSILON) return new THREE.Vector3(0, 0, 1);
-  return direction.normalize();
-}
-
-function cameraStateForView(viewKey, positionFrom, targetFrom) {
-  const preset = viewPresets[viewKey] ?? viewPresets['3d'];
-  const target = targetFrom?.clone?.() ?? preset.target.clone();
-  const currentDistance =
-    positionFrom && targetFrom
-      ? Math.max(positionFrom.distanceTo(targetFrom), EPSILON)
-      : 0;
-  const presetDistance = preset.position.distanceTo(preset.target);
-  const distance = currentDistance > EPSILON ? currentDistance : presetDistance;
-  const position = target.clone().addScaledVector(viewDirectionForKey(viewKey), distance);
-  return { position, target };
-}
-
-const localeMessages = Object.fromEntries(
-  Object.entries(managedLocaleMessages).map(([localeKey, messages]) => [
-    localeKey,
-    { ...messages },
-  ])
-);
-const localeOrder = ['ko', 'en', 'ja', 'zh'];
-
-const presetLocaleNames = Object.fromEntries(
-  Object.entries(managedPresetLocaleNames).map(([localeKey, messages]) => [
-    localeKey,
-    { ...messages },
-  ])
-);
-
-function normalizeLocale(value) {
-  const raw = String(value ?? '').toLowerCase();
-  if (raw.startsWith('ko')) return 'ko';
-  if (raw.startsWith('ja')) return 'ja';
-  if (raw.startsWith('zh')) return 'zh';
-  if (raw.startsWith('en')) return 'en';
-  return 'ko';
-}
-
-function detectLocale() {
-  if (typeof window === 'undefined') return 'ko';
-  const urlLocale = new URLSearchParams(window.location.search).get('lang');
-  if (urlLocale) return normalizeLocale(urlLocale);
-  const stored = window.localStorage?.getItem('linearAlgebraLocale');
-  if (stored) return normalizeLocale(stored);
-  const languages = navigator.languages?.length ? navigator.languages : [navigator.language];
-  return normalizeLocale(languages.find(Boolean));
-}
-
-function t(locale, key, values = null) {
-  const template = localeMessages[locale]?.[key] ?? localeMessages.ko[key] ?? key;
-  if (!values) return template;
-  return Object.entries(values).reduce(
-    (text, [name, value]) => text.replaceAll(`{${name}}`, String(value)),
-    template
-  );
-}
-
-function encodeShareState(state) {
-  const text = JSON.stringify(state);
-  const encoded = btoa(unescape(encodeURIComponent(text)));
-  return encoded.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
-}
-
-function decodeShareState(value) {
-  try {
-    const padded = String(value ?? '').replace(/-/g, '+').replace(/_/g, '/').padEnd(Math.ceil(String(value ?? '').length / 4) * 4, '=');
-    return JSON.parse(decodeURIComponent(escape(atob(padded))));
-  } catch {
-    return null;
-  }
-}
-
-function arrayOfStrings(value, fallback, length) {
-  if (!Array.isArray(value)) return fallback;
-  const next = value.slice(0, length).map((item) => String(item ?? '0'));
-  while (next.length < length) next.push(fallback[next.length] ?? '0');
-  return next;
-}
-
-function arrayOfNumbers(value, fallback, length) {
-  if (!Array.isArray(value)) return fallback;
-  const next = value.slice(0, length).map((item, index) => {
-    const number = Number(item);
-    return Number.isFinite(number) ? number : fallback[index];
-  });
-  while (next.length < length) next.push(fallback[next.length] ?? 0);
-  return next;
-}
-
-function cameraArray(value) {
-  if (!Array.isArray(value) || value.length < 3) return null;
-  const next = value.slice(0, 3).map(Number);
-  return next.every(Number.isFinite) ? next : null;
-}
-
-function normalizeCameraState(value) {
-  if (!value || typeof value !== 'object') return null;
-  const position = cameraArray(value.position);
-  const target = cameraArray(value.target);
-  return position && target ? { position, target } : null;
-}
-
-function cameraVectorToShareArray(vector) {
-  return [vector.x, vector.y, vector.z].map((value) => Number(value.toFixed(4)));
-}
-
-function cameraShareStateFromRefs(refs) {
-  if (!refs?.camera || !refs?.controls) return null;
-  return {
-    position: cameraVectorToShareArray(refs.camera.position),
-    target: cameraVectorToShareArray(refs.controls.target),
-  };
-}
-
-function cameraStatesAlmostEqual(left, right) {
-  if (!left || !right) return false;
-  const values = [...left.position, ...left.target];
-  const otherValues = [...right.position, ...right.target];
-  return values.every((value, index) => Math.abs(value - otherValues[index]) < 0.0001);
-}
-
-function readSharedStateFromUrl() {
-  if (typeof window === 'undefined') return null;
-  const params = new URLSearchParams(window.location.search);
-  const rawState = params.get('s') ?? params.get('state') ?? window.localStorage?.getItem(urlStateKey);
-  const decoded = decodeShareState(rawState);
-  if (!decoded || decoded.v !== 1) return null;
-  const vectors = Array.isArray(decoded.vectors)
-    ? decoded.vectors.slice(0, 8).map((item, index) =>
-        createVectorState(index, {
-          id: String(item.id ?? `v${index + 1}`),
-          name: String(item.name ?? `v${index + 1}`),
-          x: String(item.x ?? '0'),
-          y: String(item.y ?? '0'),
-          z: String(item.z ?? '0'),
-          scalar: String(item.scalar ?? ''),
-          scalarEnabled: !!item.scalarEnabled,
-          scalarSpace: item.scalarSpace === 'output' ? 'output' : 'input',
-          visible: item.visible !== false,
-        })
-      )
-    : null;
-
-  return {
-    locale: normalizeLocale(decoded.locale),
-    workspaceMode: decoded.workspaceMode === 'system' ? 'system' : 'transform',
-    inputMode: ['3d', '2d', '1d'].includes(decoded.inputMode) ? decoded.inputMode : '3d',
-    displayMatrix: arrayOfNumbers(decoded.displayMatrix, identity3, 9),
-    matrix3: arrayOfStrings(decoded.matrix3, ['1', '0', '0', '0', '1', '0', '0', '0', '1'], 9),
-    matrix2: arrayOfStrings(decoded.matrix2, ['1', '0', '0', '1'], 4),
-    matrix1: arrayOfStrings(decoded.matrix1, ['1'], 1),
-    vectors: vectors?.length ? vectors : null,
-    showVolume: !!decoded.showVolume,
-    showVector: decoded.showVector !== false,
-    showBasis: decoded.showBasis !== false,
-    showGrid: decoded.showGrid !== false,
-    showRelativeGrid: decoded.showRelativeGrid !== false,
-    relativeGridStrength: normalizeRelativeGridStrength(decoded.relativeGridStrength),
-    showCoordinates: decoded.showCoordinates !== false,
-    showDot: !!decoded.showDot,
-    showAxes: decoded.showAxes !== false,
-    showRelativeAxes: decoded.showRelativeAxes !== false,
-    snapToInteger: decoded.snapToInteger !== false,
-    notebookSpeed: normalizeNotebookSpeed(decoded.notebookSpeed),
-    camera: normalizeCameraState(decoded.camera),
-  };
-}
-
-function writeUrlDb(encoded, state) {
-  if (typeof window === 'undefined' || !encoded) return;
-  try {
-    const current = JSON.parse(window.localStorage.getItem(urlDbKey) ?? '[]');
-    const next = [
-      { id: Date.now().toString(36), at: new Date().toISOString(), encoded, title: localeMessages[state.locale]?.title ?? localeMessages.ko.title },
-      ...current.filter((item) => item.encoded !== encoded),
-    ].slice(0, 12);
-    window.localStorage.setItem(urlDbKey, JSON.stringify(next));
-    window.localStorage.setItem(urlStateKey, encoded);
-  } catch {
-    window.localStorage.setItem(urlStateKey, encoded);
-  }
-}
-
-function replaceShareStateInUrl(state, locale) {
-  if (typeof window === 'undefined' || !state) return;
-  const encoded = encodeShareState(state);
-  const url = new URL(window.location.href);
-  url.searchParams.set('s', encoded);
-  url.searchParams.set('lang', normalizeLocale(locale ?? state.locale));
-  window.history.replaceState(null, '', url);
-  writeUrlDb(encoded, state);
-}
-
-function patchCameraStateInUrl(camera, locale) {
-  if (typeof window === 'undefined' || !camera) return;
-  const url = new URL(window.location.href);
-  const raw = url.searchParams.get('s') ?? window.localStorage?.getItem(urlStateKey);
-  const decoded = decodeShareState(raw);
-  if (!decoded || decoded.v !== 1) return;
-  replaceShareStateInUrl(
-    {
-      ...decoded,
-      locale: normalizeLocale(decoded.locale ?? locale),
-      camera,
-    },
-    locale
-  );
-}
-
-function upsertMeta(selector, attributes, textContent = null) {
-  if (typeof document === 'undefined') return;
-  let node = document.head.querySelector(selector);
-  if (!node) {
-    node = document.createElement(selector.startsWith('script') ? 'script' : attributes.rel ? 'link' : 'meta');
-    document.head.appendChild(node);
-  }
-  Object.entries(attributes).forEach(([key, value]) => node.setAttribute(key, value));
-  if (textContent !== null) node.textContent = textContent;
-}
-
-function applySeo(locale) {
-  if (typeof document === 'undefined') return;
-  const message = localeMessages[locale] ?? localeMessages.ko;
-  document.documentElement.lang = message.code;
-  document.title = message.title;
-  upsertMeta('meta[name="description"]', { name: 'description', content: message.description });
-  upsertMeta('meta[name="keywords"]', {
-    name: 'keywords',
-    content: 'linear algebra, matrix, 3D, vectors, determinant, dot product, 선형대수, 行列, 线性代数',
-  });
-  upsertMeta('meta[property="og:title"]', { property: 'og:title', content: message.title });
-  upsertMeta('meta[property="og:description"]', { property: 'og:description', content: message.description });
-  upsertMeta('meta[property="og:type"]', { property: 'og:type', content: 'website' });
-  upsertMeta('meta[property="og:locale"]', { property: 'og:locale', content: message.code.replace('-', '_') });
-  if (monetizationConfig.admobAppId) {
-    upsertMeta('meta[name="admob-app-id"]', { name: 'admob-app-id', content: monetizationConfig.admobAppId });
-  }
-  upsertMeta('meta[name="geo.region"]', { name: 'geo.region', content: locale === 'ko' ? 'KR' : locale === 'ja' ? 'JP' : locale === 'zh' ? 'CN' : 'US' });
-  localeOrder.forEach((key) => {
-    const href = new URL(window.location.href);
-    href.searchParams.set('lang', key);
-    upsertMeta(`link[rel="alternate"][hreflang="${localeMessages[key].code}"]`, {
-      rel: 'alternate',
-      hreflang: localeMessages[key].code,
-      href: href.toString(),
-    });
-  });
-  const schema = {
-    '@context': 'https://schema.org',
-    '@type': 'WebApplication',
-    name: message.title,
-    applicationCategory: 'EducationalApplication',
-    operatingSystem: 'Any',
-    inLanguage: localeOrder.map((key) => localeMessages[key].code),
-    description: message.description,
-  };
-  upsertMeta('script[type="application/ld+json"][data-linear-lab-schema]', {
-    type: 'application/ld+json',
-    'data-linear-lab-schema': 'true',
-  }, JSON.stringify(schema));
-}
-
-function normalizeControlLocks(locks = {}) {
-  if (typeof locks === 'boolean') {
-    return { camera: locks, zoom: false };
-  }
-  return {
-    camera: !!locks.camera,
-    zoom: !!locks.zoom,
-  };
-}
-
-function configureControlsForView(controls, viewKey, locks = {}) {
-  if (!controls) return;
-  const lockState = normalizeControlLocks(locks);
-  controls.enabled = true;
-  controls.enableRotate = !lockState.camera;
-  controls.enablePan = !lockState.camera;
-  controls.enableZoom = !lockState.zoom;
-  controls.screenSpacePanning = false;
-  controls.mouseButtons.LEFT = THREE.MOUSE.ROTATE;
-  controls.touches.ONE = THREE.TOUCH.ROTATE;
-}
-
-function labelRectOverlaps(a, b, padding = 4) {
-  return !(
-    a.right + padding < b.left ||
-    a.left - padding > b.right ||
-    a.bottom + padding < b.top ||
-    a.top - padding > b.bottom
-  );
-}
-
-function estimatedLabelRect(label, x, y) {
-  const text = label.querySelector('.axis-label-text')?.textContent ?? label.textContent ?? '';
-  const width = Math.max(42, Math.min(280, text.length * 8.2 + 18));
-  const height = label.classList.contains('measurement-label') ? 27 : 24;
-  return {
-    left: x - width / 2,
-    right: x + width / 2,
-    top: y - height / 2,
-    bottom: y + height / 2,
-  };
-}
-
-function resolveSceneLabelOverlaps(container) {
-  if (!container) return;
-  const labels = [...container.querySelectorAll('.axis-label')]
-    .filter((label) => label.style.display !== 'none' && label.dataset.labelX && label.dataset.labelY);
-  const placed = [];
-
-  labels.forEach((label) => {
-    const baseX = Number(label.dataset.labelX);
-    const baseY = Number(label.dataset.labelY);
-    if (!Number.isFinite(baseX) || !Number.isFinite(baseY)) return;
-
-    const isScalarLabel = label.dataset.dragKey?.startsWith('s:');
-    const isSolutionLabel =
-      label.classList.contains('scalar-solution-label') ||
-      label.classList.contains('equation-solution-label');
-    const preferredXOffset = isSolutionLabel ? 18 : 0;
-    const preferredYOffset = isScalarLabel ? -20 : isSolutionLabel ? 6 : 0;
-
-    for (let attempt = 0; attempt < 10; attempt += 1) {
-      const direction = attempt % 2 === 0 ? 1 : -1;
-      const step = Math.ceil(attempt / 2);
-      const dy = preferredYOffset + direction * step * 22;
-      const dx = preferredXOffset + (attempt > 4 ? (attempt % 2 === 0 ? 18 : -18) : 0);
-      const x = baseX + dx;
-      const y = baseY + dy;
-      label.style.transform = `translate(-50%, -50%) translate(${x}px, ${y}px)`;
-      const rect = estimatedLabelRect(label, x, y);
-      if (!placed.some((placedRect) => labelRectOverlaps(rect, placedRect))) {
-        placed.push(rect);
-        return;
-      }
-    }
-
-    placed.push(estimatedLabelRect(label, baseX, baseY));
-  });
-}
-
-const matrixPresetGroups = {
-  '3d': [
-    { id: '3d-identity', name: 'Identity matrix', matrix: [1, 0, 0, 0, 1, 0, 0, 0, 1], mode: '3d' },
-    { id: '3d-rotate-x', name: 'Rotate X 90', matrix: [1, 0, 0, 0, 0, -1, 0, 1, 0], mode: '3d' },
-    { id: '3d-rotate-y', name: 'Rotate Y 90', matrix: [0, 0, 1, 0, 1, 0, -1, 0, 0], mode: '3d' },
-    { id: '3d-rotate-z', name: 'Rotate Z 90', matrix: [0, -1, 0, 1, 0, 0, 0, 0, 1], mode: '3d' },
-    { id: '3d-scale-up', name: 'Scale 1.5x', matrix: [1.5, 0, 0, 0, 1.5, 0, 0, 0, 1.5], mode: '3d' },
-    { id: '3d-shear-xy', name: 'X-Y shear', matrix: [1, 1, 0, 0, 1, 0, 0, 0, 1], mode: '3d' },
-    { id: '3d-swap-xy', name: 'X/Y permutation', matrix: [0, 1, 0, 1, 0, 0, 0, 0, 1], mode: '3d' },
-    { id: '3d-compress-z', name: 'Compress Z', matrix: [1, 0, 0, 0, 1, 0, 0, 0, 0.35], mode: '3d' },
-    { id: '3d-project-xy', name: 'Project to XY plane', matrix: [1, 0, 0, 0, 1, 0, 0, 0, 0], mode: '3d' },
-  ],
-  '2d': [
-    { id: '2d-identity', name: 'Identity matrix', matrix: [1, 0, 0, 1], mode: '2d' },
-    { id: '2d-permutation', name: 'Permutation matrix', matrix: [0, 1, 1, 0], mode: '2d' },
-    { id: '2d-rotate', name: 'Rotate 90', matrix: [0, -1, 1, 0], mode: '2d' },
-    { id: '2d-reflect-x', name: 'Reflect X axis', matrix: [1, 0, 0, -1], mode: '2d' },
-    { id: '2d-reflect-y', name: 'Reflect Y axis', matrix: [-1, 0, 0, 1], mode: '2d' },
-    { id: '2d-scale-up', name: 'Scale 2x', matrix: [2, 0, 0, 2], mode: '2d' },
-    { id: '2d-scale-down', name: 'Scale 1/2', matrix: [0.5, 0, 0, 0.5], mode: '2d' },
-    { id: '2d-shear-x', name: 'X shear', matrix: [1, 1, 0, 1], mode: '2d' },
-    { id: '2d-shear-y', name: 'Y shear', matrix: [1, 0, 1, 1], mode: '2d' },
-    { id: '2d-project-x', name: 'Project to X axis', matrix: [1, 0, 0, 0], mode: '2d' },
-  ],
-  '1d': [
-    { id: '1d-identity', name: 'Identity', matrix: [1], mode: '1d' },
-    { id: '1d-flip', name: 'Flip direction', matrix: [-1], mode: '1d' },
-    { id: '1d-scale-up', name: 'Scale 2x', matrix: [2], mode: '1d' },
-    { id: '1d-scale-down', name: 'Scale 1/2', matrix: [0.5], mode: '1d' },
-    { id: '1d-zero', name: 'Project to origin', matrix: [0], mode: '1d' },
-  ],
-};
-
-function createGridGeometry(size = 5, step = 1) {
-  const positions = [];
-  const addLine = (x1, y1, z1, x2, y2, z2) => {
-    positions.push(x1, y1, z1, x2, y2, z2);
-  };
-
-  for (let i = -size; i <= size; i += step) {
-    addLine(-size, i, 0, size, i, 0);
-    addLine(i, -size, 0, i, size, 0);
-    addLine(-size, 0, i, size, 0, i);
-    addLine(i, 0, -size, i, 0, size);
-    addLine(0, -size, i, 0, size, i);
-    addLine(0, i, -size, 0, i, size);
-  }
-
-  const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
-  return geometry;
-}
-
-function createPlaneGridGeometry(size = 9, step = 1) {
-  const positions = [];
-  for (let i = -size; i <= size; i += step) {
-    positions.push(-size, i, 0, size, i, 0);
-    positions.push(i, -size, 0, i, size, 0);
-  }
-
-  const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
-  return geometry;
-}
-
-function setGeometryPositions(geometry, positions) {
-  const next = new Float32Array(positions);
-  const current = geometry.getAttribute('position');
-  if (!current || current.array.length !== next.length) {
-    geometry.setAttribute('position', new THREE.BufferAttribute(next, 3));
-    return;
-  }
-  current.array.set(next);
-  current.needsUpdate = true;
-}
-
-function updateAreaGeometry(meshGeometry, edgeGeometry, a, b) {
-  const points = [
-    new THREE.Vector3(0, 0, 0),
-    a,
-    a.clone().add(b),
-    b,
-  ];
-  setGeometryPositions(meshGeometry, [
-    ...points[0].toArray(), ...points[1].toArray(), ...points[2].toArray(),
-    ...points[0].toArray(), ...points[2].toArray(), ...points[3].toArray(),
-  ]);
-  setGeometryPositions(edgeGeometry, [
-    ...points[0].toArray(), ...points[1].toArray(),
-    ...points[1].toArray(), ...points[2].toArray(),
-    ...points[2].toArray(), ...points[3].toArray(),
-    ...points[3].toArray(), ...points[0].toArray(),
-  ]);
-}
-
-function updateVolumeGeometry(meshGeometry, edgeGeometry, a, b, c) {
-  const p0 = new THREE.Vector3(0, 0, 0);
-  const p1 = a.clone();
-  const p2 = b.clone();
-  const p3 = c.clone();
-  const p4 = a.clone().add(b);
-  const p5 = a.clone().add(c);
-  const p6 = b.clone().add(c);
-  const p7 = a.clone().add(b).add(c);
-  const quad = (pA, pB, pC, pD) => [
-    ...pA.toArray(), ...pB.toArray(), ...pC.toArray(),
-    ...pA.toArray(), ...pC.toArray(), ...pD.toArray(),
-  ];
-  setGeometryPositions(meshGeometry, [
-    ...quad(p0, p1, p4, p2),
-    ...quad(p0, p2, p6, p3),
-    ...quad(p0, p3, p5, p1),
-    ...quad(p7, p5, p3, p6),
-    ...quad(p7, p6, p2, p4),
-    ...quad(p7, p4, p1, p5),
-  ]);
-  setGeometryPositions(edgeGeometry, [
-    ...p0.toArray(), ...p1.toArray(),
-    ...p0.toArray(), ...p2.toArray(),
-    ...p0.toArray(), ...p3.toArray(),
-    ...p1.toArray(), ...p4.toArray(),
-    ...p1.toArray(), ...p5.toArray(),
-    ...p2.toArray(), ...p4.toArray(),
-    ...p2.toArray(), ...p6.toArray(),
-    ...p3.toArray(), ...p5.toArray(),
-    ...p3.toArray(), ...p6.toArray(),
-    ...p4.toArray(), ...p7.toArray(),
-    ...p5.toArray(), ...p7.toArray(),
-    ...p6.toArray(), ...p7.toArray(),
-  ]);
-}
-
-function updateLengthGeometry(meshGeometry, edgeGeometry, a) {
-  setGeometryPositions(meshGeometry, []);
-  setGeometryPositions(edgeGeometry, [
-    0, 0, 0,
-    a.x, a.y, a.z,
-  ]);
-}
-
-function measurementDimensionForMode(mode) {
-  if (mode === '1d') return 1;
-  if (mode === '2d') return 2;
-  return 3;
-}
-
-function effectiveVolumeTargetCount(targetCount, mode) {
-  return Math.min(targetCount, measurementDimensionForMode(mode));
-}
-
-function volumeMeasureKind(targetCount, mode) {
-  const count = effectiveVolumeTargetCount(targetCount, mode);
-  if (count >= 3) return 'volume';
-  if (count === 2) return 'area';
-  return 'length';
-}
-
-function volumeMeasureValue(targets, mode) {
-  const count = effectiveVolumeTargetCount(targets.length, mode);
-  if (count <= 0) return null;
-  const a = new THREE.Vector3(...targets[0].values);
-  if (count === 1) return a.length();
-  const b = new THREE.Vector3(...targets[1].values);
-  if (count === 2) return a.clone().cross(b).length();
-  const c = new THREE.Vector3(...targets[2].values);
-  return Math.abs(a.clone().cross(b).dot(c));
-}
-
-function setAxisLabelText(label, text) {
-  if (!label) return;
-  const textNode = label.querySelector('.axis-label-text');
-  const applyText = (target) => {
-    if (Array.isArray(text)) {
-      target.replaceChildren(...text.map((part) => {
-        const span = document.createElement('span');
-        span.textContent = part.text ?? '';
-        if (part.color) span.style.color = part.color;
-        if (part.className) span.className = part.className;
-        return span;
-      }));
-      return;
-    }
-    target.textContent = text;
-  };
-  if (textNode) {
-    applyText(textNode);
-    return;
-  }
-  if (Array.isArray(text)) {
-    label.textContent = text.map((part) => part.text ?? '').join('');
-    return;
-  }
-  label.textContent = text;
-}
-
-function easeInOut(t) {
-  return t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t;
-}
-
-function clamp01(value) {
-  return Math.min(1, Math.max(0, value));
-}
-
-function normalizeRelativeGridStrength(value) {
-  const numeric = Number(value);
-  if (!Number.isFinite(numeric)) return DEFAULT_RELATIVE_GRID_STRENGTH;
-  return Math.min(1, Math.max(0.2, numeric));
-}
-
-function normalizeNotebookSpeed(value) {
-  const numeric = Number(value);
-  if (!Number.isFinite(numeric)) return DEFAULT_NOTEBOOK_SPEED;
-  return Math.min(1.25, Math.max(0.35, numeric));
-}
-
-function getNotebookPlaybackRate(value) {
-  return normalizeNotebookSpeed(value) / NOTEBOOK_NORMAL_SPEED;
-}
-
-function formatNotebookSpeedLabel(value) {
-  return `${formatMatrixNumber(getNotebookPlaybackRate(value), 2)}x`;
-}
-
-function easeOutCubic(value) {
-  const t = clamp01(value);
-  return 1 - Math.pow(1 - t, 3);
-}
-
-function interpolateNumberValue(from, to, progress) {
-  const start = parseNumber(from);
-  const end = parseNumber(to);
-  if (!Number.isFinite(start)) return Number.isFinite(end) ? end : 0;
-  if (!Number.isFinite(end)) return start;
-  return start + (end - start) * clamp01(progress);
-}
-
-function interpolateValueStrings(fromValues = [], toValues = [], progress) {
-  const size = Math.max(fromValues.length, toValues.length);
-  return Array.from({ length: size }, (_, index) =>
-    formatPresetInputValue(interpolateNumberValue(fromValues[index] ?? 0, toValues[index] ?? 0, progress))
-  );
-}
-
-function interpolateEquationEntry(fromEntry, toEntry, progress) {
-  if (!fromEntry || !toEntry) return toEntry;
-  const eased = clamp01(progress);
-  const fromCoeffs = [...(fromEntry.coeffs ?? [0, 0, 0]), 0, 0, 0].slice(0, 3);
-  const toCoeffs = [...(toEntry.coeffs ?? [0, 0, 0]), 0, 0, 0].slice(0, 3);
-  const coeffs = fromCoeffs.map((value, index) =>
-    interpolateNumberValue(value, toCoeffs[index], eased)
-  );
-  const value = interpolateNumberValue(fromEntry.value ?? 0, toEntry.value ?? 0, eased);
-  return {
-    ...toEntry,
-    coeffs,
-    value,
-    text: formatEquationFromCoefficients(coeffs, value),
-    dimension: Math.max(fromEntry.dimension ?? 2, toEntry.dimension ?? 2),
-  };
-}
-
-function setMaterialOpacity(material, opacity) {
-  const materials = Array.isArray(material) ? material : [material];
-  materials.forEach((item) => {
-    if (!item) return;
-    item.transparent = true;
-    item.opacity = opacity;
-  });
-}
-
-function setObjectRevealOpacity(object, revealProgress) {
-  const eased = easeOutCubic(revealProgress);
-  object?.traverse?.((child) => {
-    const material = child.material;
-    if (!material) return;
-    const materials = Array.isArray(material) ? material : [material];
-    materials.forEach((item) => {
-      if (!item) return;
-      if (!Number.isFinite(item.userData.baseOpacity)) {
-        item.userData.baseOpacity = Number.isFinite(item.opacity) ? item.opacity : 1;
-      }
-      item.transparent = true;
-      item.opacity = item.userData.baseOpacity * eased;
-    });
-  });
-}
-
-function scaleObjectOpacity(object, opacityScale) {
-  object?.traverse?.((child) => {
-    const material = child.material;
-    if (!material) return;
-    const materials = Array.isArray(material) ? material : [material];
-    materials.forEach((item) => {
-      if (!item) return;
-      const baseOpacity = Number.isFinite(item.opacity) ? item.opacity : 1;
-      item.transparent = true;
-      item.opacity = baseOpacity * opacityScale;
-    });
-  });
-}
-
-function setArrowVector(arrow, x, y, z, visible = true) {
-  if (!arrow) return;
-  const direction = new THREE.Vector3(x, y, z);
-  const length = direction.length();
-
-  if (!visible || length < EPSILON) {
-    arrow.visible = false;
-    return;
-  }
-
-  arrow.setDirection(direction.normalize());
-  arrow.setLength(length, 0.28, 0.14);
-  arrow.visible = true;
-}
-
-function createSceneArrow(color) {
-  const arrow = new THREE.ArrowHelper(
-    new THREE.Vector3(1, 0, 0),
-    new THREE.Vector3(0, 0, 0),
-    1,
-    color,
-    0.28,
-    0.14
-  );
-  arrow.line.material.depthTest = false;
-  arrow.cone.material.depthTest = false;
-  arrow.renderOrder = 10;
-  return arrow;
-}
-
-function createVectorVisual(scene, dragHandleGeometry, vector) {
-  const arrow = createSceneArrow(vector.color);
-  const dotGeometry = new THREE.BufferGeometry();
-  dotGeometry.setAttribute(
-    'position',
-    new THREE.Float32BufferAttribute([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 3)
-  );
-  const dotMaterial = new THREE.LineBasicMaterial({
-    color: vector.color,
-    transparent: true,
-    opacity: 0.86,
-    depthTest: false,
-    depthWrite: false,
-  });
-  const dotLine = new THREE.LineSegments(dotGeometry, dotMaterial);
-  dotLine.renderOrder = 12;
-
-  const dotPointGeometry = new THREE.SphereGeometry(0.055, 18, 12);
-  const dotPointMaterial = new THREE.MeshBasicMaterial({
-    color: vector.color,
-    depthTest: false,
-    depthWrite: false,
-  });
-  const dotPoint = new THREE.Mesh(dotPointGeometry, dotPointMaterial);
-  dotPoint.renderOrder = 13;
-
-  const handleMaterial = new THREE.MeshBasicMaterial({
-    color: vector.color,
-    transparent: true,
-    opacity: 0.001,
-    depthTest: false,
-    depthWrite: false,
-  });
-  const handle = new THREE.Mesh(dragHandleGeometry, handleMaterial);
-  handle.renderOrder = 30;
-  handle.userData.dragKey = `v:${vector.id}`;
-  handle.userData.color = vector.color;
-
-  scene.add(arrow, dotLine, dotPoint, handle);
-  return { arrow, dotLine, dotPoint, handle, dotGeometry, dotMaterial, dotPointGeometry, dotPointMaterial, handleMaterial };
-}
-
-function disposeVectorVisual(scene, visual) {
-  if (!visual) return;
-  scene.remove(visual.arrow, visual.dotLine, visual.dotPoint, visual.handle);
-  visual.arrow.line.geometry?.dispose?.();
-  visual.arrow.line.material?.dispose?.();
-  visual.arrow.cone.geometry?.dispose?.();
-  visual.arrow.cone.material?.dispose?.();
-  visual.dotGeometry.dispose();
-  visual.dotMaterial.dispose();
-  visual.dotPointGeometry.dispose();
-  visual.dotPointMaterial.dispose();
-  visual.handleMaterial.dispose();
-}
-
-function toMatrix4(m) {
-  return new THREE.Matrix4().set(
-    m[0], m[1], m[2], 0,
-    m[3], m[4], m[5], 0,
-    m[6], m[7], m[8], 0,
-    0, 0, 0, 1
-  );
-}
-
-function formatNumber(value, digits = 2) {
-  if (!Number.isFinite(value)) return '0';
-  if (Math.abs(value) < EPSILON) return '0';
-  if (Math.abs(value - Math.round(value)) < EPSILON) return String(Math.round(value));
-  return Number(value.toFixed(digits)).toString();
-}
-
-function approximateFraction(value, maxDenominator = 24, tolerance = 0.0008) {
-  if (!Number.isFinite(value) || Math.abs(value) < EPSILON) return null;
-  const sign = value < 0 ? -1 : 1;
-  const absolute = Math.abs(value);
-  const whole = Math.floor(absolute);
-  const fraction = absolute - whole;
-  if (fraction < EPSILON) return null;
-
-  let best = null;
-  for (let denominator = 2; denominator <= maxDenominator; denominator += 1) {
-    const numerator = Math.round(fraction * denominator);
-    if (numerator === 0 || numerator === denominator) continue;
-    const candidate = numerator / denominator;
-    const error = Math.abs(candidate - fraction);
-    if (!best || error < best.error) {
-      best = { numerator, denominator, error };
-    }
-  }
-
-  if (!best || best.error > tolerance) return null;
-  const numerator = whole * best.denominator + best.numerator;
-  return `${sign < 0 ? '-' : ''}${numerator}/${best.denominator}`;
-}
-
-function formatMatrixNumber(value, digits = 2) {
-  if (Math.abs(value) < EPSILON) return '0';
-  if (Math.abs(value - Math.round(value)) < EPSILON) return String(Math.round(value));
-  const fraction = approximateFraction(value);
-  if (fraction) return fraction;
-  return Number(value.toFixed(digits)).toString();
-}
-
-function shortNumber(value) {
-  if (Math.abs(value) < EPSILON) return '0';
-  if (Math.abs(value - Math.round(value)) < EPSILON) return String(Math.round(value));
-  return Number(value.toFixed(1)).toString();
-}
-
-function formatCoord(values, mode = '3d') {
-  const size = mode === '1d' ? 1 : mode === '2d' ? 2 : 3;
-  return `(${values.slice(0, size).map((value) => formatMatrixNumber(value, 2)).join(', ')})`;
-}
-
-function formatCompactCoord(values, mode = '3d', digits = 1) {
-  const size = mode === '1d' ? 1 : mode === '2d' ? 2 : 3;
-  return `(${values.slice(0, size).map((value) => formatMatrixNumber(value, digits)).join(', ')})`;
-}
-
-function coordLabelText(name, values, mode = '3d', showCoordinates = true, highlightIndices = []) {
-  if (!showCoordinates) return `${name}\u2032`;
-  const size = mode === '1d' ? 1 : mode === '2d' ? 2 : 3;
-  const highlightSet = new Set(highlightIndices.filter((index) => index >= 0 && index < size));
-  if (!highlightSet.size) return `${name}\u2032 ${formatCoord(values, mode)}`;
-
-  const parts = [{ text: `${name}\u2032 (` }];
-  values.slice(0, size).forEach((value, index) => {
-    parts.push({
-      text: formatMatrixNumber(value, 2),
-      className: highlightSet.has(index) ? 'axis-lock-value' : undefined,
-    });
-    if (index < size - 1) parts.push({ text: ', ' });
-  });
-  parts.push({ text: ')' });
-  return parts;
-}
-
-function scalarLockHighlightIndices(values, mode = '3d') {
-  const size = mode === '1d' ? 1 : mode === '2d' ? 2 : 3;
-  const active = values
-    .slice(0, size)
-    .map((value, index) => ({ index, value: Math.abs(value) }))
-    .filter((entry) => entry.value > EPSILON);
-  if (!active.length) return [];
-  const maxValue = Math.max(...active.map((entry) => entry.value));
-  return active
-    .filter((entry) => entry.value >= maxValue * 0.2)
-    .map((entry) => entry.index);
-}
-
-function dotValues(a, b) {
-  return a.reduce((sum, value, index) => sum + value * (b[index] ?? 0), 0);
-}
-
-function vectorLength(values) {
-  return Math.sqrt(dotValues(values, values));
-}
-
-function dotRelationText(dotValue, lengthA, lengthB) {
-  if (lengthA < EPSILON || lengthB < EPSILON) return 'dotZeroVector';
-  if (Math.abs(dotValue) < EPSILON) return 'dotOrthogonal';
-  return dotValue > 0 ? 'dotAcute' : 'dotObtuse';
-}
-
-function hasScalarText(value) {
-  const text = String(value ?? '').trim();
-  return text !== '' && text.toLowerCase() !== 'nan';
-}
-
-function cleanScalarText(value) {
-  const text = String(value ?? '');
-  return text.trim().toLowerCase() === 'nan' ? '' : text;
-}
-
-function formatInputValue(value) {
-  if (!Number.isFinite(value)) return '0';
-  if (Math.abs(value) < EPSILON) return '0';
-  if (Math.abs(value - Math.round(value)) < EPSILON) return String(Math.round(value));
-  return Number(value.toFixed(2)).toString();
-}
-
-function isFiniteVector3(vector) {
-  return (
-    !!vector &&
-    Number.isFinite(vector.x) &&
-    Number.isFinite(vector.y) &&
-    Number.isFinite(vector.z)
-  );
-}
-
-function formatPresetInputValue(value) {
-  return formatMatrixNumber(value, 4);
-}
-
-function formatVectorInputValue(value) {
-  return formatInputValue(value);
-}
-
-function snapValue(value, distance = SNAP_DISTANCE) {
-  const rounded = Math.round(value);
-  return Math.abs(value - rounded) < distance ? rounded : value;
-}
-
-function snapValuesFor3D(values, distance = SNAP_DISTANCE) {
-  const snapped = values.map((value) => snapValue(value, distance));
-  const absValues = snapped.map((value) => Math.abs(value));
-  const maxAbs = Math.max(...absValues);
-  if (maxAbs < EPSILON) return snapped;
-
-  const ranked = absValues
-    .map((value, index) => ({ value, index }))
-    .sort((a, b) => b.value - a.value);
-  const dominant = ranked[0];
-  const second = ranked[1]?.value ?? 0;
-  const axisLockDistance = Math.min(
-    AXIS_LOCK_MAX_3D,
-    Math.max(distance * 0.55, maxAbs * AXIS_LOCK_RATIO_3D)
-  );
-  if (dominant.value > EPSILON && second <= axisLockDistance) {
-    return snapped.map((value, index) => (index === dominant.index ? value : 0));
-  }
-
-  const planeLockDistance = Math.min(
-    PLANE_LOCK_MAX_3D,
-    Math.max(distance * 0.38, maxAbs * PLANE_LOCK_RATIO_3D)
-  );
-  return snapped.map((value) => (Math.abs(value) <= planeLockDistance ? 0 : value));
-}
-
-function constrainVectorForMode(vector, mode, options = {}) {
-  const shouldSnap = options.snap !== false;
-  const snapDistance = options.drag ? DRAG_SNAP_DISTANCE : SNAP_DISTANCE;
-  const next = vector.clone();
-  if (mode === '1d') {
-    next.y = 0;
-    next.z = 0;
-  } else if (mode === '2d') {
-    next.z = 0;
-  }
-  if (!shouldSnap) return next;
-  if (mode === '3d') {
-    const [x, y, z] = snapValuesFor3D([next.x, next.y, next.z], snapDistance);
-    next.set(x, y, z);
-  } else {
-    next.set(
-      snapValue(next.x, snapDistance),
-      snapValue(next.y, snapDistance),
-      snapValue(next.z, snapDistance)
-    );
-  }
-  return next;
-}
-
-function constrainInputValuesForMode(values, mode, shouldSnap = true, options = {}) {
-  const next = [...values];
-  if (mode === '1d') {
-    next[1] = 0;
-    next[2] = 0;
-  } else if (mode === '2d') {
-    next[2] = 0;
-  }
-  if (!shouldSnap) return next;
-  const snapDistance = options.drag ? DRAG_SNAP_DISTANCE : SNAP_DISTANCE;
-  if (mode === '3d') return snapValuesFor3D(next, snapDistance);
-  return next.map((value) => snapValue(value, snapDistance));
-}
-
-function snapGuideLabelForVectors(rawVector, snappedVector, mode) {
-  const axes = mode === '1d' ? ['x'] : mode === '2d' ? ['x', 'y'] : ['x', 'y', 'z'];
-  const rawValues = [rawVector.x, rawVector.y, rawVector.z];
-  const snappedValues = [snappedVector.x, snappedVector.y, snappedVector.z];
-  const labels = axes
-    .map((axis, index) => ({
-      axis,
-      value: snappedValues[index],
-      delta: Math.abs(rawValues[index] - snappedValues[index]),
-    }))
-    .filter((item) => item.delta > 0.002)
-    .sort((a, b) => {
-      const aNonZero = Math.abs(a.value) > EPSILON ? 1 : 0;
-      const bNonZero = Math.abs(b.value) > EPSILON ? 1 : 0;
-      return bNonZero - aNonZero || b.delta - a.delta;
-    })
-    .slice(0, 3)
-    .map((item) => `${item.axis} = ${formatNumber(item.value)}`);
-
-  return labels.join(' · ');
-}
-
-function solveVectorInputForWorld(matrix, worldVector, mode, options = {}) {
-  const { snap = true } = options;
-  if (!isFiniteVector3(worldVector)) return [0, 0, 0];
-
-  if (mode === '2d') {
-    const [a, b, c, d] = [matrix[0], matrix[1], matrix[3], matrix[4]];
-    const det = a * d - b * c;
-    if (Math.abs(det) > EPSILON) {
-      return constrainInputValuesForMode(
-        [
-          (d * worldVector.x - b * worldVector.y) / det,
-          (-c * worldVector.x + a * worldVector.y) / det,
-          0,
-        ],
-        mode,
-        snap
-      );
-    }
-  }
-
-  if (mode === '1d') {
-    const axis = new THREE.Vector3(matrix[0], matrix[3], matrix[6]);
-    const lengthSquared = axis.lengthSq();
-    if (lengthSquared > EPSILON) {
-      return constrainInputValuesForMode(
-        [axis.dot(new THREE.Vector3(worldVector.x, worldVector.y, worldVector.z)) / lengthSquared, 0, 0],
-        mode,
-        snap
-      );
-    }
-  }
-
-  const lambda = 1e-5;
-  const ata = [
-    matrix[0] * matrix[0] + matrix[3] * matrix[3] + matrix[6] * matrix[6] + lambda,
-    matrix[0] * matrix[1] + matrix[3] * matrix[4] + matrix[6] * matrix[7],
-    matrix[0] * matrix[2] + matrix[3] * matrix[5] + matrix[6] * matrix[8],
-    matrix[1] * matrix[0] + matrix[4] * matrix[3] + matrix[7] * matrix[6],
-    matrix[1] * matrix[1] + matrix[4] * matrix[4] + matrix[7] * matrix[7] + lambda,
-    matrix[1] * matrix[2] + matrix[4] * matrix[5] + matrix[7] * matrix[8],
-    matrix[2] * matrix[0] + matrix[5] * matrix[3] + matrix[8] * matrix[6],
-    matrix[2] * matrix[1] + matrix[5] * matrix[4] + matrix[8] * matrix[7],
-    matrix[2] * matrix[2] + matrix[5] * matrix[5] + matrix[8] * matrix[8] + lambda,
-  ];
-  const atb = [
-    matrix[0] * worldVector.x + matrix[3] * worldVector.y + matrix[6] * worldVector.z,
-    matrix[1] * worldVector.x + matrix[4] * worldVector.y + matrix[7] * worldVector.z,
-    matrix[2] * worldVector.x + matrix[5] * worldVector.y + matrix[8] * worldVector.z,
-  ];
-  const inverse = inverse3(ata);
-  const solved = inverse ? transformVector3(inverse, atb) : [worldVector.x, worldVector.y, worldVector.z];
-  return solved.every(Number.isFinite) ? constrainInputValuesForMode(solved, mode, snap) : [0, 0, 0];
-}
-
-function viewKeyForMatrix(matrix) {
-  const matrixRank = rank3(matrix);
-  if (matrixRank <= 1) return '1d';
-  if (matrixRank === 2) return '2d';
-  return '3d';
-}
-
-function scalarConstraintResidual(constraint, point) {
-  return Math.abs(dotValues(constraint.normal, point) - constraint.scalar);
-}
-
-function isScalarConstraintSolution(constraints, point, tolerance = 0.035) {
-  return constraints.every((constraint) => scalarConstraintResidual(constraint, point) <= tolerance);
-}
-
-function solveScalarConstraintPoint(constraints, mode) {
-  if (!constraints.length) return null;
-
-  if (mode === '1d') {
-    const usable = constraints.filter((constraint) => Math.abs(constraint.normal[0]) > EPSILON);
-    if (!usable.length) return null;
-    const x = usable[0].scalar / usable[0].normal[0];
-    const point = [x, 0, 0];
-    return isScalarConstraintSolution(usable, point) ? point : null;
-  }
-
-  if (mode === '2d') {
-    const usable = constraints.filter((constraint) =>
-      Math.hypot(constraint.normal[0], constraint.normal[1]) > EPSILON
-    );
-    for (let leftIndex = 0; leftIndex < usable.length; leftIndex += 1) {
-      for (let rightIndex = leftIndex + 1; rightIndex < usable.length; rightIndex += 1) {
-        const left = usable[leftIndex];
-        const right = usable[rightIndex];
-        const [a, b] = left.normal;
-        const [c, d] = right.normal;
-        const det = a * d - b * c;
-        if (Math.abs(det) < EPSILON) continue;
-        const point = [
-          (left.scalar * d - b * right.scalar) / det,
-          (a * right.scalar - left.scalar * c) / det,
-          0,
-        ];
-        if (isScalarConstraintSolution(usable, point)) return point;
-      }
-    }
-    return null;
-  }
-
-  const usable = constraints.filter((constraint) => vectorLength(constraint.normal) > EPSILON);
-  for (let aIndex = 0; aIndex < usable.length; aIndex += 1) {
-    for (let bIndex = aIndex + 1; bIndex < usable.length; bIndex += 1) {
-      for (let cIndex = bIndex + 1; cIndex < usable.length; cIndex += 1) {
-        const matrix = [
-          ...usable[aIndex].normal,
-          ...usable[bIndex].normal,
-          ...usable[cIndex].normal,
-        ];
-        const inverse = inverse3(matrix);
-        if (!inverse) continue;
-        const point = transformVector3(inverse, [
-          usable[aIndex].scalar,
-          usable[bIndex].scalar,
-          usable[cIndex].scalar,
-        ]);
-        if (isScalarConstraintSolution(usable, point)) return point;
-      }
-    }
-  }
-  return null;
-}
-
-function modeForMatrix(matrix) {
-  return viewKeyForMatrix(matrix);
-}
-
-function matrixValuesForMode(matrix, mode = '3d') {
-  if (mode === '1d') return [matrix[0]];
-  if (mode === '2d') return matrix.length === 4 ? matrix : [matrix[0], matrix[1], matrix[3], matrix[4]];
-  return matrix;
-}
-
-function dimensionForMode(mode = '3d') {
-  if (mode === '1d') return 1;
-  if (mode === '2d') return 2;
-  return 3;
-}
-
-function modeForDimension(dimension = 3) {
-  if (dimension <= 1) return '1d';
-  if (dimension === 2) return '2d';
-  return '3d';
-}
-
-function operationMatrixFromPreset(preset) {
-  const values = matrixValuesForMode(preset.matrix, preset.mode);
-  if (preset.mode === '1d') return [values[0], 0, 0, 0, 0, 0, 0, 0, 0];
-  if (preset.mode === '2d') return [values[0], values[1], 0, values[2], values[3], 0, 0, 0, 0];
-  return values;
-}
-
-function identityMatrixForMode(mode = '3d') {
-  if (mode === '1d') return [1, 0, 0, 0, 0, 0, 0, 0, 0];
-  if (mode === '2d') return [1, 0, 0, 0, 1, 0, 0, 0, 0];
-  return [...identity3];
-}
-
-function matrixInputValuesForShape(matrix, rows, columns) {
-  const values = [];
-  for (let row = 0; row < rows; row += 1) {
-    for (let column = 0; column < columns; column += 1) {
-      values.push(matrix[row * 3 + column] ?? '0');
-    }
-  }
-  return values;
-}
-
-function patchMatrixInputShape(matrix, rows, columns, values) {
-  const next = [...matrix];
-  let valueIndex = 0;
-  for (let row = 0; row < rows; row += 1) {
-    for (let column = 0; column < columns; column += 1) {
-      next[row * 3 + column] = values[valueIndex] ?? next[row * 3 + column] ?? '0';
-      valueIndex += 1;
-    }
-  }
-  return next;
-}
-
-function operationMatrixFromInputValues(values, rows, columns) {
-  const matrix = Array.from({ length: 9 }, () => 0);
-  let valueIndex = 0;
-  for (let row = 0; row < rows; row += 1) {
-    for (let column = 0; column < columns; column += 1) {
-      matrix[row * 3 + column] = parseNumber(values[valueIndex]);
-      valueIndex += 1;
-    }
-  }
-  return matrix;
-}
-
-function operationModeForShape(rows, columns) {
-  return rows === columns ? modeForDimension(rows) : '3d';
-}
-
-function identityInputValuesForMode(mode = '2d') {
-  const dimension = dimensionForMode(mode);
-  return matrixInputValuesForShape(identity3, dimension, dimension).map(formatPresetInputValue);
-}
-
-function matrixTextFromValues(values, dimension) {
-  const rows = [];
-  for (let row = 0; row < dimension; row += 1) {
-    rows.push(values.slice(row * dimension, row * dimension + dimension).join(' '));
-  }
-  return rows.join('\n');
-}
-
-function matrixTextFromShapeValues(values, rows, columns) {
-  const lines = [];
-  for (let row = 0; row < rows; row += 1) {
-    lines.push(values.slice(row * columns, row * columns + columns).join(' '));
-  }
-  return lines.join('\n');
-}
-
-function splitNotebookAlias(line) {
-  const source = String(line ?? '');
-  const match = source.match(/^(.*?)(?:\s+)#([^\s#!]+)\s*(!)?\s*$/u);
-  if (!match || !match[1].trim()) return { body: source, alias: null, hidden: false };
-  return {
-    body: match[1].trimEnd(),
-    alias: match[2],
-    hidden: Boolean(match[3]),
-  };
-}
-
-function splitNotebookExecute(line) {
-  const source = String(line ?? '');
-  const match = source.match(/^(.*?)@\s*$/u);
-  if (!match || !match[1].trim()) return { body: source, execute: false };
-  return {
-    body: match[1].trimEnd(),
-    execute: true,
-  };
-}
-
-function splitNotebookSuffixMeta(line) {
-  let body = String(line ?? '').trimEnd();
-  let execute = false;
-  let remove = false;
-  let show = false;
-  let durationSec = null;
-  let changed = true;
-
-  while (changed) {
-    changed = false;
-
-    const durationMatch = body.match(/^(.*?)\s+([+-]?(?:\d+(?:[.,]\d*)?|[.,]\d+)(?:\s*\/\s*[+-]?(?:\d+(?:[.,]\d*)?|[.,]\d+))?)\s*s\s*$/iu);
-    if (durationMatch && durationMatch[1].trim()) {
-      const parsed = parseNumber(durationMatch[2]);
-      if (Number.isFinite(parsed) && parsed > 0) durationSec = parsed;
-      body = durationMatch[1].trimEnd();
-      changed = true;
-      continue;
-    }
-
-    const removeMatch = body.match(/^(.*?)\s+-\s*$/u);
-    if (removeMatch && removeMatch[1].trim()) {
-      remove = true;
-      body = removeMatch[1].trimEnd();
-      changed = true;
-      continue;
-    }
-
-    const showMatch = body.match(/^(.*?)\s+\+\s*$/u);
-    if (showMatch && showMatch[1].trim()) {
-      show = true;
-      body = showMatch[1].trimEnd();
-      changed = true;
-      continue;
-    }
-
-    const executeMatch = body.match(/^(.*?)@\s*$/u);
-    if (executeMatch && executeMatch[1].trim()) {
-      execute = true;
-      body = executeMatch[1].trimEnd();
-      changed = true;
-    }
-  }
-
-  return {
-    body,
-    execute,
-    remove,
-    show,
-    durationSec,
-  };
-}
-
-function splitNotebookMute(line) {
-  const source = String(line ?? '');
-  const match = source.match(/^(\s*)!(?:\s*)(.*)$/u);
-  if (!match) return { body: source, hidden: false };
-  return {
-    body: `${match[1] ?? ''}${match[2] ?? ''}`,
-    hidden: true,
-  };
-}
-
-function splitNotebookLineMeta(line) {
-  const muted = splitNotebookMute(line);
-  const suffixed = splitNotebookSuffixMeta(muted.body);
-  const aliased = splitNotebookAlias(suffixed.body);
-  return {
-    body: aliased.body,
-    alias: aliased.alias,
-    hidden: muted.hidden || aliased.hidden,
-    execute: suffixed.execute,
-    remove: suffixed.remove,
-    show: suffixed.show,
-    durationSec: suffixed.durationSec,
-  };
-}
-
-function appendNotebookAlias(body, alias, hidden = false, execute = false, durationSec = null, remove = false, show = false) {
-  const cleaned = normalizeNotebookVariableName(alias);
-  let result = cleaned ? `${body}  #${cleaned}${hidden ? '!' : ''}` : body;
-  if (execute) result = `${result}@`;
-  if (remove) result = `${result} -`;
-  else if (show) result = `${result} +`;
-  if (Number.isFinite(durationSec) && durationSec > 0) {
-    result = `${result} ${formatMatrixNumber(durationSec, 2)}s`;
-  }
-  return result;
-}
-
-function appendNotebookLineMeta(body, meta = {}) {
-  const aliased = appendNotebookAlias(body, meta.alias, meta.hidden, meta.execute, meta.durationSec, meta.remove, meta.show);
-  return meta.hidden && !meta.alias ? `! ${aliased}` : aliased;
-}
-
-const NOTEBOOK_IDENTIFIER_PATTERN = '[\\p{L}_][\\p{L}\\p{N}_]*';
-const NOTEBOOK_NUMBER_TOKEN_PATTERN = /^[+-]?(?:\d+(?:[.,]\d*)?|[.,]\d+)(?:\s*\/\s*[+-]?(?:\d+(?:[.,]\d*)?|[.,]\d+))?$/u;
-
-function isNotebookNumberToken(value) {
-  return NOTEBOOK_NUMBER_TOKEN_PATTERN.test(String(value ?? '').trim());
-}
-
-function parseNotebookVectorLine(line) {
-  const { body: sourceLine, alias, hidden, durationSec, remove } = splitNotebookLineMeta(line);
-  const trimmed = sourceLine.trim();
-  if (!trimmed || !trimmed.includes(',')) return null;
-  const assignment = trimmed.match(new RegExp(`^(${NOTEBOOK_IDENTIFIER_PATTERN})\\s*(?:=|:)\\s*(.+)$`, 'u'));
-  const assignedName = assignment?.[1] ?? null;
-  const name = alias ?? assignedName;
-  const source = assignment?.[2] ?? trimmed;
-  const body = trimmed
-    ? source
-    .replace(/^[([{<]\s*/, '')
-    .replace(/\s*[)\]}>]$/, '')
-    : '';
-  const parts = body.split(',').map((part) => part.trim()).filter(Boolean);
-  if (parts.length < 2 || parts.length > 3) return null;
-  if (!parts.every(isNotebookNumberToken)) return null;
-  const values = parts.map((part) => parseNumber(part));
-  if (!values.every(Number.isFinite)) return null;
-  return {
-    name,
-    alias,
-    assignedName,
-    hidden,
-    execute: true,
-    explicitExecute: true,
-    remove,
-    durationSec,
-    dimension: parts.length,
-    values: [
-      formatPresetInputValue(values[0] ?? 0),
-      formatPresetInputValue(values[1] ?? 0),
-      formatPresetInputValue(values[2] ?? 0),
-    ],
-  };
-}
-
-function normalizeNotebookVariableName(value, fallback = '') {
-  const cleaned = String(value ?? '')
-    .trim()
-    .replace(/[^\p{L}\p{N}_]/gu, '_')
-    .replace(/^(\p{N})/u, '_$1');
-  return cleaned || fallback;
-}
-
-function notebookVariableKey(value) {
-  return normalizeNotebookVariableName(value).toLowerCase();
-}
-
-function resolveNotebookVariableName(value, knownNames) {
-  const fallback = normalizeNotebookVariableName(value);
-  if (!fallback) return fallback;
-  return knownNames?.get?.(notebookVariableKey(fallback)) ?? fallback;
-}
-
-function rememberNotebookVariableName(knownNames, value) {
-  const normalized = normalizeNotebookVariableName(value);
-  if (!normalized) return normalized;
-  const key = notebookVariableKey(normalized);
-  if (!knownNames.has(key)) knownNames.set(key, normalized);
-  return knownNames.get(key) ?? normalized;
-}
-
-function notebookVectorIdForName(name, index) {
-  return `notebook-${normalizeNotebookVariableName(name, `v${index + 1}`)}`;
-}
-
-function measurementStateKey(type, targets) {
-  return `${type}:${[...targets].sort().join('|')}`;
-}
-
-function parseNotebookMeasurementLine(line, knownNames = new Map(), knownShapes = new Map()) {
-  const { body: sourceLine, alias, hidden, durationSec, remove } = splitNotebookLineMeta(line);
-  const trimmed = sourceLine.trim();
-  if (!trimmed) return null;
-  const match = trimmed.match(/^(dot|det)\s*\((.*)\)\s*$/iu);
-  if (match) {
-    const kind = match[1].toLowerCase();
-    const names = match[2]
-      .split(',')
-      .map((part) => resolveNotebookVariableName(part.trim(), knownNames))
-      .filter(Boolean);
-    if (kind === 'dot' && names.length < 2) return null;
-    if (kind === 'det' && names.length < 2) return null;
-    return {
-      type: kind === 'dot' ? 'dot' : 'volume',
-      alias,
-      hidden,
-      remove,
-      durationSec,
-      execute: true,
-      names: kind === 'dot' ? names.slice(0, 2) : names.slice(0, 3),
-    };
-  }
-
-  const product = trimmed.match(new RegExp(`^(${NOTEBOOK_IDENTIFIER_PATTERN})\\s*(?:\\*|횞)\\s*(${NOTEBOOK_IDENTIFIER_PATTERN})$`, 'u'));
-  if (!product) return null;
-  const leftName = resolveNotebookVariableName(product[1], knownNames);
-  const rightName = resolveNotebookVariableName(product[2], knownNames);
-  const leftShape = knownShapes.get(notebookVariableKey(leftName));
-  const rightShape = knownShapes.get(notebookVariableKey(rightName));
-  if (leftShape?.kind !== 'vector' || rightShape?.kind !== 'vector') return null;
-  return {
-    type: 'dot',
-    alias,
-    hidden,
-    remove,
-    durationSec,
-    execute: true,
-    notation: 'product',
-    names: [leftName, rightName],
-  };
-}
-
-function parseNotebookCaptionLine(line) {
-  const { body: sourceLine, hidden, durationSec, remove } = splitNotebookLineMeta(line);
-  const trimmed = sourceLine.trim();
-  if (!trimmed.startsWith('//')) return null;
-  const text = trimmed.replace(/^\/\/\s?/u, '').trim();
-  if (!text && !remove) return null;
-  return {
-    text,
-    hidden,
-    remove,
-    durationSec,
-  };
-}
-
-function parseNotebookCalculationLine(line) {
-  const { body: sourceLine, alias, hidden, execute, durationSec, remove } = splitNotebookLineMeta(line);
-  const trimmed = sourceLine.trim();
-  if (!trimmed || !/[=*×]/.test(trimmed)) return null;
-  const assignment = trimmed.match(new RegExp(`^(${NOTEBOOK_IDENTIFIER_PATTERN})\\s*=\\s*(.+)$`, 'u'));
-  const assignedTarget = assignment?.[1] ?? null;
-  const target = alias ?? assignedTarget;
-  const expression = (assignment?.[2] ?? trimmed).trim();
-  const product = expression.match(new RegExp(`^(${NOTEBOOK_IDENTIFIER_PATTERN})\\s*(?:\\*|×)\\s*(${NOTEBOOK_IDENTIFIER_PATTERN})$`, 'u'));
-  if (!product) return null;
-  return {
-    target,
-    alias,
-    assignedTarget,
-    hidden,
-    execute: true,
-    explicitExecute: Boolean(execute),
-    remove,
-    durationSec,
-    left: product[1],
-    right: product[2],
-  };
-}
-
-function multiplyNotebookMatrixVector(matrix, vectorValues) {
-  return transformVector3(matrix, vectorValues.map((value) => parseNumber(value))).map(formatPresetInputValue);
-}
-
-function notebookMatrixShape(matrix) {
-  const rows = Math.max(1, Math.min(3, Number(matrix?.rows) || 3));
-  const columns = Math.max(1, Math.min(3, Number(matrix?.columns) || rows));
-  const shapedValues = Array.isArray(matrix?.shapeValues)
-    ? matrix.shapeValues
-    : Array.isArray(matrix?.values)
-      ? matrixInputValuesForShape(matrix.values, rows, columns)
-      : [];
-  const values = Array.from({ length: rows * columns }, (_, index) =>
-    parseNumber(shapedValues[index] ?? (index % (columns + 1) === 0 ? '1' : '0'))
-  );
-  return { rows, columns, values };
-}
-
-function multiplyNotebookMatrices(leftMatrix, rightMatrix) {
-  const left = notebookMatrixShape(leftMatrix);
-  const right = notebookMatrixShape(rightMatrix);
-  if (left.columns !== right.rows) return null;
-
-  const shapeValues = [];
-  for (let row = 0; row < left.rows; row += 1) {
-    for (let column = 0; column < right.columns; column += 1) {
-      let sum = 0;
-      for (let shared = 0; shared < left.columns; shared += 1) {
-        sum += left.values[row * left.columns + shared] * right.values[shared * right.columns + column];
-      }
-      shapeValues.push(formatPresetInputValue(sum));
-    }
-  }
-
-  return {
-    type: 'matrix',
-    rows: left.rows,
-    columns: right.columns,
-    mode: operationModeForShape(left.rows, right.columns),
-    shapeValues,
-    values: operationMatrixFromInputValues(shapeValues, left.rows, right.columns),
-  };
-}
-
-function formatEquationFromCoefficients(coeffs, value) {
-  const terms = coeffs
-    .map((coefficient, index) => ({ coefficient, variable: equationVariables[index] }))
-    .filter((term) => Math.abs(term.coefficient) > EPSILON);
-  if (!terms.length) return `0 = ${formatMatrixNumber(value, 3)}`;
-  const left = terms
-    .map((term, index) => `${formatEquationCoefficient(term.coefficient, index === 0)}${term.variable}`)
-    .join('')
-    .trim();
-  return `${left} = ${formatMatrixNumber(value, 3)}`;
-}
-
-function transformNotebookEquation(equation, matrixEntry) {
-  if (!equation || !matrixEntry) return null;
-  const coeffs = [...(equation.coeffs ?? [0, 0, 0]), 0, 0, 0].slice(0, 3);
-  const value = Number(equation.value ?? 0);
-  const equationDimension = Math.abs(coeffs[2]) > EPSILON ? 3 : 2;
-  const matrixDimension = Math.max(matrixEntry.rows ?? 2, matrixEntry.columns ?? 2);
-  const dimension = Math.max(equationDimension, matrixDimension >= 3 ? 3 : 2);
-
-  if (dimension <= 2) {
-    const [a, b, c, d] = matrixValuesForMode(matrixEntry.values, '2d');
-    const det = a * d - b * c;
-    if (Math.abs(det) < EPSILON) return null;
-    const inverse = [d / det, -b / det, -c / det, a / det];
-    const nextCoeffs = [
-      inverse[0] * coeffs[0] + inverse[2] * coeffs[1],
-      inverse[1] * coeffs[0] + inverse[3] * coeffs[1],
-      0,
-    ];
-    return {
-      type: 'equation',
-      coeffs: nextCoeffs,
-      value,
-      text: formatEquationFromCoefficients(nextCoeffs, value),
-      dimension: 2,
-    };
-  }
-
-  const inverse = inverse3(matrixEntry.values);
-  if (!inverse) return null;
-  const nextCoeffs = [
-    inverse[0] * coeffs[0] + inverse[3] * coeffs[1] + inverse[6] * coeffs[2],
-    inverse[1] * coeffs[0] + inverse[4] * coeffs[1] + inverse[7] * coeffs[2],
-    inverse[2] * coeffs[0] + inverse[5] * coeffs[1] + inverse[8] * coeffs[2],
-  ];
-  return {
-    type: 'equation',
-    coeffs: nextCoeffs,
-    value,
-    text: formatEquationFromCoefficients(nextCoeffs, value),
-    dimension: 3,
-  };
-}
-
-function parseNotebookReferenceLine(line, knownNames = new Map(), knownShapes = new Map()) {
-  const meta = splitNotebookLineMeta(line);
-  const trimmed = meta.body.trim().replace(/^#\s*/u, '');
-  if (!new RegExp(`^${NOTEBOOK_IDENTIFIER_PATTERN}$`, 'u').test(trimmed)) return null;
-  const name = resolveNotebookVariableName(trimmed, knownNames);
-  const shape = knownShapes.get(notebookVariableKey(name));
-  if (!shape) return null;
-  return {
-    ...meta,
-    name,
-    refKind: shape.kind,
-    shape,
-    execute: true,
-    explicitExecute: Boolean(meta.execute),
-  };
-}
-
-function parseNotebookNumericRowLine(line) {
-  const trimmed = splitNotebookLineMeta(line).body.trim();
-  if (parseNotebookVectorLine(trimmed)) return null;
-  if (!trimmed || /[a-zㄱ-ㅎㅏ-ㅣ가-힣一-龥ぁ-んァ-ン=]/i.test(trimmed)) return null;
-  if (!/^[\d\s.,/+()-]+$/.test(trimmed)) return null;
-  const numberPattern = /[+-]?(?:\d+(?:[.,]\d*)?|[.,]\d+)(?:\s*\/\s*[+-]?(?:\d+(?:[.,]\d*)?|[.,]\d+))?/g;
-  const matches = trimmed.match(numberPattern) ?? [];
-  if (matches.length < 2 || !/\S\s+\S/.test(trimmed)) return null;
-  return matches;
-}
-
-function notebookMatrixRowsFromText(text) {
-  const source = String(text ?? '').replace(/\r/g, '');
-  return source
-    .split('\n')
-    .map((line) => parseNotebookNumericRowLine(line) ?? [])
-    .filter((row) => row.length > 0);
-}
-
-function notebookMatrixModeFromText(text, fallbackMode = '2d') {
-  const rows = notebookMatrixRowsFromText(text);
-  if (rows.length >= 1 && rows.length <= 3 && rows.every((row) => row.length === rows.length)) {
-    return modeForDimension(rows.length);
-  }
-  const valueCount = rows.reduce((total, row) => total + row.length, 0);
-  const dimension = Math.sqrt(valueCount);
-  if (Number.isInteger(dimension) && dimension >= 1 && dimension <= 3) return modeForDimension(dimension);
-  return fallbackMode;
-}
-
-function matrixValuesFromNotebookText(text, mode = '2d') {
-  const resolvedMode = notebookMatrixModeFromText(text, mode);
-  const dimension = dimensionForMode(resolvedMode);
-  const rows = notebookMatrixRowsFromText(text);
-  const rowValues = rows.flatMap((row) => row);
-  const values = Array.from({ length: dimension * dimension }, (_, index) =>
-    formatPresetInputValue(parseNumber(rowValues[index] ?? (index % (dimension + 1) === 0 ? '1' : '0')))
-  );
-  return values;
-}
-
-function createNotebookEquationCell(text = '') {
-  return {
-    id: `equation-cell-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-    type: 'equation',
-    text,
-  };
-}
-
-function createNotebookMatrixCell(mode = '2d') {
-  const dimension = dimensionForMode(mode);
-  return {
-    id: `matrix-cell-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-    type: 'matrix',
-    mode,
-    text: matrixTextFromValues(identityInputValuesForMode(mode), dimension),
-  };
-}
-
-function createNotebookNoteCell(text = '') {
-  return {
-    id: `note-cell-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-    type: 'note',
-    text,
-  };
-}
-
-function inverseForStep(matrix, mode = '3d') {
-  if (mode === '1d') {
-    if (Math.abs(matrix[0]) < EPSILON) return null;
-    return [1 / matrix[0]];
-  }
-
-  if (mode === '2d') {
-    const [a, b, c, d] = matrixValuesForMode(matrix, '2d');
-    const det = a * d - b * c;
-    if (Math.abs(det) < EPSILON) return null;
-    return [d / det, -b / det, -c / det, a / det];
-  }
-
-  return inverse3(matrix);
-}
-
-function determinantForStep(matrix, mode = '3d') {
-  if (mode === '1d') return matrix[0];
-  if (mode === '2d') {
-    const [a, b, c, d] = matrixValuesForMode(matrix, '2d');
-    return a * d - b * c;
-  }
-  return determinant3(matrix);
-}
-
-function rankForStep(matrix, mode = '3d') {
-  if (mode === '1d') return Math.abs(matrix[0]) < EPSILON ? 0 : 1;
-  if (mode === '2d') {
-    const values = matrixValuesForMode(matrix, '2d');
-    if (Math.abs(determinantForStep(matrix, '2d')) > EPSILON) return 2;
-    return values.some((value) => Math.abs(value) > EPSILON) ? 1 : 0;
-  }
-  return rank3(matrix);
-}
-
-function multiplyMatrix2(a, b) {
-  return [
-    a[0] * b[0] + a[1] * b[2],
-    a[0] * b[1] + a[1] * b[3],
-    a[2] * b[0] + a[3] * b[2],
-    a[2] * b[1] + a[3] * b[3],
-  ];
-}
-
-function operationBetweenMatrices(previousMatrix, nextMatrix) {
-  const previousMode = modeForMatrix(previousMatrix);
-  const nextMode = modeForMatrix(nextMatrix);
-
-  if (previousMode === nextMode) {
-    if (nextMode === '1d') {
-      const [previousValue] = matrixValuesForMode(previousMatrix, '1d');
-      const [nextValue] = matrixValuesForMode(nextMatrix, '1d');
-      return {
-        isDimensionDrop: false,
-        operationMatrix: Math.abs(previousValue) > EPSILON ? [nextValue / previousValue] : [nextValue],
-        operationMode: '1d',
-      };
-    }
-
-    if (nextMode === '2d') {
-      const previousValues = matrixValuesForMode(previousMatrix, '2d');
-      const nextValues = matrixValuesForMode(nextMatrix, '2d');
-      const previousInverse = inverseForStep(previousValues, '2d');
-      return {
-        isDimensionDrop: false,
-        operationMatrix: previousInverse ? multiplyMatrix2(nextValues, previousInverse) : nextValues,
-        operationMode: '2d',
-      };
-    }
-
-    const previousInverse = inverse3(previousMatrix);
-    return {
-      isDimensionDrop: false,
-      operationMatrix: previousInverse ? multiplyMatrix3(nextMatrix, previousInverse) : nextMatrix,
-      operationMode: '3d',
-    };
-  }
-
-  return {
-    isDimensionDrop: rankForStep(nextMatrix, nextMode) < rankForStep(previousMatrix, previousMode),
-    operationMatrix: nextMatrix,
-    operationMode: nextMode,
-  };
-}
-
-function matricesAlmostEqual(a, b) {
-  if (!a || !b || a.length !== b.length) return false;
-  return a.every((value, index) => Math.abs(value - b[index]) < EPSILON);
-}
-
-function dragHistoryName(key, locale = 'ko') {
-  if (key === 'i') return t(locale, 'axisDragI');
-  if (key === 'j') return t(locale, 'axisDragJ');
-  if (key === 'k') return t(locale, 'axisDragK');
-  return t(locale, 'axisDrag');
-}
-
-function vectorIdFromDragKey(key) {
-  return key?.startsWith('v:') ? key.slice(2) : null;
-}
-
-function scalarIdFromDragKey(key) {
-  return key?.startsWith('s:') ? key.slice(2) : null;
-}
-
-const equationVariables = ['x', 'y', 'z'];
-const equationLineColors = [0xf59e0b, 0xa855f7, 0xec4899, 0xf97316, 0xd946ef, 0xeab308];
-const vectorPalette = [0x8b5cf6, 0xf59e0b, 0xec4899, 0xf97316, 0xd946ef, 0xeab308];
-const equationExamples = {
-  unique: ['x + y = 3', '2x - y = 0'],
-  infinite: ['2x + 2y = 4', 'x + y = 2'],
-  none: ['x + y = 1', 'x + y = 3'],
-  space3d: ['x + y + z = 3', '2x - y + z = 1', 'x + 2y - z = 2'],
-  overlap3d: ['x + y + z = 3', '2x - y + z = 1'],
-};
-
-function colorToHex(color) {
-  return `#${color.toString(16).padStart(6, '0')}`;
-}
-
-function equationSceneLabelName(item, mode, index) {
-  const prefix = mode === '3d' ? 'P' : 'L';
-  return `${prefix}${(item?.index ?? index) + 1}`;
-}
-
-function equationSceneLabelKey(item, mode, index) {
-  return `${mode}:${item?.index ?? index}`;
-}
-
-function equationRevealKey(item, mode, index) {
-  return `equation:${mode === '3d' ? 'plane' : 'line'}:${item?.index ?? index}`;
-}
-
-function equationAnchorPoint(item, mode) {
-  if (!item) return null;
-  const normal = mode === '3d'
-    ? new THREE.Vector3(item.a, item.b, item.c)
-    : new THREE.Vector3(item.a, item.b, 0);
-  const lengthSquared = normal.lengthSq();
-  if (lengthSquared < EPSILON) return null;
-  return normal.multiplyScalar((Number(item.value) || 0) / lengthSquared);
-}
-
-function equationSceneLabelText(item, mode, index, showCoordinates = true) {
-  const name = equationSceneLabelName(item, mode, index);
-  if (!showCoordinates) return `${name}\u2032`;
-  const coeffs = mode === '3d' ? [item.a, item.b, item.c] : [item.a, item.b, 0];
-  return `${name}\u2032 ${formatEquationFromCoefficients(coeffs, item.value)}`;
-}
-
-function createVectorState(index, overrides = {}) {
-  const id = overrides.id ?? `v${index + 1}`;
-  return {
-    id,
-    name: overrides.name ?? `v${index + 1}`,
-    color: overrides.color ?? vectorPalette[index % vectorPalette.length],
-    x: overrides.x ?? '2',
-    y: overrides.y ?? '2',
-    z: overrides.z ?? '2',
-    visible: overrides.visible ?? true,
-    scalarEnabled: overrides.scalarEnabled ?? false,
-    scalar: overrides.scalar ?? '1',
-    scalarSpace: overrides.scalarSpace === 'output' ? 'output' : 'input',
-  };
-}
-
-function parseExpression(expression) {
-  const coeffs = [0, 0, 0];
-  let constant = 0;
-  const compact = expression
-    .normalize('NFKC')
-    .toLowerCase()
-    .replace(/[−–—]/g, '-')
-    .replace(/[−–—]/g, '-')
-    .replace(/\*/g, '')
-    .replace(/,/g, '.')
-    .replace(/(\d)\s+([xyz])/gi, '$1$2')
-    .replace(/([+\-])\s+([xyz])/gi, '$1$2')
-    .replace(/([+\-])\s+/g, '$1')
-    .trim()
-    .replace(/\s+/g, '')
-    .replace(/\+\-/g, '-');
-
-  if (!compact) return { coeffs, constant };
-
-  const normalized = /^[+\-]/.test(compact) ? compact : `+${compact}`;
-  const terms = normalized.match(/[+\-][^+\-]+/g) ?? [];
-  if (!terms.length) throw new Error('term');
-
-  terms.forEach((term) => {
-    const sign = term.startsWith('-') ? -1 : 1;
-    const body = term.slice(1);
-    const numberPattern = '(?:\\d+(?:\\.\\d*)?|\\.\\d+)(?:\\/(?:\\d+(?:\\.\\d*)?|\\.\\d+))?';
-    const variableMatch = body.match(new RegExp(`^(${numberPattern})?([xyz])$`, 'i'));
-
-    if (variableMatch) {
-      const variableIndex = equationVariables.indexOf(variableMatch[2].toLowerCase());
-      const coefficientText = variableMatch[1] ?? '';
-      const coefficient = coefficientText ? parseNumber(coefficientText) : 1;
-      if (!Number.isFinite(coefficient)) throw new Error('coefficient');
-      coeffs[variableIndex] += sign * coefficient;
-      return;
-    }
-
-    if (/^(?:\d+(?:\.\d*)?|\.\d+)(?:\/(?:\d+(?:\.\d*)?|\.\d+))?$/.test(body)) {
-      constant += sign * parseNumber(body);
-      return;
-    }
-
-    throw new Error('term');
-  });
-
-  return { coeffs, constant };
-}
-
-function parseEquation(text) {
-  const source = splitNotebookLineMeta(text).body;
-  const trimmed = source.normalize('NFKC').replace(/[＝]/g, '=').trim();
-  if (!trimmed) return null;
-  const parts = trimmed.split('=');
-  if (parts.length > 2) throw new Error('equals');
-
-  const left = parseExpression(parts[0]);
-  const right = parts.length === 2 ? parseExpression(parts[1]) : { coeffs: [0, 0, 0], constant: 0 };
-  return {
-    coeffs: left.coeffs.map((value, index) => value - right.coeffs[index]),
-    value: right.constant - left.constant,
-  };
-}
-
-function formatEquationCoefficient(value, isFirst = false) {
-  const sign = value < 0 ? '-' : '+';
-  const absolute = Math.abs(value);
-  const coefficient = Math.abs(absolute - 1) < EPSILON ? '' : formatMatrixNumber(absolute, 3);
-  return `${isFirst ? (sign === '-' ? '- ' : '') : ` ${sign} `}${coefficient}`;
-}
-
-function prettifyEquationLine(text) {
-  const meta = splitNotebookLineMeta(text);
-  const { body, alias, hidden } = meta;
-  if (!body.trim()) return '';
-  try {
-    const parsed = parseEquation(body);
-    if (!parsed) return '';
-    const terms = parsed.coeffs
-      .map((coefficient, index) => ({ coefficient, variable: equationVariables[index] }))
-      .filter((term) => Math.abs(term.coefficient) > EPSILON);
-    if (!terms.length) return appendNotebookLineMeta(`0 = ${formatMatrixNumber(parsed.value, 3)}`, meta);
-
-    const left = terms
-      .map((term, index) => `${formatEquationCoefficient(term.coefficient, index === 0)}${term.variable}`)
-      .join('')
-      .trim();
-    return appendNotebookLineMeta(`${left} = ${formatMatrixNumber(parsed.value, 3)}`, meta);
-  } catch {
-    return appendNotebookLineMeta(body.trim().replace(/\s+/g, ' '), meta);
-  }
-}
-
-function prettifyEquationNoteText(text) {
-  return text
-    .replace(/\r/g, '')
-    .split('\n')
-    .map((line) => prettifyEquationLine(line))
-    .join('\n');
-}
-
-function parsedEquationLine(text) {
-  const trimmed = splitNotebookLineMeta(text).body.trim();
-  if (!trimmed || !trimmed.includes('=')) return null;
-  try {
-    const parsed = parseEquation(trimmed);
-    if (!parsed || !parsed.coeffs.some((coefficient) => Math.abs(coefficient) > EPSILON)) return null;
-    return parsed;
-  } catch {
-    return null;
-  }
-}
-
-function prettifyNotebookScriptText(text) {
-  let equationCount = 0;
-  let vectorCount = 0;
-  let matrixCount = 0;
-  let calculationCount = 0;
-  const lines = String(text ?? '').replace(/\r/g, '').split('\n');
-  const output = [];
-  const knownNames = new Map();
-  const knownShapes = new Map();
-
-  const prettifyNoteLine = (sourceLine) => {
-    const trimmed = String(sourceLine ?? '').trim();
-    if (!trimmed) return '';
-    if (trimmed.startsWith('//')) return `// ${trimmed.replace(/^\/\/\s?/u, '').trim()}`;
-    if (trimmed.startsWith('#')) return trimmed;
-    return `# ${trimmed}`;
-  };
-
-  for (let index = 0; index < lines.length;) {
-    const line = lines[index];
-    if (!line.trim()) {
-      output.push('');
-      index += 1;
-      continue;
-    }
-
-      const equationLine = parsedEquationLine(line);
-      if (equationLine) {
-        equationCount += 1;
-        const meta = splitNotebookLineMeta(line);
-        const prefix = Math.abs(equationLine.coeffs[2]) > EPSILON || /\bz\b/i.test(meta.body) ? 'P' : 'L';
-        const equationAlias = rememberNotebookVariableName(
-          knownNames,
-          normalizeNotebookVariableName(meta.alias, `${prefix}${equationCount}`)
-        );
-        const lineWithAlias = meta.alias
-          ? line
-          : appendNotebookLineMeta(meta.body, { ...meta, alias: equationAlias });
-        knownShapes.set(notebookVariableKey(equationAlias), {
-          kind: 'equation',
-          coeffs: equationLine.coeffs,
-          value: equationLine.value,
-          dimension: prefix === 'P' ? 3 : 2,
-        });
-      output.push(prettifyEquationLine(lineWithAlias));
-      index += 1;
-      continue;
-      }
-
-      const captionLine = parseNotebookCaptionLine(line);
-      if (captionLine) {
-        output.push(appendNotebookLineMeta(captionLine.text ? `// ${captionLine.text}` : '//', captionLine));
-        index += 1;
-        continue;
-      }
-
-      const measurementLine = parseNotebookMeasurementLine(line, knownNames, knownShapes);
-      if (measurementLine) {
-        const expression = measurementLine.type === 'dot'
-          ? measurementLine.notation === 'product'
-            ? `${measurementLine.names[0]} * ${measurementLine.names[1]}`
-            : `dot(${measurementLine.names[0]}, ${measurementLine.names[1]})`
-          : `det(${measurementLine.names.join(', ')})`;
-        output.push(appendNotebookLineMeta(expression, measurementLine));
-        index += 1;
-        continue;
-      }
-
-      const vectorLine = parseNotebookVectorLine(line);
-      if (vectorLine) {
-      vectorCount += 1;
-        const vectorText = vectorLine.values.slice(0, vectorLine.dimension).join(', ');
-      if (vectorLine.alias) {
-        rememberNotebookVariableName(knownNames, vectorLine.alias);
-        knownShapes.set(notebookVariableKey(vectorLine.alias), {
-          kind: 'vector',
-          dimension: vectorLine.dimension,
-        });
-        output.push(appendNotebookLineMeta(vectorText, vectorLine));
-        index += 1;
-        continue;
-      }
-      const vectorAlias = normalizeNotebookVariableName(vectorLine.assignedName, `v${vectorCount}`);
-      const resolvedVectorAlias = rememberNotebookVariableName(knownNames, vectorAlias);
-        knownShapes.set(notebookVariableKey(resolvedVectorAlias), {
-          kind: 'vector',
-          dimension: vectorLine.dimension,
-        });
-        const next = vectorLine.assignedName ? `${resolvedVectorAlias} = ${vectorText}` : vectorText;
-      output.push(appendNotebookLineMeta(next, { ...vectorLine, alias: resolvedVectorAlias }));
-      index += 1;
-      continue;
-      }
-
-      const calculationLine = parseNotebookCalculationLine(line);
-      if (calculationLine) {
-      calculationCount += 1;
-        const leftName = resolveNotebookVariableName(calculationLine.left, knownNames);
-        const rightName = resolveNotebookVariableName(calculationLine.right, knownNames);
-        const leftShape = knownShapes.get(notebookVariableKey(leftName));
-        const rightShape = knownShapes.get(notebookVariableKey(rightName));
-        const isMatrixProduct = leftShape?.kind === 'matrix' && rightShape?.kind === 'matrix';
-        const isVectorProduct =
-          (leftShape?.kind === 'matrix' && rightShape?.kind === 'vector') ||
-          (leftShape?.kind === 'vector' && rightShape?.kind === 'matrix');
-        const isEquationProduct =
-          (leftShape?.kind === 'matrix' && rightShape?.kind === 'equation') ||
-          (leftShape?.kind === 'equation' && rightShape?.kind === 'matrix');
-        const defaultTarget = isMatrixProduct
-          ? rightName
-          : isVectorProduct
-            ? (leftShape?.kind === 'vector' ? leftName : rightName)
-            : isEquationProduct
-              ? (leftShape?.kind === 'equation' ? leftName : rightName)
-              : null;
-        const rememberCalculationShape = (targetName) => {
-          if (!targetName) return;
-          const normalizedTarget = rememberNotebookVariableName(knownNames, targetName);
-          const shape = isMatrixProduct
-            ? { kind: 'matrix', rows: leftShape.rows, columns: rightShape.columns }
-            : isEquationProduct
-              ? {
-                  kind: 'equation',
-                  coeffs: (leftShape?.kind === 'equation' ? leftShape : rightShape)?.coeffs ?? [0, 0, 0],
-                  value: (leftShape?.kind === 'equation' ? leftShape : rightShape)?.value ?? 0,
-                  dimension: Math.max(leftShape?.dimension ?? 2, rightShape?.dimension ?? 2),
-                }
-              : isVectorProduct
-                ? { kind: 'vector', dimension: leftShape?.rows ?? rightShape?.dimension ?? 3 }
-                : null;
-          if (shape) knownShapes.set(notebookVariableKey(normalizedTarget), shape);
-        };
-        const expression = `${leftName} * ${rightName}`;
-      if (calculationLine.alias) {
-        rememberNotebookVariableName(knownNames, calculationLine.alias);
-        rememberCalculationShape(calculationLine.alias);
-        output.push(appendNotebookLineMeta(expression, {
-          ...calculationLine,
-          execute: calculationLine.explicitExecute,
-        }));
-        index += 1;
-        continue;
-      }
-      if (calculationLine.assignedTarget) {
-        const calculationAlias = normalizeNotebookVariableName(calculationLine.assignedTarget, `r${calculationCount}`);
-        const resolvedCalculationAlias = rememberNotebookVariableName(knownNames, calculationAlias);
-        rememberCalculationShape(resolvedCalculationAlias);
-        output.push(appendNotebookLineMeta(`${resolvedCalculationAlias} = ${expression}`, {
-          ...calculationLine,
-          alias: undefined,
-          execute: calculationLine.explicitExecute,
-        }));
-        index += 1;
-        continue;
-      }
-      rememberCalculationShape(defaultTarget);
-      output.push(appendNotebookLineMeta(expression, {
-        ...calculationLine,
-        alias: undefined,
-        execute: calculationLine.explicitExecute,
-      }));
-      index += 1;
-      continue;
-      }
-
-      const referenceLine = parseNotebookReferenceLine(line, knownNames, knownShapes);
-      if (referenceLine) {
-        const shouldShowReference = !referenceLine.remove && referenceLine.refKind !== 'matrix';
-        output.push(appendNotebookLineMeta(referenceLine.name, {
-          execute: referenceLine.explicitExecute,
-          remove: referenceLine.remove,
-          show: shouldShowReference,
-          durationSec: referenceLine.durationSec,
-        }));
-        index += 1;
-        continue;
-      }
-
-      const numericRow = parseNotebookNumericRowLine(line);
-      if (numericRow) {
-      const matrixRows = [];
-      let rowIndex = index;
-      while (rowIndex < lines.length) {
-        const row = parseNotebookNumericRowLine(lines[rowIndex]);
-        if (!row) break;
-        const meta = splitNotebookLineMeta(lines[rowIndex]);
-        matrixRows.push({ row, meta });
-        rowIndex += 1;
-      }
-
-      const rows = matrixRows.length;
-      const columns = matrixRows[0]?.row.length ?? 0;
-      const hasMatrixBlockBreak = rowIndex >= lines.length || !lines[rowIndex].trim();
-      const isMatrixBlock =
-        hasMatrixBlockBreak &&
-        rows >= 2 &&
-        rows <= 3 &&
-        columns >= 1 &&
-        columns <= 3 &&
-        matrixRows.every((item) => item.row.length === columns);
-
-      if (isMatrixBlock) {
-        matrixCount += 1;
-        const matrixAlias = matrixRows.map((item) => item.meta.alias).find(Boolean) ?? `M${matrixCount}`;
-        const resolvedMatrixAlias = rememberNotebookVariableName(knownNames, matrixAlias);
-        const matrixExecute = matrixRows.some((rowItem) => rowItem.meta.execute);
-        const matrixRemove = matrixRows.some((rowItem) => rowItem.meta.remove);
-        const matrixDurationSec = matrixRows.map((rowItem) => rowItem.meta.durationSec).find(Number.isFinite) ?? null;
-        knownShapes.set(notebookVariableKey(resolvedMatrixAlias), {
-          kind: 'matrix',
-          rows,
-          columns,
-        });
-        matrixRows.forEach((item, itemIndex) => {
-          output.push(
-            appendNotebookLineMeta(
-              item.row.map((value) => formatPresetInputValue(parseNumber(value))).join(' '),
-              {
-                hidden: item.meta.hidden,
-                alias: itemIndex === 0 ? resolvedMatrixAlias : undefined,
-                execute: itemIndex === 0 && matrixExecute,
-                remove: itemIndex === 0 && matrixRemove,
-                durationSec: itemIndex === 0 ? matrixDurationSec : null,
-              }
-            )
-          );
-        });
-        index = rowIndex;
-        continue;
-      }
-
-      matrixRows.forEach((item) => {
-        output.push(
-          appendNotebookLineMeta(
-            item.row.map((value) => formatPresetInputValue(parseNumber(value))).join(' '),
-            item.meta
-          )
-        );
-      });
-      index = rowIndex;
-      continue;
-    }
-
-    output.push(prettifyNoteLine(line));
-    index += 1;
-  }
-
-  return output.join('\n');
-}
-
-function notebookStarterText(locale) {
-  const equationLines = t(locale, 'equationNotePlaceholder')
-    .split('\n')
-    .map((line, index) => appendNotebookAlias(line, `L${index + 1}`))
-    .join('\n');
-  return `${equationLines}\n\n2 1  #M1\n1 2\n\n# ${t(locale, 'notePlaceholder')}`;
-}
-
-function notebookPlaceholderText(locale) {
-  return `${notebookStarterText(locale)}   [Tab]`;
-}
-
-function parseNotebookScript(text) {
-  const lines = String(text ?? '').replace(/\r/g, '').split('\n');
-  const cells = [];
-  const marks = Array.from({ length: Math.max(1, lines.length) }, () => null);
-  let equationCount = 0;
-  let matrixCount = 0;
-  let vectorCount = 0;
-  let calculationCount = 0;
-  let measurementCount = 0;
-  let scriptMode = '2d';
-  let index = 0;
-  const knownNames = new Map();
-  const knownShapes = new Map();
-
-  const flushEquationBlock = (block) => {
-    if (!block.length) return;
-    const visibleBlock = block.filter((item) => !item.hidden);
-    const hasZ = visibleBlock.some((item) => Math.abs(item.parsed.coeffs[2]) > EPSILON || /\bz\b/i.test(item.line));
-    if (hasZ) scriptMode = '3d';
-    const prefix = hasZ ? 'P' : 'L';
-    const textBlock = visibleBlock.map((item) => item.body.trim()).join('\n');
-    const equationLineDurations = block
-      .filter((item) => Number.isFinite(item.durationSec) && item.durationSec > 0)
-      .map((item) => ({
-        line: item.index,
-        durationSec: item.durationSec,
-      }));
-    const equationItems = [];
-      block.forEach((item) => {
-        equationCount += 1;
-        const defaultLabel = `${prefix}${equationCount}`;
-        const equationName = rememberNotebookVariableName(
-          knownNames,
-          normalizeNotebookVariableName(item.alias, defaultLabel)
-        );
-        const color = equationLineColors[(equationCount - 1) % equationLineColors.length];
-        marks[item.index] = {
-          kind: 'equation',
-          label: equationName,
-          color,
-          hidden: item.hidden,
-        };
-        knownShapes.set(notebookVariableKey(equationName), {
-          kind: 'equation',
-          coeffs: item.parsed.coeffs,
-          value: item.parsed.value,
-          dimension: hasZ ? 3 : 2,
-        });
-        if (!item.hidden) {
-          equationItems.push({
-            name: equationName,
-            text: item.body.trim(),
-            coeffs: item.parsed.coeffs,
-            value: item.parsed.value,
-            color,
-            dimension: hasZ ? 3 : 2,
-          });
-        }
-      });
-    cells.push({
-      id: `script-equation-${block[0].index}-${block[block.length - 1].index}`,
-      type: 'equation',
-      text: textBlock,
-      equations: equationItems,
-      hidden: visibleBlock.length === 0,
-      lineDurations: equationLineDurations,
-      lineStart: block[0].index,
-      lineEnd: block[block.length - 1].index,
-    });
-  };
-
-  while (index < lines.length) {
-    const line = lines[index];
-    const lineMeta = splitNotebookLineMeta(line);
-    const trimmed = lineMeta.body.trim();
-    if (!trimmed) {
-      index += 1;
-      continue;
-    }
-
-    const captionLine = parseNotebookCaptionLine(lines[index]);
-    if (captionLine) {
-      marks[index] = {
-        kind: 'caption',
-        label: 'CC',
-        color: 0xf1b434,
-        hidden: captionLine.hidden,
-      };
-      cells.push({
-        id: `script-caption-${index}`,
-        type: 'caption',
-        text: captionLine.text,
-        hidden: captionLine.hidden,
-        remove: captionLine.remove,
-        durationSec: captionLine.durationSec,
-        lineStart: index,
-        lineEnd: index,
-      });
-      index += 1;
-      continue;
-    }
-
-    const measurementLine = parseNotebookMeasurementLine(lines[index], knownNames, knownShapes);
-    if (measurementLine) {
-      measurementCount += 1;
-      const defaultLabel = `${measurementLine.type === 'dot' ? 'dot' : 'det'}${measurementCount}`;
-      const measurementName = rememberNotebookVariableName(
-        knownNames,
-        normalizeNotebookVariableName(measurementLine.alias, defaultLabel)
-      );
-      marks[index] = {
-        kind: 'measurement',
-        label: measurementName,
-        color: measurementLine.type === 'dot' ? MEASURE_DOT_HEX : MEASURE_AREA_HEX,
-        hidden: measurementLine.hidden,
-      };
-      cells.push({
-        id: `script-measure-${index}`,
-        type: 'measurement',
-        measureType: measurementLine.type,
-        name: measurementName,
-        names: measurementLine.names,
-        hidden: measurementLine.hidden,
-        lineStart: index,
-        lineEnd: index,
-      });
-      index += 1;
-      continue;
-    }
-
-    const vectorLine = parseNotebookVectorLine(lines[index]);
-    if (vectorLine) {
-      vectorCount += 1;
-      const vectorName = rememberNotebookVariableName(
-        knownNames,
-        normalizeNotebookVariableName(vectorLine.name, `v${vectorCount}`)
-      );
-      const vectorColor = vectorPalette[(vectorCount - 1) % vectorPalette.length];
-      if (vectorLine.dimension >= 3) scriptMode = '3d';
-      marks[index] = {
-        kind: 'vector',
-        label: vectorName,
-        color: vectorColor,
-        hidden: vectorLine.hidden,
-      };
-      cells.push({
-        id: `script-vector-${index}`,
-        type: 'vector',
-        name: vectorName,
-        values: vectorLine.values,
-        dimension: vectorLine.dimension,
-        color: vectorColor,
-        hidden: vectorLine.hidden,
-        remove: vectorLine.remove,
-        durationSec: vectorLine.durationSec,
-        lineStart: index,
-        lineEnd: index,
-      });
-      knownShapes.set(notebookVariableKey(vectorName), {
-        kind: 'vector',
-        dimension: vectorLine.dimension,
-      });
-      index += 1;
-      continue;
-    }
-
-    const calculationLine = parseNotebookCalculationLine(lines[index]);
-    if (calculationLine) {
-      calculationCount += 1;
-      const leftName = resolveNotebookVariableName(calculationLine.left, knownNames);
-      const rightName = resolveNotebookVariableName(calculationLine.right, knownNames);
-      const leftShape = knownShapes.get(notebookVariableKey(leftName));
-      const rightShape = knownShapes.get(notebookVariableKey(rightName));
-      const isMatrixProduct = leftShape?.kind === 'matrix' && rightShape?.kind === 'matrix';
-      const isVectorProduct =
-        (leftShape?.kind === 'matrix' && rightShape?.kind === 'vector') ||
-        (leftShape?.kind === 'vector' && rightShape?.kind === 'matrix');
-      const isEquationProduct =
-        (leftShape?.kind === 'matrix' && rightShape?.kind === 'equation') ||
-        (leftShape?.kind === 'equation' && rightShape?.kind === 'matrix');
-      const defaultTarget = isMatrixProduct
-        ? rightName
-        : isVectorProduct
-          ? (leftShape?.kind === 'vector' ? leftName : rightName)
-          : isEquationProduct
-            ? (leftShape?.kind === 'equation' ? leftName : rightName)
-            : null;
-      const hasCalculationTarget = Boolean(calculationLine.target || defaultTarget);
-      const calculationName = hasCalculationTarget
-        ? rememberNotebookVariableName(
-            knownNames,
-            normalizeNotebookVariableName(calculationLine.target ?? defaultTarget, `r${calculationCount}`)
-          )
-        : null;
-      const resultRows = isMatrixProduct ? leftShape.rows : null;
-      const resultColumns = isMatrixProduct ? rightShape.columns : null;
-      const resultKind = isMatrixProduct ? 'matrix' : isEquationProduct ? 'equation' : 'vector';
-      const calculationColor = isMatrixProduct
-        ? 0x0e7490
-        : isEquationProduct
-          ? equationLineColors[(equationCount + calculationCount - 1) % equationLineColors.length]
-        : vectorPalette[(vectorCount + calculationCount - 1) % vectorPalette.length];
-      marks[index] = hasCalculationTarget
-        ? {
-            kind: resultKind,
-            label: calculationName,
-            color: calculationColor,
-            hidden: calculationLine.hidden,
-          }
-        : { kind: 'note', label: '', color: calculationColor, hidden: calculationLine.hidden };
-      cells.push({
-        id: `script-calc-${index}`,
-        type: 'calc',
-        resultKind,
-        execute: calculationLine.execute,
-        name: calculationName,
-        left: leftName,
-        right: rightName,
-        rows: resultRows,
-        columns: resultColumns,
-        color: calculationColor,
-        hidden: calculationLine.hidden,
-        durationSec: calculationLine.durationSec,
-        lineStart: index,
-        lineEnd: index,
-      });
-      if (hasCalculationTarget) {
-        knownShapes.set(notebookVariableKey(calculationName), isMatrixProduct
-          ? { kind: 'matrix', rows: resultRows, columns: resultColumns }
-          : isEquationProduct
-            ? {
-                kind: 'equation',
-                coeffs: (leftShape?.kind === 'equation' ? leftShape : rightShape)?.coeffs ?? [0, 0, 0],
-                value: (leftShape?.kind === 'equation' ? leftShape : rightShape)?.value ?? 0,
-                dimension: Math.max(leftShape?.dimension ?? 2, rightShape?.dimension ?? 2),
-              }
-            : { kind: 'vector', dimension: leftShape?.rows ?? rightShape?.dimension ?? 3 }
-        );
-      }
-      index += 1;
-      continue;
-    }
-
-    const referenceLine = parseNotebookReferenceLine(lines[index], knownNames, knownShapes);
-    if (referenceLine) {
-      const refColor = referenceLine.refKind === 'matrix'
-        ? 0x0e7490
-        : referenceLine.refKind === 'equation'
-          ? equationLineColors[equationCount % equationLineColors.length]
-          : vectorPalette[vectorCount % vectorPalette.length];
-      marks[index] = {
-        kind: referenceLine.remove ? 'note' : referenceLine.refKind,
-        label: referenceLine.remove ? '' : referenceLine.name,
-        color: refColor,
-        hidden: referenceLine.hidden,
-      };
-      cells.push({
-        id: `script-ref-${index}`,
-        type: 'ref',
-        name: referenceLine.name,
-        refKind: referenceLine.refKind,
-        execute: true,
-        remove: referenceLine.remove,
-        hidden: referenceLine.hidden,
-        durationSec: referenceLine.durationSec,
-        lineStart: index,
-        lineEnd: index,
-      });
-      index += 1;
-      continue;
-    }
-
-    const equationBlock = [];
-    while (index < lines.length) {
-      const parsed = parsedEquationLine(lines[index]);
-      if (!parsed) break;
-      const { body, alias, hidden, durationSec, remove } = splitNotebookLineMeta(lines[index]);
-      equationBlock.push({ index, line: lines[index], body, alias, hidden, durationSec, remove, parsed });
-      index += 1;
-    }
-    if (equationBlock.length) {
-      flushEquationBlock(equationBlock);
-      continue;
-    }
-
-    const matrixRows = [];
-    const startIndex = index;
-    while (index < lines.length) {
-      const row = parseNotebookNumericRowLine(lines[index]);
-      if (!row) break;
-      const rowMeta = splitNotebookLineMeta(lines[index]);
-      matrixRows.push({
-        index,
-        row,
-        alias: rowMeta.alias,
-        hidden: rowMeta.hidden,
-        execute: rowMeta.execute,
-        remove: rowMeta.remove,
-        durationSec: rowMeta.durationSec,
-      });
-      index += 1;
-    }
-    if (matrixRows.length) {
-      const hasMatrixBlockBreak = index < lines.length && !lines[index].trim();
-      const rows = matrixRows.length;
-      const columns = matrixRows[0]?.row.length ?? 0;
-      if (
-        hasMatrixBlockBreak &&
-        rows >= 2 &&
-        rows <= 3 &&
-        columns >= 1 &&
-        columns <= 3 &&
-        matrixRows.every((item) => item.row.length === columns)
-      ) {
-        matrixCount += 1;
-        const matrixAlias = matrixRows.map((item) => item.alias).find(Boolean);
-        const matrixName = rememberNotebookVariableName(
-          knownNames,
-          normalizeNotebookVariableName(matrixAlias, `M${matrixCount}`)
-        );
-        const matrixHidden = matrixRows.some((item) => item.hidden);
-        const matrixExecute = matrixRows.some((item) => item.execute);
-        const matrixRemove = matrixRows.some((item) => item.remove);
-        const matrixDurationSec = matrixRows.map((item) => item.durationSec).find(Number.isFinite) ?? null;
-        const scriptDimension = dimensionForMode(scriptMode);
-        const shouldEmbedSquare = rows === columns && rows < scriptDimension;
-        const targetRows = shouldEmbedSquare ? scriptDimension : rows;
-        const targetColumns = shouldEmbedSquare ? scriptDimension : columns;
-        const mode = operationModeForShape(targetRows, targetColumns);
-        const values = shouldEmbedSquare
-          ? matrixInputValuesForShape(identity3, targetRows, targetColumns).map(formatPresetInputValue)
-          : Array.from({ length: targetRows * targetColumns }, () => '0');
-        matrixRows.forEach((item, rowIndex) => {
-          item.row.forEach((value, columnIndex) => {
-            values[rowIndex * targetColumns + columnIndex] = formatPresetInputValue(parseNumber(value));
-          });
-        });
-        const matrixText = matrixTextFromShapeValues(values, targetRows, targetColumns);
-        marks[startIndex] = {
-          kind: 'matrix',
-          label: matrixName,
-          color: 0x0e7490,
-          span: matrixRows.length,
-          hidden: matrixHidden,
-        };
-        matrixRows.slice(1).forEach((item) => {
-          marks[item.index] = { kind: 'matrix-row', label: '', color: 0x0e7490, hidden: matrixHidden };
-        });
-        cells.push({
-          id: `script-matrix-${startIndex}-${matrixRows[matrixRows.length - 1].index}`,
-          type: 'matrix',
-          name: matrixName,
-          execute: matrixExecute,
-          mode,
-          rows: targetRows,
-          columns: targetColumns,
-          values,
-          text: matrixText,
-          hidden: matrixHidden,
-          remove: matrixRemove,
-          durationSec: matrixDurationSec,
-          lineStart: startIndex,
-          lineEnd: matrixRows[matrixRows.length - 1].index,
-        });
-        knownShapes.set(notebookVariableKey(matrixName), {
-          kind: 'matrix',
-          rows: targetRows,
-          columns: targetColumns,
-        });
-      }
-      continue;
-    }
-
-    marks[index] = { kind: 'note', label: '', color: 0x8b5cf6, hidden: lineMeta.hidden };
-    index += 1;
-  }
-
-  if (!cells.length) {
-    cells.push({
-      id: 'script-empty',
-      type: 'equation',
-      text: '',
-      lineStart: 0,
-      lineEnd: 0,
-    });
-  }
-
-  return {
-    cells,
-    lineCount: Math.max(1, lines.length),
-    marks,
-    mode: scriptMode,
-  };
-}
-
-function notebookMatrixCellSignature(cell) {
-  if (
-    !cell ||
-    (
-      cell.type !== 'matrix' &&
-      !(cell.type === 'calc' && cell.resultKind === 'matrix') &&
-      !(cell.type === 'ref' && cell.refKind === 'matrix')
-    )
-  ) return '';
-  const values = cell.type === 'calc'
-    ? `${cell.left ?? ''}*${cell.right ?? ''}`
-    : cell.type === 'ref'
-      ? `${cell.name ?? ''}`
-      : Array.isArray(cell.values)
-      ? cell.values.join(',')
-      : String(cell.text ?? '');
-  return [
-    cell.lineStart ?? 0,
-    cell.lineEnd ?? cell.lineStart ?? 0,
-    `${cell.rows ?? ''}x${cell.columns ?? ''}`,
-    cell.execute === false ? 'declare' : 'execute',
-    cell.durationSec ?? '',
-    values,
-  ].join(':');
-}
-
-function notebookMatrixSignatures(cells) {
-  return cells
-    .filter((cell) =>
-      !cell.hidden &&
-      (
-        cell.type === 'matrix' ||
-        (cell.type === 'calc' && cell.resultKind === 'matrix') ||
-        (cell.type === 'ref' && cell.refKind === 'matrix')
-      )
-    )
-    .map(notebookMatrixCellSignature);
-}
-
-function notebookModeForCells(cells, fallback = '2d') {
-  let has2d = false;
-  for (const cell of cells ?? []) {
-    if (!cell || cell.hidden) continue;
-    if (cell.type === 'equation') {
-      if (/\bz\b/i.test(cell.text ?? '')) return '3d';
-      if (String(cell.text ?? '').trim()) has2d = true;
-      continue;
-    }
-    if (cell.type === 'vector') {
-      if ((cell.dimension ?? 0) >= 3) return '3d';
-      if ((cell.dimension ?? 0) >= 2) has2d = true;
-      continue;
-    }
-    if (cell.type === 'matrix') {
-      const mode = cell.mode ?? operationModeForShape(cell.rows ?? 3, cell.columns ?? 3);
-      if (mode === '3d') return '3d';
-      if (mode === '2d') has2d = true;
-      continue;
-    }
-    if (cell.type === 'calc' && cell.resultKind === 'matrix') {
-      const mode = operationModeForShape(cell.rows ?? 3, cell.columns ?? 3);
-      if (mode === '3d') return '3d';
-      if (mode === '2d') has2d = true;
-    }
-  }
-  return has2d ? '2d' : fallback;
-}
-
-function notebookCellSignature(cell) {
-  if (!cell) return '';
-  return [
-    cell.type,
-    cell.lineStart ?? '',
-    cell.lineEnd ?? '',
-    cell.name ?? '',
-    cell.hidden ? 'hidden' : '',
-    cell.execute === false ? 'declare' : 'execute',
-    cell.remove ? 'remove' : '',
-    cell.durationSec ?? '',
-    Array.isArray(cell.lineDurations)
-      ? cell.lineDurations.map((item) => `${item.line ?? ''}=${item.durationSec ?? ''}`).join(',')
-      : '',
-    cell.resultKind ?? '',
-    cell.refKind ?? '',
-    cell.text ?? '',
-    Array.isArray(cell.values) ? cell.values.join(',') : '',
-    cell.left ?? '',
-    cell.right ?? '',
-  ].join(':');
-}
-
-function solveEquationSystem(equations) {
-  const parsedRows = [];
-  const errors = [];
-
-  equations.forEach((equation, index) => {
-    try {
-      const parsed = parseEquation(equation);
-      if (parsed) parsedRows.push({ ...parsed, sourceIndex: index });
-    } catch {
-      errors.push(index + 1);
-    }
-  });
-
-  if (errors.length) return { status: 'invalid', errors };
-  if (!parsedRows.length) return { status: 'empty' };
-
-  const matrix = parsedRows.map((row) => [...row.coeffs, row.value]);
-  const pivotColumns = [];
-  let pivotRow = 0;
-
-  for (let column = 0; column < equationVariables.length && pivotRow < matrix.length; column += 1) {
-    let bestRow = pivotRow;
-    for (let row = pivotRow + 1; row < matrix.length; row += 1) {
-      if (Math.abs(matrix[row][column]) > Math.abs(matrix[bestRow][column])) {
-        bestRow = row;
-      }
-    }
-
-    if (Math.abs(matrix[bestRow][column]) < EPSILON) continue;
-
-    [matrix[pivotRow], matrix[bestRow]] = [matrix[bestRow], matrix[pivotRow]];
-    const pivot = matrix[pivotRow][column];
-    for (let col = column; col <= equationVariables.length; col += 1) {
-      matrix[pivotRow][col] /= pivot;
-    }
-
-    for (let row = 0; row < matrix.length; row += 1) {
-      if (row === pivotRow) continue;
-      const factor = matrix[row][column];
-      if (Math.abs(factor) < EPSILON) continue;
-      for (let col = column; col <= equationVariables.length; col += 1) {
-        matrix[row][col] -= factor * matrix[pivotRow][col];
-      }
-    }
-
-    pivotColumns.push(column);
-    pivotRow += 1;
-  }
-
-  matrix.forEach((row) => {
-    row.forEach((value, index) => {
-      if (Math.abs(value) < EPSILON) row[index] = 0;
-    });
-  });
-
-  const rankA = pivotColumns.length;
-  const rankAugmented = matrix.filter((row) => row.some((value) => Math.abs(value) > EPSILON)).length;
-  const inconsistent = matrix.some((row) =>
-    row.slice(0, equationVariables.length).every((value) => Math.abs(value) < EPSILON) &&
-    Math.abs(row[equationVariables.length]) > EPSILON
-  );
-
-  if (inconsistent) {
-    return { status: 'none', rows: parsedRows, rref: matrix, rankA, rankAugmented };
-  }
-
-  const pivotRows = pivotColumns.map((column, row) => ({ column, row }));
-  const particular = [0, 0, 0];
-  pivotRows.forEach(({ column, row }) => {
-    particular[column] = snapValue(matrix[row][equationVariables.length]);
-  });
-
-  if (rankA === equationVariables.length) {
-    return {
-      status: 'unique',
-      rows: parsedRows,
-      rref: matrix,
-      rankA,
-      rankAugmented,
-      solution: particular,
-      particular,
-      nullspaceBasis: [],
-    };
-  }
-
-  const freeColumns = equationVariables
-    .map((_, index) => index)
-    .filter((column) => !pivotColumns.includes(column));
-  const nullspaceBasis = freeColumns.map((freeColumn) => {
-    const basis = [0, 0, 0];
-    basis[freeColumn] = 1;
-    pivotRows.forEach(({ column, row }) => {
-      basis[column] = snapValue(-matrix[row][freeColumn]);
-    });
-    return basis;
-  });
-
-  return {
-    status: 'infinite',
-    rows: parsedRows,
-    rref: matrix,
-    rankA,
-    rankAugmented,
-    solution: particular,
-    particular,
-    nullspaceBasis,
-  };
-}
-
-function formatSolutionTuple(values) {
-  return `(${values.map((value) => formatNumber(value)).join(', ')})`;
-}
-
-function formatGeneralSolution(solution) {
-  if (!solution || solution.status !== 'infinite') return '';
-  const parameters = ['s', 't', 'u'];
-  const basisTerms = solution.nullspaceBasis.map(
-    (basis, index) => `${parameters[index]}${formatSolutionTuple(basis)}`
-  );
-  return [formatSolutionTuple(solution.particular), ...basisTerms].join(' + ');
-}
-
-function formatLineSolutionEquation(line) {
-  if (!line) return '';
-  return formatEquationFromCoefficients([line.a, line.b, 0], line.value);
-}
-
-function solutionGeometryLabelKey(solution) {
-  const degrees = solution?.nullspaceBasis?.length ?? 0;
-  if (degrees === 1) return 'solutionKindLine';
-  if (degrees >= 2) return 'solutionKindPlane';
-  return null;
-}
-
-function solutionLabelAnchor(solution) {
-  if (!solution || solution.status !== 'infinite' || !solution.nullspaceBasis?.length) return null;
-  if (solution.nullspaceBasis.length === 1) {
-    return closestSolutionCenter(solution.particular, solution.nullspaceBasis).toArray();
-  }
-  return [
-    Number(solution.particular?.[0]) || 0,
-    Number(solution.particular?.[1]) || 0,
-    Number(solution.particular?.[2]) || 0,
-  ];
-}
-
-function parseLineEquation(text, index) {
-  const parsed = parseEquation(text);
-  if (!parsed) return null;
-  const [a, b, z] = parsed.coeffs;
-  if (Math.abs(a) < EPSILON && Math.abs(b) < EPSILON) {
-    return { error: true, index };
-  }
-  return {
-    a,
-    b,
-    z,
-    value: parsed.value,
-    color: equationLineColors[index % equationLineColors.length],
-    index,
-    text,
-  };
-}
-
-function relationBetweenLines(lineA, lineB) {
-  const det = lineA.a * lineB.b - lineA.b * lineB.a;
-  if (Math.abs(det) < EPSILON) {
-    const sameA = lineA.a * lineB.value - lineB.a * lineA.value;
-    const sameB = lineA.b * lineB.value - lineB.b * lineA.value;
-    return {
-      type: Math.abs(sameA) < EPSILON && Math.abs(sameB) < EPSILON ? 'same' : 'parallel',
-    };
-  }
-
-  return {
-    type: 'intersect',
-    point: [
-      (lineA.value * lineB.b - lineA.b * lineB.value) / det,
-      (lineA.a * lineB.value - lineA.value * lineB.a) / det,
-    ],
-  };
-}
-
-function satisfiesLine(line, point) {
-  return Math.abs(line.a * point[0] + line.b * point[1] - line.value) < 0.015;
-}
-
-function lineSegmentForEquation(line, range = 9) {
-  const points = [];
-  const pushPoint = (x, y) => {
-    if (
-      Number.isFinite(x) &&
-      Number.isFinite(y) &&
-      x >= -range - EPSILON &&
-      x <= range + EPSILON &&
-      y >= -range - EPSILON &&
-      y <= range + EPSILON &&
-      !points.some((point) => Math.abs(point[0] - x) < 0.001 && Math.abs(point[1] - y) < 0.001)
-    ) {
-      points.push([x, y]);
-    }
-  };
-
-  if (Math.abs(line.b) > EPSILON) {
-    pushPoint(-range, (line.value - line.a * -range) / line.b);
-    pushPoint(range, (line.value - line.a * range) / line.b);
-  }
-  if (Math.abs(line.a) > EPSILON) {
-    pushPoint((line.value - line.b * -range) / line.a, -range);
-    pushPoint((line.value - line.b * range) / line.a, range);
-  }
-
-  return points.slice(0, 2);
-}
-
-function scalarLineSegmentForEquation(line, range = SCALAR_CONSTRAINT_LINE_RANGE) {
-  const normalLengthSquared = line.a * line.a + line.b * line.b;
-  if (normalLengthSquared < EPSILON) return [];
-  const anchorX = (line.a * line.value) / normalLengthSquared;
-  const anchorY = (line.b * line.value) / normalLengthSquared;
-  const tangentLength = Math.hypot(line.a, line.b);
-  if (tangentLength < EPSILON) return [];
-  const tangentX = -line.b / tangentLength;
-  const tangentY = line.a / tangentLength;
-  return [
-    [anchorX - tangentX * range, anchorY - tangentY * range],
-    [anchorX + tangentX * range, anchorY + tangentY * range],
-  ];
-}
-
-function disposeObject3D(object) {
-  if (!object) return;
-  object.traverse?.((child) => {
-    child.geometry?.dispose?.();
-    if (Array.isArray(child.material)) {
-      child.material.forEach((material) => material?.dispose?.());
-    } else {
-      child.material?.dispose?.();
-    }
-  });
-}
-
-function clearEquationGroup(group) {
-  if (!group) return;
-  [...group.children].forEach((child) => {
-    disposeObject3D(child);
-    group.remove(child);
-  });
-}
-
-function createDotMeasurementVisual() {
-  const group = new THREE.Group();
-  const mainGeometry = new THREE.BufferGeometry();
-  const guideGeometry = new THREE.BufferGeometry();
-  const mainMaterial = new THREE.LineBasicMaterial({
-    color: MEASURE_DOT_HEX,
-    transparent: true,
-    opacity: 0.96,
-    depthTest: false,
-    depthWrite: false,
-  });
-  const guideMaterial = new THREE.LineDashedMaterial({
-    color: MEASURE_DOT_GUIDE_HEX,
-    transparent: true,
-    opacity: 0.32,
-    dashSize: 0.12,
-    gapSize: 0.08,
-    depthTest: false,
-    depthWrite: false,
-  });
-  const pointGeometry = new THREE.SphereGeometry(0.055, 18, 12);
-  const pointMaterial = new THREE.MeshBasicMaterial({
-    color: MEASURE_DOT_HEX,
-    transparent: true,
-    opacity: 1,
-    depthTest: false,
-    depthWrite: false,
-  });
-  const mainLine = new THREE.LineSegments(mainGeometry, mainMaterial);
-  const guideLine = new THREE.LineSegments(guideGeometry, guideMaterial);
-  const point = new THREE.Mesh(pointGeometry, pointMaterial);
-  group.add(mainLine, guideLine, point);
-  return { kind: 'dot', group, mainLine, guideLine, point };
-}
-
-function createVolumeMeasurementVisual() {
-  const group = new THREE.Group();
-  const meshGeometry = new THREE.BufferGeometry();
-  const edgeGeometry = new THREE.BufferGeometry();
-  const meshMaterial = new THREE.MeshBasicMaterial({
-    color: MEASURE_AREA_HEX,
-    transparent: true,
-    opacity: 0.2,
-    side: THREE.DoubleSide,
-    depthWrite: false,
-  });
-  const edgeMaterial = new THREE.LineBasicMaterial({
-    color: MEASURE_AREA_EDGE_HEX,
-    transparent: true,
-    opacity: 0.86,
-    depthTest: false,
-    depthWrite: false,
-  });
-  const mesh = new THREE.Mesh(meshGeometry, meshMaterial);
-  const edges = new THREE.LineSegments(edgeGeometry, edgeMaterial);
-  group.add(mesh, edges);
-  return { kind: 'volume', group, mesh, edges };
-}
-
-function disposeMeasurementVisual(visual) {
-  if (!visual) return;
-  visual.group.parent?.remove(visual.group);
-  disposeObject3D(visual.group);
-}
-
-function getMeasurementVisual(refs, item, kind) {
-  if (!refs.measurementVisuals) refs.measurementVisuals = new Map();
-  let visual = refs.measurementVisuals.get(item.id);
-  if (!visual || visual.kind !== kind) {
-    disposeMeasurementVisual(visual);
-    visual = kind === 'dot' ? createDotMeasurementVisual() : createVolumeMeasurementVisual();
-    refs.measurementGroup.add(visual.group);
-    refs.measurementVisuals.set(item.id, visual);
-  }
-  visual.group.visible = true;
-  return visual;
-}
-
-function parseEquationRows(equations) {
-  const rows = [];
-  const errors = [];
-
-  equations.forEach((equation, index) => {
-    try {
-      const parsed = parseEquation(equation);
-      if (parsed) rows.push({ ...parsed, sourceIndex: index, text: equation });
-    } catch {
-      errors.push(index + 1);
-    }
-  });
-
-  return { rows, errors };
-}
-
-function analyzeLineSystem(equations) {
-  const errors = [];
-  const lines = [];
-
-  equations.forEach((equation, index) => {
-    try {
-      const line = parseLineEquation(equation, index);
-      if (!line) return;
-      if (line.error) errors.push(index + 1);
-      else lines.push(line);
-    } catch {
-      errors.push(index + 1);
-    }
-  });
-
-  if (errors.length) return { status: 'invalid', errors, lines, relations: [] };
-  if (!lines.length) return { status: 'empty', lines, relations: [] };
-  if (lines.length === 1) return { status: 'single', lines, relations: [] };
-
-  const relations = [];
-  let candidate = null;
-  let hasParallelConflict = false;
-
-  for (let i = 0; i < lines.length; i += 1) {
-    for (let j = i + 1; j < lines.length; j += 1) {
-      const relation = relationBetweenLines(lines[i], lines[j]);
-      relations.push({ ...relation, a: i, b: j });
-      if (relation.type === 'intersect' && !candidate) candidate = relation.point;
-      if (relation.type === 'parallel') hasParallelConflict = true;
-    }
-  }
-
-  if (candidate) {
-    const isCommonPoint = lines.every((line) => satisfiesLine(line, candidate));
-    return {
-      status: isCommonPoint ? 'unique' : 'none',
-      lines,
-      relations,
-      point: candidate,
-    };
-  }
-
-  return {
-    status: hasParallelConflict ? 'parallel' : 'same',
-    lines,
-    relations,
-  };
-}
-
-function analyzeEquationGeometry(equations) {
-  const { rows, errors } = parseEquationRows(equations);
-  const base = {
-    mode: '2d',
-    lines: [],
-    planes: [],
-    relations: [],
-    errors,
-  };
-
-  if (errors.length) return { ...base, status: 'invalid' };
-  if (!rows.length) return { ...base, status: 'empty' };
-
-  const hasZ = rows.some((row) => Math.abs(row.coeffs[2]) > EPSILON);
-  if (!hasZ) {
-    return {
-      ...analyzeLineSystem(equations),
-      mode: '2d',
-      planes: [],
-      solution: solveEquationSystem(equations),
-    };
-  }
-
-  const solution = solveEquationSystem(equations);
-  const planes = rows
-    .filter((row) => row.coeffs.some((value) => Math.abs(value) > EPSILON))
-    .map((row) => ({
-      a: row.coeffs[0],
-      b: row.coeffs[1],
-      c: row.coeffs[2],
-      value: row.value,
-      color: equationLineColors[row.sourceIndex % equationLineColors.length],
-      index: row.sourceIndex,
-      text: row.text,
-    }));
-
-  let status = solution.status;
-  if (solution.status === 'unique') status = 'unique3d';
-  if (solution.status === 'infinite') status = planes.length === 1 ? 'single3d' : 'infinite3d';
-  if (solution.status === 'none') status = 'none3d';
-
-  return {
-    ...base,
-    mode: '3d',
-    status,
-    planes,
-    point: solution.status === 'unique' ? solution.solution : null,
-    solution,
-    rankA: solution.rankA,
-    rankAugmented: solution.rankAugmented,
-  };
-}
-
-function statusKeyForLineSystem(status) {
-  if (status === 'single') return 'solutionStatusSingle';
-  if (status === 'unique') return 'solutionStatusUnique';
-  if (status === 'same') return 'solutionStatusSame';
-  if (status === 'parallel') return 'solutionStatusParallel';
-  if (status === 'none') return 'solutionStatusNone';
-  if (status === 'single3d') return 'solutionStatusSingle3d';
-  if (status === 'unique3d') return 'solutionStatusUnique';
-  if (status === 'infinite3d') return 'solutionStatusInfinite3d';
-  if (status === 'none3d') return 'solutionStatusNone';
-  if (status === 'invalid') return 'invalidFormat';
-  return 'waitingInput';
-}
-
-function buildLineSystemInfo(lineSystem) {
-  const variableCount = lineSystem.mode === '3d' ? 3 : 2;
-  const equationCount = lineSystem.mode === '3d' ? lineSystem.planes.length : lineSystem.lines.length;
-  const rankA = lineSystem.solution?.rankA ?? lineSystem.rankA;
-  const rankAugmented = lineSystem.solution?.rankAugmented ?? lineSystem.rankAugmented;
-  const freeCount = typeof rankA === 'number' ? Math.max(0, variableCount - rankA) : null;
-
-  let solutionDimension = null;
-  if (lineSystem.status === 'unique' || lineSystem.status === 'unique3d') solutionDimension = 0;
-  if (lineSystem.status === 'single' || lineSystem.status === 'same') solutionDimension = 1;
-  if (lineSystem.status === 'single3d') solutionDimension = 2;
-  if (lineSystem.status === 'infinite3d') {
-    solutionDimension = lineSystem.solution?.nullspaceBasis?.length ?? null;
-  }
-
-  let kindKey = null;
-  if (solutionDimension === 0) kindKey = 'solutionKindPoint';
-  if (solutionDimension === 1) kindKey = 'solutionKindLine';
-  if (solutionDimension === 2) kindKey = 'solutionKindPlane';
-  if (lineSystem.status === 'none' || lineSystem.status === 'parallel' || lineSystem.status === 'none3d') {
-    kindKey = 'solutionKindEmpty';
-  }
-
-  let noteKey = 'solutionEducationWaiting';
-  if (lineSystem.status === 'invalid') noteKey = 'solutionEducationInvalid';
-  else if (lineSystem.status === 'unique' || lineSystem.status === 'unique3d') noteKey = 'solutionEducationPoint';
-  else if (lineSystem.status === 'single' || lineSystem.status === 'same') noteKey = 'solutionEducationLine';
-  else if (lineSystem.status === 'single3d') noteKey = 'solutionEducationPlane';
-  else if (lineSystem.status === 'infinite3d') {
-    noteKey = solutionDimension === 1 ? 'solutionEducationLine' : 'solutionEducationPlane';
-  } else if (lineSystem.status === 'none' || lineSystem.status === 'parallel' || lineSystem.status === 'none3d') {
-    noteKey = 'solutionEducationNone';
-  }
-
-  let solutionText = '';
-  if (lineSystem.point) {
-    solutionText = formatCoord(lineSystem.point, lineSystem.mode);
-  } else if (lineSystem.mode === '2d' && (lineSystem.status === 'single' || lineSystem.status === 'same')) {
-    solutionText = formatLineSolutionEquation(lineSystem.lines[0]);
-  } else if (lineSystem.status === 'infinite3d') {
-    solutionText = formatGeneralSolution(lineSystem.solution);
-  }
-
-  return {
-    equationCount,
-    freeCount,
-    kindKey,
-    noteKey,
-    rankA,
-    rankAugmented,
-    solutionDimension,
-    solutionText,
-    variableCount,
-  };
-}
-
-function relationText(relation, lines) {
-  const left = `L${lines[relation.a].index + 1}`;
-  const right = `L${lines[relation.b].index + 1}`;
-  if (relation.type === 'same') return `${left} = ${right}`;
-  if (relation.type === 'parallel') return `${left} ∥ ${right}`;
-  return `${left} × ${right} ${formatCoord([relation.point[0], relation.point[1]], '2d')}`;
-}
-
-function createPlaneObjects(plane, size = 6.5, muted = false) {
-  const normal = new THREE.Vector3(plane.a, plane.b, plane.c);
-  const normalLengthSquared = normal.lengthSq();
-  if (normalLengthSquared < EPSILON) return [];
-
-  const anchor = normal.clone().multiplyScalar(plane.value / normalLengthSquared);
-  const helper = Math.abs(normal.z) < 0.9 ? new THREE.Vector3(0, 0, 1) : new THREE.Vector3(0, 1, 0);
-  const tangentA = new THREE.Vector3().crossVectors(normal, helper).normalize();
-  const tangentB = new THREE.Vector3().crossVectors(normal, tangentA).normalize();
-  const corners = [
-    anchor.clone().addScaledVector(tangentA, -size).addScaledVector(tangentB, -size),
-    anchor.clone().addScaledVector(tangentA, size).addScaledVector(tangentB, -size),
-    anchor.clone().addScaledVector(tangentA, size).addScaledVector(tangentB, size),
-    anchor.clone().addScaledVector(tangentA, -size).addScaledVector(tangentB, size),
-  ];
-  const positions = corners.flatMap((point) => [point.x, point.y, point.z]);
-  const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
-  geometry.setIndex([0, 1, 2, 0, 2, 3]);
-  geometry.computeVertexNormals();
-
-  const mesh = new THREE.Mesh(
-    geometry,
-    new THREE.MeshBasicMaterial({
-      color: plane.color,
-      transparent: true,
-      opacity: muted ? 0.07 : 0.18,
-      side: THREE.DoubleSide,
-      depthWrite: false,
-    })
-  );
-  mesh.renderOrder = 30;
-
-  const edgeGeometry = new THREE.BufferGeometry().setFromPoints([
-    corners[0], corners[1],
-    corners[1], corners[2],
-    corners[2], corners[3],
-    corners[3], corners[0],
-  ]);
-  const edges = new THREE.LineSegments(
-    edgeGeometry,
-    new THREE.LineBasicMaterial({
-      color: plane.color,
-      transparent: true,
-      opacity: muted ? 0.42 : 0.88,
-      depthTest: false,
-      depthWrite: false,
-    })
-  );
-  edges.renderOrder = 31;
-
-  return [mesh, edges];
-}
-
-function transformedPointForMatrix(matrix, point) {
-  const [x, y, z] = transformVector3(matrix, [point.x, point.y, point.z]);
-  return new THREE.Vector3(x, y, z);
-}
-
-function createTransformedPlaneObjects(plane, matrix, size = 5.8, muted = false) {
-  const normal = new THREE.Vector3(plane.a, plane.b, plane.c);
-  const normalLengthSquared = normal.lengthSq();
-  if (normalLengthSquared < EPSILON) return [];
-
-  const anchor = normal.clone().multiplyScalar(plane.value / normalLengthSquared);
-  const helper = Math.abs(normal.z) < 0.9 ? new THREE.Vector3(0, 0, 1) : new THREE.Vector3(0, 1, 0);
-  const tangentA = new THREE.Vector3().crossVectors(normal, helper).normalize();
-  const tangentB = new THREE.Vector3().crossVectors(normal, tangentA).normalize();
-  const inputCorners = [
-    anchor.clone().addScaledVector(tangentA, -size).addScaledVector(tangentB, -size),
-    anchor.clone().addScaledVector(tangentA, size).addScaledVector(tangentB, -size),
-    anchor.clone().addScaledVector(tangentA, size).addScaledVector(tangentB, size),
-    anchor.clone().addScaledVector(tangentA, -size).addScaledVector(tangentB, size),
-  ];
-  const corners = inputCorners.map((point) => transformedPointForMatrix(matrix, point));
-  const positions = corners.flatMap((point) => [point.x, point.y, point.z]);
-  const geometry = new THREE.BufferGeometry();
-  geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
-  geometry.setIndex([0, 1, 2, 0, 2, 3]);
-  geometry.computeVertexNormals();
-
-  const mesh = new THREE.Mesh(
-    geometry,
-    new THREE.MeshBasicMaterial({
-      color: plane.color,
-      transparent: true,
-      opacity: muted ? 0.07 : 0.18,
-      side: THREE.DoubleSide,
-      depthWrite: false,
-    })
-  );
-  mesh.renderOrder = 30;
-
-  const edgeGeometry = new THREE.BufferGeometry().setFromPoints([
-    corners[0], corners[1],
-    corners[1], corners[2],
-    corners[2], corners[3],
-    corners[3], corners[0],
-  ]);
-  const edges = new THREE.LineSegments(
-    edgeGeometry,
-    new THREE.LineBasicMaterial({
-      color: plane.color,
-      transparent: true,
-      opacity: muted ? 0.42 : 0.88,
-      depthTest: false,
-      depthWrite: false,
-    })
-  );
-  edges.renderOrder = 31;
-
-  return [mesh, edges];
-}
-
-function createLineObjects(line, range = SCALAR_CONSTRAINT_LINE_RANGE) {
-  const segment = scalarLineSegmentForEquation(line, range);
-  if (segment.length < 2) return [];
-  const start = new THREE.Vector3(segment[0][0], segment[0][1], 0.024);
-  const end = new THREE.Vector3(segment[1][0], segment[1][1], 0.024);
-  const geometry = new THREE.BufferGeometry().setFromPoints([start, end]);
-  const lineMesh = new THREE.Line(
-    geometry,
-    new THREE.LineBasicMaterial({
-      color: line.color,
-      transparent: true,
-      opacity: 0.96,
-      depthTest: false,
-      depthWrite: false,
-    })
-  );
-  lineMesh.renderOrder = 34;
-
-  const glowCurve = new THREE.LineCurve3(start, end);
-  const glow = new THREE.Mesh(
-    new THREE.TubeGeometry(glowCurve, 28, 0.045, 10, false),
-    new THREE.MeshBasicMaterial({
-      color: line.color,
-      transparent: true,
-      opacity: 0.18,
-      depthTest: false,
-      depthWrite: false,
-    })
-  );
-  glow.renderOrder = 33;
-  return [glow, lineMesh];
-}
-
-function createTransformedLineObjects(line, matrix, range = SCALAR_CONSTRAINT_LINE_RANGE) {
-  const segment = scalarLineSegmentForEquation(line, range);
-  if (segment.length < 2) return [];
-
-  const start = transformedPointForMatrix(matrix, new THREE.Vector3(segment[0][0], segment[0][1], 0.024));
-  const end = transformedPointForMatrix(matrix, new THREE.Vector3(segment[1][0], segment[1][1], 0.024));
-
-  if (start.distanceToSquared(end) < EPSILON) {
-    const point = new THREE.Mesh(
-      new THREE.SphereGeometry(0.13, 18, 12),
-      new THREE.MeshBasicMaterial({
-        color: line.color,
-        transparent: true,
-        opacity: 0.92,
-        depthTest: false,
-        depthWrite: false,
-      })
-    );
-    point.position.copy(start);
-    point.renderOrder = 35;
-    return [point];
-  }
-
-  const geometry = new THREE.BufferGeometry().setFromPoints([start, end]);
-  const lineMesh = new THREE.Line(
-    geometry,
-    new THREE.LineBasicMaterial({
-      color: line.color,
-      transparent: true,
-      opacity: 0.96,
-      depthTest: false,
-      depthWrite: false,
-    })
-  );
-  lineMesh.renderOrder = 34;
-
-  const glowCurve = new THREE.LineCurve3(start, end);
-  const glow = new THREE.Mesh(
-    new THREE.TubeGeometry(glowCurve, 28, 0.045, 10, false),
-    new THREE.MeshBasicMaterial({
-      color: line.color,
-      transparent: true,
-      opacity: 0.18,
-      depthTest: false,
-      depthWrite: false,
-    })
-  );
-  glow.renderOrder = 33;
-  return [glow, lineMesh];
-}
-
-function createScalarPointObjects(point, color) {
-  const tickStart = point.clone().add(new THREE.Vector3(0, -0.38, 0.024));
-  const tickEnd = point.clone().add(new THREE.Vector3(0, 0.38, 0.024));
-  const tickGeometry = new THREE.BufferGeometry().setFromPoints([tickStart, tickEnd]);
-  const tick = new THREE.Line(
-    tickGeometry,
-    new THREE.LineBasicMaterial({
-      color,
-      transparent: true,
-      opacity: 0.94,
-      depthTest: false,
-      depthWrite: false,
-    })
-  );
-  tick.renderOrder = 34;
-
-  const pointMesh = new THREE.Mesh(
-    new THREE.SphereGeometry(0.12, 20, 14),
-    new THREE.MeshBasicMaterial({
-      color,
-      transparent: true,
-      opacity: 0.94,
-      depthTest: false,
-      depthWrite: false,
-    })
-  );
-  pointMesh.position.copy(point);
-  pointMesh.renderOrder = 35;
-  return [tick, pointMesh];
-}
-
-function closestSolutionCenter(particular, basisVectors) {
-  const anchor = new THREE.Vector3(...particular);
-  const basis = basisVectors
-    .map((values) => new THREE.Vector3(...values))
-    .filter((vector) => vector.lengthSq() > EPSILON);
-
-  if (basis.length === 1) {
-    const direction = basis[0].clone().normalize();
-    return anchor.addScaledVector(direction, -anchor.dot(direction));
-  }
-
-  if (basis.length >= 2) {
-    const u = basis[0];
-    const v = basis[1];
-    const uu = u.dot(u);
-    const uv = u.dot(v);
-    const vv = v.dot(v);
-    const det = uu * vv - uv * uv;
-
-    if (Math.abs(det) > EPSILON) {
-      const bp = -u.dot(anchor);
-      const cp = -v.dot(anchor);
-      const s = (bp * vv - cp * uv) / det;
-      const t = (uu * cp - uv * bp) / det;
-      return anchor.addScaledVector(u, s).addScaledVector(v, t);
-    }
-  }
-
-  return anchor;
-}
-
-function createSolutionHighlightObjects(solution, color = 0xf1b434, size = 5.8) {
-  if (!solution || solution.status !== 'infinite' || !solution.nullspaceBasis?.length) return [];
-  if (solution.nullspaceBasis.length !== 1) return [];
-
-  const center = closestSolutionCenter(solution.particular, solution.nullspaceBasis);
-  const objects = [];
-
-  solution.nullspaceBasis.slice(0, 2).forEach((basis, index) => {
-    const direction = new THREE.Vector3(...basis);
-    if (direction.lengthSq() < EPSILON) return;
-    direction.normalize();
-    const start = center.clone().addScaledVector(direction, -size);
-    const end = center.clone().addScaledVector(direction, size);
-    const curve = new THREE.LineCurve3(start, end);
-
-    const glow = new THREE.Mesh(
-      new THREE.TubeGeometry(curve, 24, index === 0 ? 0.095 : 0.07, 12, false),
-      new THREE.MeshBasicMaterial({
-        color,
-        transparent: true,
-        opacity: index === 0 ? 0.22 : 0.13,
-        depthTest: false,
-        depthWrite: false,
-      })
-    );
-    glow.renderOrder = 36;
-
-    const core = new THREE.Mesh(
-      new THREE.TubeGeometry(curve, 24, index === 0 ? 0.034 : 0.026, 10, false),
-      new THREE.MeshBasicMaterial({
-        color: index === 0 ? color : 0xffffff,
-        transparent: true,
-        opacity: index === 0 ? 0.92 : 0.62,
-        depthTest: false,
-        depthWrite: false,
-      })
-    );
-    core.renderOrder = 37;
-
-    objects.push(glow, core);
-  });
-
-  const centerDot = new THREE.Mesh(
-    new THREE.SphereGeometry(0.12, 20, 14),
-    new THREE.MeshBasicMaterial({
-      color,
-      transparent: true,
-      opacity: 0.98,
-      depthTest: false,
-      depthWrite: false,
-    })
-  );
-  centerDot.position.copy(center);
-  centerDot.renderOrder = 38;
-  objects.push(centerDot);
-
-  return objects;
-}
-
-function MatrixMini({ matrix, mode = '3d', className = '' }) {
-  const values = matrixValuesForMode(matrix, mode);
-  const columns = mode === '3d' ? 3 : mode === '2d' ? 2 : 1;
-
-  return (
-    <span className={`matrix-mini ${className}`} style={{ '--mini-columns': columns }}>
-      {values.map((value, index) => (
-        <span key={index}>{formatMatrixNumber(value)}</span>
-      ))}
-    </span>
-  );
-}
-
-function matrixToClipboardText(matrix, mode = '3d') {
-  const values = matrixValuesForMode(matrix, mode);
-  const columns = mode === '3d' ? 3 : mode === '2d' ? 2 : 1;
-  const rows = [];
-  for (let i = 0; i < values.length; i += columns) {
-    rows.push(values.slice(i, i + columns).map((value) => formatMatrixNumber(value)).join(' '));
-  }
-  return rows.join('\n');
-}
-
-async function copyMatrixToClipboard(matrix, mode = '3d', label = t('ko', 'matrix'), locale = 'ko') {
-  const text = matrixToClipboardText(matrix, mode);
-  if (typeof window !== 'undefined') {
-    window.__linearAlgebraMatrixClipboard = text;
-  }
-
-  try {
-    await navigator.clipboard.writeText(text);
-    toast.success(t(locale, 'copied'));
-    return;
-  } catch {
-    // Fall through to the legacy copy path for restricted browser contexts.
-  }
-
-  const textarea = document.createElement('textarea');
-  textarea.value = text;
-  textarea.setAttribute('readonly', '');
-  textarea.style.position = 'fixed';
-  textarea.style.left = '-9999px';
-  document.body.appendChild(textarea);
-    textarea.select();
-  try {
-    const copied = document.execCommand('copy');
-    if (!copied) throw new Error('copy failed');
-    toast.success(t(locale, 'copied'));
-  } finally {
-    textarea.remove();
-  }
-}
-
-function CopyableMatrix({ matrix, mode = '3d', className = '', label = t('ko', 'matrix'), locale = 'ko' }) {
-  return (
-    <span className="copyable-matrix">
-      <MatrixMini matrix={matrix} mode={mode} className={className} />
-      <button
-        aria-label={t(locale, 'copyMatrix', { label })}
-        className="detail-copy-button"
-        onClick={(event) => {
-          event.preventDefault();
-          event.stopPropagation();
-          copyMatrixToClipboard(matrix, mode, label, locale).catch(() => {
-            toast.error(t(locale, 'copyFailed'));
-          });
-        }}
-        title={t(locale, 'copyMatrix', { label })}
-        type="button"
-      >
-        <Copy size={11} />
-      </button>
-    </span>
-  );
-}
-
-function MatrixInput({ values, columns, accent, locale = 'ko', onChange, onEnter }) {
-  return (
-    <div className="matrix-wrap" style={{ '--matrix-columns': columns }}>
-      <div className="matrix-bracket left" />
-      <div className="matrix-grid">
-        {values.map((value, index) => (
-          <input
-            aria-label={t(locale, 'matrixValueLabel', { index: index + 1 })}
-            className={`matrix-cell ${accent}`}
-            key={index}
-            inputMode="text"
-            value={value}
-            onChange={(event) => {
-              const next = [...values];
-              next[index] = event.target.value.replace(/^0+(?=\d)/, '');
-              onChange(next);
-            }}
-            onKeyDown={(event) => {
-              if (event.key !== 'Enter') return;
-              event.preventDefault();
-              onEnter?.();
-            }}
-          />
-        ))}
-      </div>
-      <div className="matrix-bracket right" />
-    </div>
-  );
-}
-
-function HistoryDetail({ entry, index, isActive, locale = 'ko' }) {
-  const previousMatrix = entry.previousMatrix ?? entry.matrix;
-  const stateMode = entry.stateMode ?? modeForMatrix(entry.matrix);
-  const previousStateMode = entry.previousStateMode ?? modeForMatrix(previousMatrix);
-  const det = determinantForStep(entry.matrix, stateMode);
-  const rank = rankForStep(entry.matrix, stateMode);
-  const previousDet = determinantForStep(previousMatrix, previousStateMode);
-  const previousRank = rankForStep(previousMatrix, previousStateMode);
-  const operationMode = entry.operationMode ?? '3d';
-  const operationMatrix = entry.operationMatrix ?? entry.matrix;
-  const isDimensionDrop = entry.isDimensionDrop ?? false;
-  const stepInverse = isDimensionDrop ? null : inverseForStep(operationMatrix, operationMode);
-
-  return (
-    <div className={`history-detail ${isActive ? 'current' : 'preview'}`}>
-      <div className="history-detail-head">
-        <span className="history-detail-title">
-          <strong>{entry.name}</strong>
-          <small>{t(locale, 'stepLabel', { index })}</small>
-        </span>
-        <em>{isActive ? t(locale, 'current') : t(locale, 'preview')}</em>
-      </div>
-      <div className="history-metrics-row">
-        <div className="history-detail-grid">
-          <span>
-            {t(locale, 'detLabel')}
-            <strong>{formatNumber(previousDet)} → {formatNumber(det)}</strong>
-          </span>
-          <span>
-            {t(locale, 'rankLabel')}
-            <strong>{previousRank} → {rank}</strong>
-          </span>
-        </div>
-        <div className={`inverse-panel mode-${operationMode} ${stepInverse ? '' : 'singular'}`}>
-          <span>{t(locale, 'inverse')}</span>
-          {stepInverse ? (
-            <CopyableMatrix matrix={stepInverse} mode={operationMode} className="large inverse" label={t(locale, 'inverse')} locale={locale} />
-          ) : (
-            <strong>{t(locale, 'none')}</strong>
-          )}
-        </div>
-      </div>
-      <div className="history-step-flow">
-        <div className="history-step-title">
-          <span>{t(locale, 'matrix')}</span>
-        </div>
-        <CopyableMatrix matrix={previousMatrix} mode={previousStateMode} className="large" label={t(locale, 'previousMatrix')} locale={locale} />
-        <span className="matrix-arrow">→</span>
-        <CopyableMatrix matrix={entry.matrix} mode={stateMode} className="large" label={t(locale, 'resultMatrix')} locale={locale} />
-      </div>
-    </div>
-  );
-}
-
-function AdSlot({ placement, locale }) {
-  const slotId = placement === 'top' ? monetizationConfig.topAdSlot : monetizationConfig.bottomAdSlot;
-  const hasAdClient = !!monetizationConfig.adClient;
-  const hasWebAd = hasAdClient && !!slotId;
-  const label = placement === 'top' ? t(locale, 'adTop') : t(locale, 'adBottom');
-
-  useEffect(() => {
-    if (!hasAdClient || typeof document === 'undefined') return;
-    const src = `https://pagead2.googlesyndication.com/pagead/js/adsbygoogle.js?client=${encodeURIComponent(monetizationConfig.adClient)}`;
-    if (!document.querySelector(`script[src="${src}"]`)) {
-      const script = document.createElement('script');
-      script.async = true;
-      script.crossOrigin = 'anonymous';
-      script.src = src;
-      document.head.appendChild(script);
-    }
-  }, [hasAdClient]);
-
-  useEffect(() => {
-    if (!hasWebAd || typeof window === 'undefined') return;
-    window.setTimeout(() => {
-      try {
-        window.adsbygoogle = window.adsbygoogle || [];
-        window.adsbygoogle.push({});
-      } catch {
-        // Ad blockers or local previews can block the ad script.
-      }
-    }, 120);
-  }, [hasWebAd, slotId]);
-
-  return (
-    <aside
-      className={`ad-slot ad-${placement} ${hasWebAd ? 'configured' : 'placeholder'}`}
-      data-admob-app-id={monetizationConfig.admobAppId}
-      data-ad-provider={monetizationConfig.adProvider}
-    >
-      {hasWebAd ? (
-        <ins
-          className="adsbygoogle"
-          data-ad-client={monetizationConfig.adClient}
-          data-ad-format="auto"
-          data-ad-slot={slotId}
-          data-full-width-responsive="true"
-          style={{ display: 'block' }}
-        />
-      ) : (
-        <>
-          <span>{label}</span>
-          <strong>{t(locale, 'adPlaceholder')}</strong>
-        </>
-      )}
-    </aside>
-  );
-}
-
-function AdBlockGate({ locale }) {
-  const [isBlocked, setIsBlocked] = useState(false);
-
-  useEffect(() => {
-    if (typeof document === 'undefined') return undefined;
-
-    const bait = document.createElement('div');
-    bait.className = 'pub_300x250 pub_300x250m ad ads ad-banner ad-container ad-wrapper ad-unit adsbox adsbygoogle banner-ads text-ad textads';
-    bait.setAttribute('aria-hidden', 'true');
-    bait.style.cssText = [
-      'position:absolute !important',
-      'left:-10000px !important',
-      'top:-10000px !important',
-      'width:1px !important',
-      'height:1px !important',
-      'min-width:1px !important',
-      'min-height:1px !important',
-      'pointer-events:none !important',
-    ].join(';');
-    document.body.appendChild(bait);
-
-    const check = () => {
-      const style = window.getComputedStyle(bait);
-      const rect = bait.getBoundingClientRect();
-      const blocked =
-        !document.body.contains(bait) ||
-        style.display === 'none' ||
-        style.visibility === 'hidden' ||
-        Number(style.opacity) === 0 ||
-        rect.width === 0 ||
-        rect.height === 0 ||
-        bait.offsetHeight === 0 ||
-        bait.clientHeight === 0;
-      if (blocked) setIsBlocked(true);
-    };
-
-    const timers = [120, 650, 1400].map((delay) => window.setTimeout(check, delay));
-    check();
-
-    return () => {
-      timers.forEach((timer) => window.clearTimeout(timer));
-      bait.remove();
-    };
-  }, []);
-
-  if (!isBlocked) return null;
-
-  return (
-    <div className="access-wall" role="dialog" aria-modal="true" aria-labelledby="access-wall-title">
-      <div className="access-wall-panel">
-        <span className="access-wall-icon">
-          <Lock size={24} />
-        </span>
-        <h2 id="access-wall-title">{t(locale, 'adBlockTitle')}</h2>
-        <p>{t(locale, 'adBlockMessage')}</p>
-        <button type="button" onClick={() => window.location.reload()}>
-          <RotateCcw size={16} />
-          <span>{t(locale, 'adBlockReload')}</span>
-        </button>
-      </div>
-    </div>
-  );
-}
+import {
+  detectLocale,
+  localeMessages,
+  localeOrderWithPreferredFirst,
+  normalizeLocale,
+  presetLocaleNames,
+  t,
+} from './app/localization.js';
+import {
+  isFlowHomePathname,
+  localeFromPathname,
+  localizedHomeUrl,
+} from './app/seoRoutes.js';
+import {
+  clampNotebookCaptionPosition,
+  NOTEBOOK_CAPTION_EDGE_GAP,
+  sceneVerticalFovForViewport,
+  startControlPanelResize,
+  suggestedNotebookTitle,
+  useMediaQuery,
+  useMobileKeyboardOpen,
+} from './app/layoutRuntime.js';
+import FlowMathLanding from './components/FlowMathLanding.jsx';
+import FlowAuthDialog from './auth/FlowAuthDialog.jsx';
+import { promptGoogleOneTap } from './auth/googleOneTap.js';
+import {
+  inverseForStep,
+  matrixValuesForMode,
+  modeForMatrix,
+  rankForStep,
+  viewKeyForMatrix,
+} from './matrix/matrixAnalysis.js';
+import { copyTextToClipboard } from './shared/clipboard.js';
+import { formatMatrixNumber, formatNumber } from './shared/numberFormat.js';
+import {
+  buildAnimationViewerUrl,
+  patchCameraStateInUrl,
+  readAnimationViewerStateFromLocation,
+  readShareStateFromLocation,
+  writeFlowHomeToHistory,
+  writeLabEntryToHistory,
+  writeShareStateToUrl,
+} from './urlState.js';
+import {
+  isDegenerateArea,
+  setGeometryPositions,
+  updateAreaGeometry,
+  updateLengthGeometry,
+  updateVolumeGeometry,
+} from './notebook/measurementEngine.js';
+import {
+  notebookMatrixSliceText,
+  notebookMatrixSliceValues,
+  parseNotebookMatrixSliceExpression,
+} from './notebook/matrixSlice.js';
+import {
+  NOTEBOOK_DEFAULT_DURATIONS,
+  batchNotebookSceneSetupCells,
+  buildNotebookPlaybackSegments,
+  notebookActiveLineIndexForCursor,
+  notebookCursorForSegmentProgress,
+  notebookCursorForLineReveal,
+  notebookCursorForLineStart,
+  notebookDurationSec,
+  notebookOpeningSceneState,
+  notebookPlaybackSegments,
+  notebookPlaybackStops,
+  notebookPlaybackLineCount,
+  notebookReviewSteps,
+  notebookSegmentProgress,
+} from './notebook/playbackEngine.js';
+import { buildVisualLinearAlgebraCourse } from './notebook/visualCourse.js';
+import { buildNotebookExamplePresets } from './notebook/examplePresets.js';
+import { buildNotebookAiPromptDocument } from './notebook/prompt/buildPrompt.js';
+import {
+  analyzeElementaryRowProduct,
+  multiplyNotebookMatrixData,
+} from './notebook/rowOperationEngine.js';
+import {
+  notebookVectorExecutionState,
+  splitNotebookLineMeta,
+} from './notebook/syntaxMetadata.js';
+import {
+  NOTEBOOK_BASIS_MEASUREMENT_TARGETS,
+  NOTEBOOK_FIELD_MODE_ALIASES as notebookFieldModeAliases,
+  NOTEBOOK_SCENE_DEFAULTS,
+  NOTEBOOK_SCENE_TOGGLE_ALIASES as notebookSceneToggleAliases,
+} from './notebook/languageCore.js';
+import NotebookEditorSurface from './notebook/editor/NotebookEditorSurface.jsx';
+import NotebookAuthoringToolbar, {
+  NotebookSpeedControl,
+} from './notebook/editor/NotebookAuthoringToolbar.jsx';
+import NotebookResourceShelf from './notebook/editor/NotebookResourceShelf.jsx';
+import NotebookMatrixCards from './notebook/board/NotebookMatrixCards.jsx';
+import {
+  notebookBoardAnnotationText,
+  parseNotebookBoardAnnotationExpression,
+} from './notebook/board/boardAnnotation.js';
+import NotebookSceneDock from './notebook/playback/NotebookSceneDock.jsx';
+import { buildNotebookOperationPresentation } from './notebook/operationPresentation.js';
+import {
+  createNotebookLibraryId,
+  readNotebookLibrary,
+  writeNotebookLibrary,
+} from './notebook/notebookLibrary.js';
+import { AdBlockGate, AdSlot } from './components/AdChrome.jsx';
+import { MatrixInput, MatrixMini } from './components/MatrixWidgets.jsx';
+import TransformHistoryDetail from './components/TransformHistoryDetail.jsx';
+
+import {
+  ANIMATION_MS,
+  CAMERA_MOVE_MS,
+  UI_SYNC_MS,
+  NOTEBOOK_UI_SYNC_MS,
+  CONTROL_PANEL_DEFAULT_WIDTH,
+  CONTROL_PANEL_MIN_WIDTH,
+  CONTROL_PANEL_MAX_WIDTH,
+  CONTROL_PANEL_MIN_SCENE_WIDTH,
+  CONTROL_PANEL_STORAGE_KEY,
+  NOTEBOOK_EDITOR_DEFAULT_HEIGHT,
+  NOTEBOOK_EDITOR_MIN_HEIGHT,
+  NOTEBOOK_EDITOR_MAX_HEIGHT,
+  NOTEBOOK_COMPOSER_FIXED_HEIGHT,
+  NOTEBOOK_EDITOR_HEIGHT_STORAGE_KEY,
+  NOTEBOOK_PROGRESS_HANDLE_CENTER_INSET,
+  VECTOR_SPAWN_MS,
+  SOLUTION_REVEAL_MS,
+  NOTEBOOK_FOCUS_SETTLE_MS,
+  NOTEBOOK_AUTHORED_HARD_FOCUS_COMPARE_MS,
+  NOTEBOOK_HARD_FOCUS_BLEND_IN_TAU_MS,
+  NOTEBOOK_HARD_FOCUS_BLEND_OUT_TAU_MS,
+  NOTEBOOK_CAPTION_HARD_FOCUS_BLEND_OUT_TAU_MS,
+  SNAP_DISTANCE,
+  DRAG_SNAP_DISTANCE,
+  AXIS_LOCK_RATIO_3D,
+  PLANE_LOCK_RATIO_3D,
+  AXIS_LOCK_MAX_3D,
+  PLANE_LOCK_MAX_3D,
+  SHIFT_AXIS_LOCK_PX,
+  MEASURE_DOT_HEX,
+  MEASURE_DOT_GUIDE_HEX,
+  MEASURE_SUM_HEX,
+  MEASURE_SUM_GUIDE_HEX,
+  MEASURE_LENGTH_HEX,
+  MEASURE_AREA_HEX,
+  MEASURE_AREA_EDGE_HEX,
+  MEASURE_VOLUME_HEX,
+  MEASURE_VOLUME_EDGE_HEX,
+  NOTEBOOK_MATRIX_PALETTE,
+  NOTEBOOK_MATRIX_HEX,
+  NOTEBOOK_BASIS_TOKEN_STYLES,
+  NOTEBOOK_VARIABLE_MARK_KINDS,
+  NOTEBOOK_MIN_VISIBLE_LINES,
+  NOTEBOOK_EDITOR_RUNTIME_DEBOUNCE_MS,
+  NOTEBOOK_NORMAL_SPEED,
+  NOTEBOOK_ZOOM_MIN,
+  NOTEBOOK_ZOOM_MAX,
+  CAMERA_FOV_DEG,
+  NOTEBOOK_PROMPT_SAFE_FRAME_RATIO,
+  LABEL_OVERLAP_ATTEMPTS,
+  LABEL_OVERLAP_STEP_PX,
+  DEFAULT_NOTEBOOK_SPEED,
+  SCALAR_CONSTRAINT_LINE_RANGE,
+  DEFAULT_RELATIVE_GRID_STRENGTH,
+  TRANSFORM_WORKSPACE_ENABLED,
+  sameNotebookBoardProgressState,
+  monetizationConfig,
+  supportEmail,
+  configuredFlowMathApiBaseUrl,
+  flowMathApiBaseUrl,
+  seoBaseUrl,
+  seoKeywordList,
+  seoKeywords,
+  CAMERA_HOME_POSITION,
+  CAMERA_HOME_TARGET,
+  CAMERA_AUTO_FRAME_MARGIN,
+  CAMERA_AUTO_MIN_RADIUS,
+  CAMERA_AUTO_MAX_DISTANCE,
+  EQUATION_PLANE_FRAME_SIZE,
+  EQUATION_SOLUTION_FRAME_SIZE,
+  CAMERA_VECTOR_COUNTER_MARGIN,
+  CAMERA_FRAME_PADDING_MIN,
+  CAMERA_FRAME_PADDING_RATIO,
+  viewPresets,
+  viewDirectionForKey,
+  cameraStateForView,
+  notebookCameraDistanceForZoom,
+  notebookCameraPromptMetrics,
+  cameraDistanceForFrame,
+  finiteFramePoint,
+  planeFramePoints,
+  solutionFramePoints,
+  transformedFramePoint,
+  frameFromPoints,
+  systemSceneCameraFrame,
+  arrayOfStrings,
+  arrayOfNumbers,
+  cameraArray,
+  normalizeCameraState,
+  cameraVectorToShareArray,
+  cameraShareStateFromRefs,
+  cameraStatesAlmostEqual,
+  readSharedStateFromUrl,
+  shouldShowFlowHome,
+  googleLoginUrl,
+  authApiUrl,
+  isLoopbackHostname,
+  isPostHogReady,
+  captureAuthStarted,
+  captureAuthCompleted,
+  notebookInsertionLineIndexForCursor,
+  upsertMeta,
+  applySeo,
+  normalizeControlLocks,
+  configureControlsForView,
+  labelRectOverlaps,
+  estimatedLabelRect,
+  labelRectFitsContainer,
+  measurementPlacementPoints,
+  projectedScreenBounds,
+  setSceneLabelTransform,
+  resolveSceneLabelOverlaps,
+  matrixPresetGroups,
+  createGridGeometry,
+  createPlaneGridGeometry,
+  effectiveVolumeTargetCount,
+  volumeMeasureKind,
+  volumeMeasureValue,
+  setAxisLabelText,
+  easeInOut,
+  clamp01,
+  normalizeRelativeGridStrength,
+  normalizeNotebookSpeed,
+  getNotebookPlaybackRate,
+  formatNotebookSpeedLabel,
+  maxControlPanelWidth,
+  normalizeControlPanelWidth,
+  readControlPanelWidth,
+  maxNotebookEditorHeight,
+  normalizeNotebookEditorHeight,
+  readNotebookEditorHeight,
+  easeOutCubic,
+  interpolateNumberValue,
+  interpolateValueStrings,
+  interpolateEquationEntry,
+  setMaterialOpacity,
+  setObjectRevealOpacity,
+  scaleObjectOpacity,
+  VECTOR_ARROW_HEAD_LENGTH,
+  VECTOR_ARROW_HEAD_WIDTH,
+  setArrowVector,
+  setArrowVectorAtProgress,
+  createVectorFocusHaloMaterial,
+  setVectorFocusHalo,
+  createAxisLine,
+  setAxisLineVector,
+  createSceneArrow,
+  createVectorVisual,
+  disposeVectorVisual,
+  toMatrix4,
+  shortNumber,
+  formatCoord,
+  formatCompactCoord,
+  coordLabelText,
+  scalarLockHighlightIndices,
+  dotValues,
+  vectorLength,
+  dotRelationText,
+  hasScalarText,
+  cleanScalarText,
+  formatInputValue,
+  isFiniteVector3,
+  formatPresetInputValue,
+  formatVectorInputValue,
+  snapValue,
+  snapValuesFor3D,
+  constrainVectorForMode,
+  constrainInputValuesForMode,
+  solveVectorInputForWorld,
+  scalarConstraintResidual,
+  isScalarConstraintSolution,
+  solveScalarConstraintPoint,
+  dimensionForMode,
+  modeForDimension,
+  operationMatrixFromPreset,
+  identityMatrixForMode,
+  matrixInputValuesForShape,
+  patchMatrixInputShape,
+  operationMatrixFromInputValues,
+  operationModeForShape,
+  identityInputValuesForMode,
+  matrixTextFromValues,
+  matrixTextFromShapeValues,
+  appendNotebookAlias,
+  appendNotebookLineMeta,
+  NOTEBOOK_IDENTIFIER_PATTERN,
+  NOTEBOOK_NUMBER_TOKEN_PATTERN,
+  isNotebookNumberToken,
+  parseNotebookVectorLine,
+  parseNotebookPointLine,
+  parseNotebookMatrixSliceLine,
+  normalizeNotebookVariableName,
+  notebookVariableKey,
+  resolveNotebookVariableName,
+  rememberNotebookVariableName,
+  notebookVectorIdForName,
+  measurementStateKey,
+  parseNotebookMeasurementLine,
+  parseNotebookCaptionLine,
+  parseNotebookPauseLine,
+  parseNotebookCheckpointLine,
+  parseNotebookInspectLine,
+  parseNotebookFocusLine,
+  notebookFocusText,
+  parseNotebookBoardAnnotationLine,
+  parseNotebookSolutionLine,
+  parseNotebookToggleValue,
+  parseNotebookFieldMode,
+  parseNotebookSceneCommandLine,
+  notebookSceneCommandText,
+  NOTEBOOK_SCENE_PRESET_COMMANDS,
+  createNotebookScenePresetRegistry,
+  parseNotebookScenePresetDefinitionLine,
+  notebookScenePresetDefinitionText,
+  parseNotebookScenePresetUseLine,
+  NOTEBOOK_SCALAR_PATTERN,
+  parseNotebookLinearCombinationTermAtStart,
+  parseNotebookLinearCombinationExpression,
+  formatNotebookLinearCombination,
+  parseNotebookCalculationLine,
+  isSupportedNotebookCalculation,
+  multiplyNotebookMatrixVector,
+  notebookMatrixShape,
+  multiplyNotebookMatrices,
+  formatEquationFromCoefficients,
+  transformNotebookEquation,
+  parseNotebookReferenceLine,
+  parseNotebookNumericRowLine,
+  notebookMatrixRowsFromText,
+  notebookMatrixModeFromText,
+  matrixValuesFromNotebookText,
+  createNotebookEquationCell,
+  createNotebookMatrixCell,
+  createNotebookNoteCell,
+  multiplyMatrix2,
+  operationBetweenMatrices,
+  matricesAlmostEqual,
+  dragHistoryName,
+  vectorIdFromDragKey,
+  scalarIdFromDragKey,
+  equationVariables,
+  equationLineColors,
+  vectorPalette,
+  equationExamples,
+  colorToHex,
+  renderNotebookTaggedText,
+  formatNotebookCaptionMathText,
+  equationSceneLabelName,
+  notebookEquationEntryText,
+  equationSceneLabelKey,
+  equationRevealKey,
+  equationAnchorPoint,
+  equationSceneLabelText,
+  createVectorState,
+  parseExpression,
+  parseEquation,
+  formatEquationCoefficient,
+  prettifyEquationLine,
+  prettifyEquationNoteText,
+  parsedEquationLine,
+  prettifyNotebookScriptText,
+  parseNotebookScript,
+  notebookMatrixCellSignature,
+  notebookMatrixSignatures,
+  notebookModeForCells,
+  notebookCellSignature,
+  solveEquationSystem,
+  solutionDisplayDimension,
+  solutionValuesForMode,
+  formatSolutionTuple,
+  solutionActiveNullspaceBasis,
+  solutionGeometryDegrees,
+  formatGeneralSolution,
+  formatLineSolutionEquation,
+  solutionGeometryLabelKey,
+  formatSceneSolutionGeometryLabel,
+  solutionLabelAnchor,
+  parseLineEquation,
+  relationBetweenLines,
+  satisfiesLine,
+  lineSegmentForEquation,
+  scalarLineSegmentForEquation,
+  disposeObject3D,
+  clearEquationGroup,
+  createDotMeasurementVisual,
+  createSumGuideLine,
+  createSumMeasurementVisual,
+  createVolumeMeasurementVisual,
+  disposeMeasurementVisual,
+  getMeasurementVisual,
+  parseEquationRows,
+  analyzeLineSystem,
+  analyzeEquationGeometry,
+  statusKeyForLineSystem,
+  modeForSolutionDimension,
+  outputModeForSystemMode,
+  sourceSolutionDimensionForLineSystem,
+  displaySolutionDimensionForLineSystem,
+  statusKeyForLineSystemDisplay,
+  buildLineSystemInfo,
+  relationText,
+  createPlaneObjects,
+  transformedPointForMatrix,
+  createTransformedPlaneObjects,
+  createLineObjects,
+  createTransformedLineObjects,
+  createScalarPointObjects,
+  closestSolutionCenter,
+  createSolutionHighlightObjects,
+  createSolutionTraceVisual,
+  solutionTraceStartPoint,
+  solutionTraceHasNoCommonPoint,
+  solutionTraceReferencePoint,
+  solutionTraceItems,
+  solutionTraceAnchor,
+  solutionTraceStartsNearCaption,
+  SOLUTION_TRACE_TRAVEL_END,
+  SOLUTION_TRACE_FADE_END,
+  SOLUTION_TRACE_HIDE_AT,
+  updateSolutionTraceVisual,
+} from './AppRuntime.jsx';
+import {
+  notebookStarterPreviewText,
+  notebookStarterText,
+} from './notebook/editor/notebookStarter.js';
 
 export default function App() {
+  const initialAnimationViewerRef = useRef(null);
+  if (initialAnimationViewerRef.current === null) {
+    initialAnimationViewerRef.current = readAnimationViewerStateFromLocation() ?? false;
+  }
+  const initialAnimationViewer = initialAnimationViewerRef.current || null;
+  const isAnimationViewer = !!initialAnimationViewer;
+  const isAnimationPreview = initialAnimationViewer?.preview === true;
   const initialShareRef = useRef(null);
   if (initialShareRef.current === null) {
     initialShareRef.current = readSharedStateFromUrl() ?? false;
   }
   const initialShare = initialShareRef.current || {};
+  const initialWorkspaceMode =
+    TRANSFORM_WORKSPACE_ENABLED && !isAnimationViewer && initialShare.workspaceMode === 'transform'
+      ? 'transform'
+      : 'system';
   const urlLocale =
     typeof window === 'undefined'
       ? null
       : new URLSearchParams(window.location.search).get('lang');
-  const initialLocale = urlLocale ? normalizeLocale(urlLocale) : initialShare.locale ?? detectLocale();
+  const pathLocale = typeof window === 'undefined' ? null : localeFromPathname(window.location.pathname);
+  const initialLocale = urlLocale
+    ? normalizeLocale(urlLocale)
+    : pathLocale ?? initialShare.locale ?? detectLocale();
 
   const containerRef = useRef(null);
+  const notebookCaptionRef = useRef(null);
+  const notebookCaptionDragRef = useRef(null);
   const matrixPresetRefs = useRef({});
   const iLabelRef = useRef(null);
   const jLabelRef = useRef(null);
@@ -3915,13 +523,29 @@ export default function App() {
   const vectorVolumeLabelRef = useRef(null);
   const scrubTrackRef = useRef(null);
   const notebookProgressRef = useRef(null);
+  const notebookProgressDragRef = useRef(null);
   const notebookSceneProgressRef = useRef(null);
   const notebookPlaybackFrameRef = useRef(null);
+  const pendingNotebookUiInsertionRef = useRef(null);
+  const notebookEditorRef = useRef(null);
+  const notebookVectorDragSyncRef = useRef(null);
+  const notebookEquationVisualKeyRef = useRef('');
   const notebookMatrixSignatureRef = useRef(null);
   const notebookVisualSignatureRef = useRef(null);
   const notebookReplayFromStartRef = useRef(false);
+  const notebookEditorRuntimeTimerRef = useRef(null);
+  const notebookEditorTypingRef = useRef(false);
+  const animationViewerInitializedRef = useRef(false);
+  const animationPreviewStartTimerRef = useRef(null);
   const historyStripRef = useRef(null);
   const panelScrollRef = useRef(null);
+  const workspaceShellRef = useRef(null);
+  const controlPanelResizeRef = useRef(null);
+  const notebookComposerRef = useRef(null);
+  const notebookSectionResizeRef = useRef(null);
+  const previousMobileViewportRef = useRef(null);
+  const flowHomeReplayRequestedRef = useRef(false);
+  const flowViewTransitionRef = useRef(null);
   const arrowDragRef = useRef({
     active: false,
     hovered: null,
@@ -3954,6 +578,7 @@ export default function App() {
     initialShare.camera?.target ? new THREE.Vector3(...initialShare.camera.target) : CAMERA_HOME_TARGET.clone()
   );
   const cameraShareTimerRef = useRef(null);
+  const googleOneTapPromptedRef = useRef(false);
 
   const currentMatrixRef = useRef([...(initialShare.displayMatrix ?? identity3)]);
   const startMatrixRef = useRef([...(initialShare.displayMatrix ?? identity3)]);
@@ -3965,18 +590,25 @@ export default function App() {
   const animationStartRef = useRef(null);
   const isAnimatingRef = useRef(false);
   const lastUiSyncRef = useRef(0);
+  const lastNotebookUiSyncRef = useRef(0);
   const cameraMoveRef = useRef({
     active: false,
     startTime: null,
+    duration: CAMERA_MOVE_MS,
+    onComplete: null,
     positionFrom: initialCameraPositionRef.current.clone(),
     targetFrom: initialCameraTargetRef.current.clone(),
     positionTo: initialCameraPositionRef.current.clone(),
     targetTo: initialCameraTargetRef.current.clone(),
   });
+  const notebookStopCameraRef = useRef(null);
+  const notebookStopCameraRestorePendingRef = useRef(false);
+  const cameraProgressOverrideRef = useRef(null);
+  const notebookCameraTransitionRef = useRef(null);
   const cameraLockedRef = useRef(false);
   const zoomLockedRef = useRef(false);
-  const cameraAutoRef = useRef(initialShare.workspaceMode === 'system');
-  const autoCameraTargetViewRef = useRef(initialShare.workspaceMode === 'system' ? '2d' : '3d');
+  const autoCameraTargetViewRef = useRef(initialWorkspaceMode === 'system' ? '2d' : '3d');
+  const notebookAutoCameraViewRef = useRef(null);
   const userVectorRef = useRef(
     initialShare.vectors?.[0]
       ? [parseNumber(initialShare.vectors[0].x), parseNumber(initialShare.vectors[0].y), parseNumber(initialShare.vectors[0].z)]
@@ -3997,28 +629,44 @@ export default function App() {
   const uiStateRef = useRef({
     showVolume: false,
     showVector: true,
-    showBasis: true,
+    showBasis: false,
     basisVisibility: { i: true, j: true, k: true },
     showGrid: true,
     showRelativeGrid: true,
     relativeGridStrength: DEFAULT_RELATIVE_GRID_STRENGTH,
     showCoordinates: true,
     showCoordinateNumbers: true,
+    showAutomaticSolution: false,
     showDot: false,
     showAxes: true,
     showRelativeAxes: true,
+    notebookSolutionSelection: null,
+    notebookCaptionHoverName: null,
+    notebookHardFocusSourceId: null,
+    notebookHardFocusExpiresAt: 0,
+    notebookActiveCellId: null,
+    notebookActiveCellProgress: 1,
   });
-  const workspaceModeRef = useRef('transform');
+  const workspaceModeRef = useRef(initialWorkspaceMode);
   const systemDimensionRef = useRef('2d');
   const lineSystemRef = useRef(null);
 
   const [isLoaded, setIsLoaded] = useState(false);
+  const isMobileViewport = useMediaQuery('(max-width: 760px)');
+  const isMobileKeyboardOpen = useMobileKeyboardOpen(isMobileViewport);
+  const prefersReducedMotion = useMediaQuery('(prefers-reduced-motion: reduce)');
   const [isSidebarOpen, setIsSidebarOpen] = useState(() => {
+    if (isAnimationViewer) return false;
     if (typeof window === 'undefined') return true;
     return !window.matchMedia('(max-width: 760px)').matches;
   });
-  const [isAnimationFocus, setIsAnimationFocus] = useState(false);
-  const [workspaceMode, setWorkspaceMode] = useState(initialShare.workspaceMode ?? 'transform');
+  const [controlPanelWidth, setControlPanelWidth] = useState(readControlPanelWidth);
+  const [notebookEditorHeight, setNotebookEditorHeight] = useState(readNotebookEditorHeight);
+  const [isNotebookSectionResizing, setIsNotebookSectionResizing] = useState(false);
+  const [showFlowHome, setShowFlowHome] = useState(() => !isAnimationViewer && shouldShowFlowHome());
+  const [isAnimationFocus, setIsAnimationFocus] = useState(isAnimationViewer);
+  const [sceneToolsExpanded, setSceneToolsExpanded] = useState(false);
+  const [workspaceMode, setWorkspaceMode] = useState(initialWorkspaceMode);
   const [inputMode, setInputMode] = useState(initialShare.inputMode ?? '3d');
   const [displayMatrix, setDisplayMatrix] = useState([...(initialShare.displayMatrix ?? identity3)]);
   const [basisControlMatrix, setBasisControlMatrix] = useState([...(initialShare.displayMatrix ?? identity3)]);
@@ -4029,13 +677,33 @@ export default function App() {
   const [activeVectorId, setActiveVectorId] = useState(initialShare.vectors?.[0]?.id ?? 'v1');
   const [vectorToolMode, setVectorToolMode] = useState('vector');
   const [equations, setEquations] = useState(['']);
-  const [notebookText, setNotebookText] = useState('');
+  const [notebookEquationModeHint, setNotebookEquationModeHint] = useState(null);
+  const [notebookText, setNotebookText] = useState(initialAnimationViewer?.notebookText ?? '');
+  const [notebookRuntimeText, setNotebookRuntimeText] = useState(
+    initialAnimationViewer?.notebookText ?? ''
+  );
+  const notebookTextRef = useRef(notebookText);
+  if (!notebookEditorTypingRef.current && !notebookVectorDragSyncRef.current) {
+    notebookTextRef.current = notebookText;
+  }
+  const [savedNotebooks, setSavedNotebooks] = useState(readNotebookLibrary);
+  const [activeSavedNotebookId, setActiveSavedNotebookId] = useState(null);
+  const [savedNotebookTitle, setSavedNotebookTitle] = useState('');
+  const [pendingNotebookDeleteId, setPendingNotebookDeleteId] = useState(null);
   const [notebookCells, setNotebookCells] = useState(() => [
     createNotebookEquationCell(''),
   ]);
   const [activeNotebookCellId, setActiveNotebookCellId] = useState(null);
   const [notebookCursor, setNotebookCursor] = useState(0);
+  const [notebookProgressDragging, setNotebookProgressDragging] = useState(false);
   const [activeNotebookCaption, setActiveNotebookCaption] = useState('');
+  const [notebookCaptionPosition, setNotebookCaptionPosition] = useState({ x: 0, y: 0 });
+  const [notebookCaptionDragging, setNotebookCaptionDragging] = useState(false);
+  const [hoveredNotebookCaptionVariable, setHoveredNotebookCaptionVariable] = useState(null);
+  const [notebookFieldMode, setNotebookFieldMode] = useState(NOTEBOOK_SCENE_DEFAULTS.field);
+  const [notebookSceneMatrices, setNotebookSceneMatrices] = useState([]);
+  const [notebookBoardOperation, setNotebookBoardOperation] = useState(null);
+  const [notebookBoardAnnotation, setNotebookBoardAnnotation] = useState(null);
   const [history, setHistory] = useState([
     {
       name: t(initialLocale, 'initialSpace'),
@@ -4054,12 +722,32 @@ export default function App() {
   const [activeView, setActiveView] = useState(initialShare.camera ? null : '3d');
   const [cameraLocked, setCameraLocked] = useState(false);
   const [zoomLocked, setZoomLocked] = useState(false);
-  const [cameraAuto, setCameraAuto] = useState(initialShare.workspaceMode === 'system');
   const [cameraState, setCameraState] = useState(initialShare.camera ?? null);
   const [locale, setLocale] = useState(initialLocale);
+  const [localeOptions] = useState(() => localeOrderWithPreferredFirst(initialLocale));
+  const translate = useCallback((key, values) => t(locale, key, values), [locale]);
+  const [authUser, setAuthUser] = useState(null);
+  const [authMode, setAuthMode] = useState('login');
+  const [authEmail, setAuthEmail] = useState('');
+  const [authPassword, setAuthPassword] = useState('');
+  const [authPasswordConfirm, setAuthPasswordConfirm] = useState('');
+  const [authPasswordVisible, setAuthPasswordVisible] = useState(false);
+  const [authBusy, setAuthBusy] = useState(false);
+  const [authError, setAuthError] = useState('');
+  const [authErrorField, setAuthErrorField] = useState('');
+  const [authResolved, setAuthResolved] = useState(false);
+  const [showLoginDialog, setShowLoginDialog] = useState(false);
+  const [accountMenuOpen, setAccountMenuOpen] = useState(false);
+  const [logoutBusy, setLogoutBusy] = useState(false);
+  const authDialogRef = useRef(null);
+  const authEmailInputRef = useRef(null);
+  const authPasswordInputRef = useRef(null);
+  const authPasswordConfirmInputRef = useRef(null);
+  const authReturnFocusRef = useRef(null);
+  const accountMenuRef = useRef(null);
   const [showVolume, setShowVolume] = useState(initialShare.showVolume ?? false);
   const [showVector, setShowVector] = useState(initialShare.showVector ?? true);
-  const [showBasis, setShowBasis] = useState(initialShare.showBasis ?? true);
+  const [showBasis, setShowBasis] = useState(initialShare.showBasis ?? false);
   const [basisVisibility, setBasisVisibility] = useState({ i: true, j: true, k: true });
   const [showGrid, setShowGrid] = useState(initialShare.showGrid ?? true);
   const [showRelativeGrid, setShowRelativeGrid] = useState(initialShare.showRelativeGrid ?? true);
@@ -4067,17 +755,102 @@ export default function App() {
     normalizeRelativeGridStrength(initialShare.relativeGridStrength)
   );
   const [showCoordinates, setShowCoordinates] = useState(initialShare.showCoordinates ?? true);
+  const [showAutomaticSolution, setShowAutomaticSolution] = useState(
+    initialShare.showAutomaticSolution === true
+  );
   const [showDot, setShowDot] = useState(initialShare.showDot ?? false);
   const [showAxes, setShowAxes] = useState(initialShare.showAxes ?? true);
   const [showRelativeAxes, setShowRelativeAxes] = useState(initialShare.showRelativeAxes ?? true);
   const [snapToInteger, setSnapToInteger] = useState(initialShare.snapToInteger ?? true);
-  const [notebookSpeed, setNotebookSpeed] = useState(normalizeNotebookSpeed(initialShare.notebookSpeed));
+  const [notebookSpeed, setNotebookSpeed] = useState(
+    normalizeNotebookSpeed(initialAnimationViewer?.notebookSpeed ?? initialShare.notebookSpeed)
+  );
   const [notebookPlaying, setNotebookPlaying] = useState(false);
+  const [notebookCheckpoint, setNotebookCheckpoint] = useState(null);
+  const [notebookCheckpointCaptionHidden, setNotebookCheckpointCaptionHidden] = useState(false);
+  const [notebookCompleted, setNotebookCompleted] = useState(false);
+  const [notebookCuedLineIndex, setNotebookCuedLineIndex] = useState(null);
+  const notebookInspectionActive = notebookCheckpoint?.kind === 'inspect';
+  const notebookActiveReviewStopId = notebookCheckpoint?.cellId
+    ?? (notebookCompleted ? 'notebook-final-scene' : null);
+
+  useEffect(() => {
+    if (notebookEditorTypingRef.current) return;
+    setNotebookRuntimeText((current) => current === notebookText ? current : notebookText);
+  }, [notebookText]);
+
+  useEffect(() => () => {
+    if (notebookEditorRuntimeTimerRef.current) {
+      window.clearTimeout(notebookEditorRuntimeTimerRef.current);
+      notebookEditorRuntimeTimerRef.current = null;
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!notebookActiveReviewStopId) {
+      notebookStopCameraRef.current = null;
+      if (notebookStopCameraRestorePendingRef.current) {
+        cameraMoveRef.current.active = false;
+        cameraMoveRef.current.onComplete = null;
+        notebookStopCameraRestorePendingRef.current = false;
+      }
+      return undefined;
+    }
+
+    const frameId = window.requestAnimationFrame(() => {
+      const refs = threeRef.current;
+      if (!refs || notebookStopCameraRef.current?.cellId === notebookActiveReviewStopId) return;
+      notebookStopCameraRef.current = {
+        cellId: notebookActiveReviewStopId,
+        position: refs.camera.position.clone(),
+        target: refs.controls.target.clone(),
+        view: activeView,
+      };
+    });
+
+    return () => window.cancelAnimationFrame(frameId);
+    // Capture once when a learner stop becomes active. A later manual orbit
+    // intentionally must not replace the authored stop camera snapshot.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [notebookActiveReviewStopId]);
+  const notebookExamples = useMemo(() => buildNotebookExamplePresets(locale), [locale]);
+  const notebookCourse = useMemo(() => buildVisualLinearAlgebraCourse(locale), [locale]);
+  const notebookPlaybackLabelKey = notebookPlaying
+    ? 'stopNotebookCell'
+    : notebookCheckpoint
+      ? 'nextNotebookCheckpoint'
+      : notebookCompleted
+        ? 'replayNotebook'
+        : 'runNotebookCell';
+  const notebookScenePlaybackLabelKey = notebookPlaying
+    ? 'stopNotebookCell'
+    : notebookCheckpoint || notebookCompleted
+      ? 'replayNotebookSegment'
+      : 'runNotebookCell';
   const [measureMode, setMeasureMode] = useState(null);
   const [measureDraft, setMeasureDraft] = useState([]);
   const [measureAnchorId, setMeasureAnchorId] = useState(null);
   const [measurePointer, setMeasurePointer] = useState(null);
-  const [dragSnapGuide, setDragSnapGuide] = useState(null);
+  const dragSnapGuideRef = useRef(null);
+  const dragSnapGuideLineRef = useRef(null);
+  const dragSnapGuidePointRef = useRef(null);
+  const setDragSnapGuide = useCallback((guide) => {
+    const guideNode = dragSnapGuideRef.current;
+    const lineNode = dragSnapGuideLineRef.current;
+    const pointNode = dragSnapGuidePointRef.current;
+    if (!guideNode || !lineNode || !pointNode) return;
+    if (!guide) {
+      guideNode.style.display = 'none';
+      return;
+    }
+    lineNode.setAttribute('x1', String(guide.x1));
+    lineNode.setAttribute('y1', String(guide.y1));
+    lineNode.setAttribute('x2', String(guide.x2));
+    lineNode.setAttribute('y2', String(guide.y2));
+    pointNode.setAttribute('cx', String(guide.x2));
+    pointNode.setAttribute('cy', String(guide.y2));
+    guideNode.style.display = '';
+  }, []);
   const [hoveredMeasureTargetId, setHoveredMeasureTargetId] = useState(null);
   const [measurements, setMeasurements] = useState([]);
   const [hoveredMatrixPresetId, setHoveredMatrixPresetId] = useState(null);
@@ -4085,6 +858,122 @@ export default function App() {
   const stopPanelPointerPropagation = useCallback((event) => {
     event.stopPropagation();
   }, []);
+
+  const clearNotebookCueOnOutsidePointerDown = useCallback((event) => {
+    if (notebookCuedLineIndex === null) return;
+    if (event.target instanceof Element && event.target.closest('.notebook-gutter-widget')) return;
+    setNotebookCuedLineIndex(null);
+  }, [notebookCuedLineIndex]);
+
+  const pointToNotebookCaptionVariable = useCallback((name) => {
+    const key = notebookVariableKey(name);
+    uiStateRef.current.notebookCaptionHoverName = key;
+    setHoveredNotebookCaptionVariable(key);
+  }, []);
+
+  const stopPointingToNotebookCaptionVariable = useCallback((name) => {
+    const key = notebookVariableKey(name);
+    if (uiStateRef.current.notebookCaptionHoverName === key) {
+      uiStateRef.current.notebookCaptionHoverName = null;
+    }
+    setHoveredNotebookCaptionVariable((current) => current === key ? null : current);
+  }, []);
+
+  useEffect(() => {
+    uiStateRef.current.notebookCaptionHoverName = null;
+    setHoveredNotebookCaptionVariable(null);
+  }, [activeNotebookCaption, workspaceMode]);
+
+  const keepNotebookCaptionInScene = useCallback(() => {
+    const caption = notebookCaptionRef.current;
+    const scene = containerRef.current;
+    if (!caption || !scene) return;
+    const captionRect = caption.getBoundingClientRect();
+    const sceneRect = scene.getBoundingClientRect();
+    setNotebookCaptionPosition((current) => {
+      const next = clampNotebookCaptionPosition(current, captionRect, sceneRect);
+      return Math.abs(next.x - current.x) < 0.05 && Math.abs(next.y - current.y) < 0.05
+        ? current
+        : next;
+    });
+  }, []);
+
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(keepNotebookCaptionInScene);
+    return () => window.cancelAnimationFrame(frame);
+  }, [
+    activeNotebookCaption,
+    keepNotebookCaptionInScene,
+    notebookCheckpoint?.cellId,
+    notebookCheckpointCaptionHidden,
+    notebookCompleted,
+  ]);
+
+  useEffect(() => {
+    window.addEventListener('resize', keepNotebookCaptionInScene);
+    return () => window.removeEventListener('resize', keepNotebookCaptionInScene);
+  }, [keepNotebookCaptionInScene]);
+
+  const handleNotebookCaptionPointerDown = useCallback((event) => {
+    if (event.pointerType === 'mouse' && event.button !== 0) return;
+    const dragAffordance = event.target instanceof Element
+      ? event.target.closest('.scene-caption-drag-affordance')
+      : null;
+    if (
+      !dragAffordance &&
+      event.target instanceof Element &&
+      event.target.closest('button, a, input, .scene-caption-variable')
+    ) return;
+    const caption = notebookCaptionRef.current;
+    const scene = containerRef.current;
+    if (!caption || !scene) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    const captionRect = caption.getBoundingClientRect();
+    const sceneRect = scene.getBoundingClientRect();
+    const start = { ...notebookCaptionPosition };
+    notebookCaptionDragRef.current = {
+      pointerId: event.pointerId,
+      startClientX: event.clientX,
+      startClientY: event.clientY,
+      start,
+      minX: start.x + sceneRect.left + NOTEBOOK_CAPTION_EDGE_GAP - captionRect.left,
+      maxX: start.x + sceneRect.right - NOTEBOOK_CAPTION_EDGE_GAP - captionRect.right,
+      minY: start.y + sceneRect.top + NOTEBOOK_CAPTION_EDGE_GAP - captionRect.top,
+      maxY: start.y + sceneRect.bottom - NOTEBOOK_CAPTION_EDGE_GAP - captionRect.bottom,
+    };
+    setNotebookCaptionDragging(true);
+  }, [notebookCaptionPosition]);
+
+  const handleNotebookCaptionPointerMove = useCallback((event) => {
+    const drag = notebookCaptionDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const rawX = drag.start.x + event.clientX - drag.startClientX;
+    const rawY = drag.start.y + event.clientY - drag.startClientY;
+    const minX = Math.min(drag.minX, drag.maxX);
+    const maxX = Math.max(drag.minX, drag.maxX);
+    const minY = Math.min(drag.minY, drag.maxY);
+    const maxY = Math.max(drag.minY, drag.maxY);
+    setNotebookCaptionPosition({
+      x: Math.max(minX, Math.min(maxX, rawX)),
+      y: Math.max(minY, Math.min(maxY, rawY)),
+    });
+  }, []);
+
+  const finishNotebookCaptionDrag = useCallback((event) => {
+    const drag = notebookCaptionDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    event.preventDefault();
+    event.stopPropagation();
+    notebookCaptionDragRef.current = null;
+    event.currentTarget.releasePointerCapture?.(event.pointerId);
+    setNotebookCaptionDragging(false);
+    window.requestAnimationFrame(keepNotebookCaptionInScene);
+  }, [keepNotebookCaptionInScene]);
 
   const handlePanelPointerDown = useCallback((event) => {
     event.stopPropagation();
@@ -4262,7 +1151,7 @@ export default function App() {
         name: item.name,
         color: item.color,
         colorHex: item.colorHex,
-        visible: item.enabled && basisVisibility[item.id] !== false,
+        visible: showBasis && item.enabled && basisVisibility[item.id] !== false,
         values: item.values,
       });
     });
@@ -4277,30 +1166,38 @@ export default function App() {
       });
     });
     return entries;
-  }, [basisItems, basisVisibility, transformedVectorItems]);
+  }, [basisItems, basisVisibility, showBasis, transformedVectorItems]);
   const measurementSummaries = useMemo(
     () =>
       measurements.map((item) => {
         const targets = item.targets.map((id) => measureTargetMap.get(id)).filter(Boolean);
         let value = null;
+        let valueText = null;
         if (item.type === 'dot' && targets.length >= 2) {
           value = dotValues(targets[0].values, targets[1].values);
+        } else if (item.type === 'sum' && targets.length >= 2) {
+          value = targets[0].values.map((entry, index) => entry + (targets[1].values[index] ?? 0));
+          valueText = formatCompactCoord(value, displayMode, 2);
         } else if (item.type === 'volume' && targets.length >= 1) {
-          value = volumeMeasureValue(targets, displayMode);
+          value = volumeMeasureValue(targets);
         }
         const measureKind = item.type === 'volume'
-          ? volumeMeasureKind(targets.length, displayMode)
+          ? volumeMeasureKind(targets.length)
           : item.type;
         const labelTargets = item.type === 'volume'
-          ? targets.slice(0, effectiveVolumeTargetCount(targets.length, displayMode))
+          ? targets.slice(0, effectiveVolumeTargetCount(targets.length))
           : targets;
+        const labelSeparator = item.type === 'sum' ? ' + ' : ' · ';
         return {
           ...item,
           targetIds: item.targets,
           targets,
           measureKind,
-          label: labelTargets.map((target) => `A${target.name}`).join(' · '),
+          label: labelTargets
+            .map((target) => item.type === 'sum' ? target.name : `A${target.name}`)
+            .join(labelSeparator),
           value,
+          valueText,
         };
       }),
     [displayMode, measureTargetMap, measurements]
@@ -4344,10 +1241,88 @@ export default function App() {
   );
   const currentModeLabel = displayMode.toUpperCase();
   const equationSolution = useMemo(() => solveEquationSystem(equations), [equations]);
-  const lineSystem = useMemo(() => analyzeEquationGeometry(equations), [equations]);
+  const lineSystem = useMemo(
+    () => analyzeEquationGeometry(
+      equations,
+      workspaceMode === 'system' ? notebookEquationModeHint : null
+    ),
+    [equations, notebookEquationModeHint, workspaceMode]
+  );
   lineSystemRef.current = lineSystem;
-  const notebookScript = useMemo(() => parseNotebookScript(notebookText), [notebookText]);
-  const effectiveSystemMode = lineSystem.mode === '3d' || notebookScript.mode === '3d' ? '3d' : '2d';
+  const notebookScript = useMemo(
+    () => parseNotebookScript(notebookRuntimeText),
+    [notebookRuntimeText]
+  );
+  const notebookPlaybackSegmentsList = useMemo(
+    () => notebookPlaybackSegments(
+      notebookScript.cells,
+      notebookScript.lineCount,
+      NOTEBOOK_MIN_VISIBLE_LINES
+    ),
+    [notebookScript.cells, notebookScript.lineCount]
+  );
+  const activeNotebookSegment = useMemo(() => {
+    if (!notebookPlaybackSegmentsList.length) return null;
+    if (notebookCheckpoint?.cellId) {
+      const stoppedSegment = notebookPlaybackSegmentsList.find(
+        (segment) => segment.stop?.cell.id === notebookCheckpoint.cellId
+      );
+      if (stoppedSegment) return stoppedSegment;
+    }
+    if (notebookCompleted) {
+      return notebookPlaybackSegmentsList.find((segment) => segment.kind === 'final')
+        ?? notebookPlaybackSegmentsList.at(-1);
+    }
+    const cursor = Math.max(0, Math.min(100, Number(notebookCursor) || 0));
+    const forwardSegment = notebookPlaybackSegmentsList.find((segment, index) => (
+      cursor >= segment.startCursor - 0.0001 &&
+      (cursor < segment.endCursor - 0.0001 || index === notebookPlaybackSegmentsList.length - 1)
+    ));
+    if (forwardSegment) return forwardSegment;
+    return notebookPlaybackSegmentsList.find((segment, index) => (
+      cursor <= segment.endCursor + 0.0001 &&
+      (index === 0 || cursor > segment.startCursor + 0.0001)
+    )) ?? notebookPlaybackSegmentsList.at(-1);
+  }, [
+    notebookCheckpoint?.cellId,
+    notebookCompleted,
+    notebookCursor,
+    notebookPlaybackSegmentsList,
+    notebookPlaying,
+  ]);
+  const activeNotebookSegmentProgress = notebookSegmentProgress(notebookCursor, activeNotebookSegment);
+  const activeNotebookReviewSteps = useMemo(
+    () => notebookReviewSteps(
+      notebookScript.cells,
+      notebookScript.lineCount,
+      activeNotebookSegment,
+      NOTEBOOK_MIN_VISIBLE_LINES
+    ),
+    [activeNotebookSegment, notebookScript.cells, notebookScript.lineCount]
+  );
+  const previousNotebookReviewStep = useMemo(
+    () => [...activeNotebookReviewSteps]
+      .reverse()
+      .find((step) => step.cursor < notebookCursor - 0.0001) ?? null,
+    [activeNotebookReviewSteps, notebookCursor]
+  );
+  const notebookStopReviewing = Boolean(
+    (notebookCheckpoint || notebookCompleted) &&
+    activeNotebookSegment &&
+    notebookCursor < activeNotebookSegment.endCursor - 0.0001
+  );
+  const nextNotebookReviewCursor = useMemo(() => {
+    if (!notebookStopReviewing || !activeNotebookSegment) return null;
+    return activeNotebookReviewSteps.find((step) => step.cursor > notebookCursor + 0.0001)?.cursor
+      ?? activeNotebookSegment.endCursor;
+  }, [
+    activeNotebookReviewSteps,
+    activeNotebookSegment,
+    notebookStopReviewing,
+    notebookCursor,
+  ]);
+  const sourceSystemMode = lineSystem.mode === '3d' || notebookScript.mode === '3d' ? '3d' : '2d';
+  const effectiveSystemMode = outputModeForSystemMode(sourceSystemMode, displayMatrix);
   const equationLabelItems = useMemo(() => {
     const mode = lineSystem.mode === '3d' ? '3d' : '2d';
     const items = mode === '3d' ? lineSystem.planes : lineSystem.lines;
@@ -4365,25 +1340,92 @@ export default function App() {
     () => notebookScript.cells.map(notebookCellSignature).join('\n'),
     [notebookScript.cells]
   );
+  const notebookOperationPresentation = useMemo(() => {
+    if (!notebookPlaying || !activeNotebookCellId) return null;
+    const activeCell = notebookScript.cells.find((cell) => cell.id === activeNotebookCellId);
+    return buildNotebookOperationPresentation(activeCell);
+  }, [activeNotebookCellId, notebookPlaying, notebookScript.cells]);
   const notebookTokenStyles = useMemo(() => {
     const styles = new Map();
     notebookScript.marks.forEach((mark) => {
-      if (!mark?.label) return;
-      styles.set(notebookVariableKey(mark.label), {
+      if (!mark?.label || !NOTEBOOK_VARIABLE_MARK_KINDS.has(mark.kind)) return;
+      const key = notebookVariableKey(mark.label);
+      if (styles.has(key)) return;
+      styles.set(key, {
         label: mark.label,
         kind: mark.kind,
         color: mark.color ?? 0x8b5cf6,
+        executable: mark.kind === 'matrix',
         hidden: Boolean(mark.hidden),
       });
     });
     notebookScript.cells.forEach((cell) => {
       if (!cell?.name) return;
-      styles.set(notebookVariableKey(cell.name), {
+      const key = notebookVariableKey(cell.name);
+      if (styles.has(key)) return;
+      styles.set(key, {
         label: cell.name,
         kind: cell.type,
-        color: cell.color ?? (cell.type === 'matrix' ? 0x0e7490 : 0x8b5cf6),
+        color: cell.color ?? (cell.type === 'matrix' || cell.refKind === 'matrix' ? NOTEBOOK_MATRIX_HEX : 0x8b5cf6),
+        executable: cell.type === 'matrix' || cell.refKind === 'matrix',
         hidden: Boolean(cell.hidden),
       });
+    });
+    const measuredBasisNames = new Set(
+      notebookScript.cells
+        .filter((cell) => cell?.type === 'measurement')
+        .flatMap((cell) => cell.names ?? [])
+        .map(notebookVariableKey)
+    );
+    NOTEBOOK_BASIS_TOKEN_STYLES.forEach((item) => {
+      const key = notebookVariableKey(item.label);
+      if (!measuredBasisNames.has(key) || styles.has(key)) return;
+      styles.set(key, {
+        label: item.label,
+        kind: 'basis',
+        color: item.color,
+        hidden: false,
+      });
+    });
+    const matrixValuesByName = new Map();
+    const attachValueText = (name, valueText) => {
+      const key = notebookVariableKey(name);
+      const current = styles.get(key);
+      if (!current || !valueText) return;
+      styles.set(key, { ...current, valueText });
+    };
+    notebookScript.cells.forEach((cell) => {
+      if (cell.type === 'matrix' && cell.name) {
+        matrixValuesByName.set(notebookVariableKey(cell.name), cell);
+        const rows = Array.from({ length: cell.rows }, (_, row) =>
+          cell.values
+            .slice(row * cell.columns, row * cell.columns + cell.columns)
+            .map((value) => formatMatrixNumber(parseNumber(value)))
+            .join(' ')
+        );
+        attachValueText(cell.name, `[${rows.join('; ')}]`);
+      }
+      if (cell.type === 'equation') {
+        (cell.environmentEquations ?? cell.equations ?? []).forEach((entry) => {
+          attachValueText(entry.name, splitNotebookLineMeta(entry.text ?? '').body.trim());
+        });
+      }
+      if (cell.type === 'vector' && cell.name) {
+        attachValueText(
+          cell.name,
+          `(${(cell.values ?? []).slice(0, cell.dimension ?? 3).map((value) => formatMatrixNumber(parseNumber(value))).join(', ')})`
+        );
+      }
+      if (cell.type === 'slice' && cell.name) {
+        const matrixCell = matrixValuesByName.get(notebookVariableKey(cell.matrixName));
+        const values = notebookMatrixSliceValues(matrixCell, cell.axis, cell.sliceIndex);
+        if (values) {
+          attachValueText(
+            cell.name,
+            `(${values.slice(0, cell.dimension ?? values.length).map((value) => formatMatrixNumber(parseNumber(value))).join(', ')})`
+          );
+        }
+      }
     });
     return styles;
   }, [notebookScript.cells, notebookScript.marks]);
@@ -4400,11 +1442,15 @@ export default function App() {
       const start = Number.isFinite(lineStart) ? lineStart : 0;
       return clampedCursor >= 100 || linePosition > start;
     };
-    const targetByName = new Map([
-      ['i', 'b:i'],
-      ['j', 'b:j'],
-      ['k', 'b:k'],
-    ]);
+    const lastClearLine = notebookScript.cells.reduce((latest, cell) => (
+      cell.type === 'scene' &&
+      cell.command === 'clear' &&
+      !cell.hidden &&
+      hasReachedLine(cell.lineStart)
+        ? Math.max(latest, Number(cell.lineStart) || 0)
+        : latest
+    ), -1);
+    const targetByName = new Map(Object.entries(NOTEBOOK_BASIS_MEASUREMENT_TARGETS));
     measureTargetMap.forEach((target) => {
       if (target?.name) targetByName.set(notebookVariableKey(target.name), target.id);
     });
@@ -4412,6 +1458,7 @@ export default function App() {
       if (
         (
           cell.type === 'vector' ||
+          cell.type === 'slice' ||
           (cell.type === 'calc' && cell.resultKind === 'vector') ||
           (cell.type === 'ref' && cell.refKind === 'vector' && !cell.remove)
         ) &&
@@ -4424,25 +1471,36 @@ export default function App() {
     });
 
     return notebookScript.cells
-      .filter((cell) => cell.type === 'measurement' && !cell.hidden && hasReachedLine(cell.lineStart))
+      .filter((cell) => (
+        cell.type === 'measurement' &&
+        !cell.hidden &&
+        hasReachedLine(cell.lineStart) &&
+        (Number(cell.lineStart) || 0) > lastClearLine
+      ))
       .map((cell) => {
         const targets = cell.names
           .map((name) => targetByName.get(notebookVariableKey(name)))
           .filter((targetId) => targetId && measureTargetMap.has(targetId));
         if (cell.measureType === 'dot' && targets.length < 2) return null;
+        if (cell.measureType === 'sum' && targets.length < 2) return null;
         if (cell.measureType === 'volume' && targets.length < 2) return null;
-        const pickedTargets = cell.measureType === 'dot' ? targets.slice(0, 2) : targets.slice(0, 3);
+        const pickedTargets = cell.measureType === 'volume' ? targets.slice(0, 3) : targets.slice(0, 2);
         return {
           id: `notebook-measure-${cell.lineStart}-${cell.measureType}`,
+          name: cell.name,
           type: cell.measureType,
           targets: pickedTargets,
           visible: true,
           source: 'notebook',
+          cellId: cell.id,
           lineStart: cell.lineStart,
         };
       })
       .filter(Boolean);
   }, [measureTargetMap, notebookCursor, notebookScript.cells, notebookScript.lineCount]);
+  const notebookMeasurementItemsKey = notebookMeasurementItems
+    .map((item) => [item.id, item.cellId, item.name, item.type, item.lineStart, ...item.targets].join(':'))
+    .join('|');
 
   useEffect(() => {
     if (workspaceMode !== 'system') {
@@ -4473,8 +1531,10 @@ export default function App() {
           return (
             other &&
             item.id === other.id &&
+            item.name === other.name &&
             item.type === other.type &&
             item.source === other.source &&
+            item.cellId === other.cellId &&
             item.visible === other.visible &&
             item.lineStart === other.lineStart &&
             item.targets.join('|') === other.targets.join('|')
@@ -4482,19 +1542,17 @@ export default function App() {
         });
       return isSame ? previous : next;
     });
-  }, [notebookMeasurementItems, workspaceMode]);
+  }, [notebookMeasurementItemsKey, workspaceMode]);
 
   const notebookProgressRatio = Math.max(0, Math.min(1, notebookCursor / 100));
   const notebookLineCount = Math.max(NOTEBOOK_MIN_VISIBLE_LINES, notebookScript.lineCount);
-  const notebookLinePosition = notebookProgressRatio * notebookLineCount;
-  const notebookActiveLineIndex = notebookCursor <= 0
-    ? -1
-    : Math.min(notebookLineCount - 1, Math.max(0, Math.floor(notebookLinePosition)));
+  const notebookActiveLineIndex = notebookActiveLineIndexForCursor(notebookCursor, notebookLineCount);
   const notebookTimelineMarks = useMemo(() => {
     const seen = new Set();
+    const sourceLines = String(notebookText ?? '').replace(/\r/g, '').split('\n');
     return notebookScript.marks
       .map((mark, lineIndex) => ({ ...mark, lineIndex }))
-      .filter((mark) => mark?.label && mark.kind !== 'blank' && mark.kind !== 'note')
+      .filter((mark) => mark?.label && !mark.hidden && mark.kind !== 'blank' && mark.kind !== 'note')
       .filter((mark) => {
         const key = `${mark.lineIndex}:${mark.label}`;
         if (seen.has(key)) return false;
@@ -4503,14 +1561,32 @@ export default function App() {
       })
       .map((mark) => ({
         ...mark,
-        percent: Math.max(0, Math.min(100, ((mark.lineIndex + 0.5) / notebookLineCount) * 100)),
+        percent: notebookCursorForLineReveal(mark.lineIndex, notebookLineCount),
+        detail: String(sourceLines[mark.lineIndex] ?? mark.label)
+          .replace(/^\s*!?\s*\/\/\s*/u, '')
+          .replace(/\{\{\s*([^}]+?)\s*\}\}/gu, '$1')
+          .replace(/\*\*([^*]+)\*\*/gu, '$1')
+          .replace(/\\n/gu, ' · ')
+          .trim() || mark.label,
       }));
-  }, [notebookLineCount, notebookScript.marks]);
+  }, [notebookLineCount, notebookScript.marks, notebookText]);
+  const notebookSegmentTimelineMarks = useMemo(() => {
+    if (!activeNotebookSegment) return [];
+    const start = activeNotebookSegment.startCursor;
+    const end = activeNotebookSegment.endCursor;
+    return notebookTimelineMarks
+      .filter((mark) => mark.percent >= start - 0.0001 && mark.percent <= end + 0.0001)
+      .map((mark) => ({
+        ...mark,
+        globalPercent: mark.percent,
+        percent: notebookSegmentProgress(mark.percent, activeNotebookSegment),
+      }));
+  }, [activeNotebookSegment, notebookTimelineMarks]);
 
   useEffect(() => {
     notebookHasVisualVectorsRef.current = notebookScript.cells.some(
       (cell) =>
-        (cell.type === 'vector' && cell.execute !== false && !cell.remove) ||
+        ((cell.type === 'vector' || cell.type === 'slice') && cell.execute !== false && !cell.remove) ||
         (cell.type === 'calc' && cell.resultKind === 'vector' && cell.execute === true) ||
         (cell.type === 'ref' && cell.refKind === 'vector' && !cell.remove)
     );
@@ -4608,7 +1684,7 @@ export default function App() {
   useEffect(() => {
     dragSnapEnabledRef.current = snapToInteger;
     if (!snapToInteger) setDragSnapGuide(null);
-  }, [snapToInteger]);
+  }, [setDragSnapGuide, snapToInteger]);
 
   useEffect(() => {
     uiStateRef.current = {
@@ -4621,9 +1697,11 @@ export default function App() {
       relativeGridStrength,
       showCoordinates: true,
       showCoordinateNumbers: showCoordinates,
+      showAutomaticSolution,
       showDot,
       showAxes,
       showRelativeAxes,
+      notebookSolutionSelection: uiStateRef.current.notebookSolutionSelection ?? null,
     };
   }, [
     showVolume,
@@ -4634,6 +1712,7 @@ export default function App() {
     showRelativeGrid,
     relativeGridStrength,
     showCoordinates,
+    showAutomaticSolution,
     showDot,
     showAxes,
     showRelativeAxes,
@@ -4647,8 +1726,11 @@ export default function App() {
       coordLabelText(name, values, coordMode, showCoordinates, highlightIndices);
     const showLabel = (label, text, visible) => {
       if (!label) return;
-      setAxisLabelText(label, text);
-      label.style.display = visible ? 'block' : 'none';
+      const contentChanged = setAxisLabelText(label, text);
+      const nextDisplay = visible ? 'block' : 'none';
+      const visibilityChanged = label.style.display !== nextDisplay;
+      if (visibilityChanged) label.style.display = nextDisplay;
+      if (contentChanged || visibilityChanged) threeRef.current.labelLayoutDirty = true;
     };
 
     const basisVectors = {
@@ -4660,17 +1742,17 @@ export default function App() {
     showLabel(
       iLabelRef.current,
       labelWithCoord('i', basisVectors.i),
-      showRelativeAxes && basisVisibility.i !== false && vectorLength(basisVectors.i) > EPSILON
+      showBasis && basisVisibility.i !== false && vectorLength(basisVectors.i) > EPSILON
     );
     showLabel(
       jLabelRef.current,
       labelWithCoord('j', basisVectors.j),
-      showRelativeAxes && basisVisibility.j !== false && vectorLength(basisVectors.j) > EPSILON
+      showBasis && basisVisibility.j !== false && vectorLength(basisVectors.j) > EPSILON
     );
     showLabel(
       kLabelRef.current,
       labelWithCoord('k', basisVectors.k, '3d'),
-      showRelativeAxes && basisVisibility.k !== false && vectorLength(basisVectors.k) > 0.08
+      showBasis && basisVisibility.k !== false && vectorLength(basisVectors.k) > 0.08
     );
 
     vectors.forEach((item) => {
@@ -4686,13 +1768,17 @@ export default function App() {
         showVector && item.visible !== false
       );
     });
-  }, [basisVisibility, displayMatrix, showCoordinates, showRelativeAxes, showVector, vectors]);
+  }, [basisVisibility, displayMatrix, showBasis, showCoordinates, showVector, vectors]);
 
   useEffect(() => {
     cameraLockedRef.current = cameraLocked;
     zoomLockedRef.current = zoomLocked;
-    cameraAutoRef.current = cameraAuto;
-    autoCameraTargetViewRef.current = workspaceMode === 'system' ? effectiveSystemMode : displayMode;
+    if (workspaceMode === 'system') {
+      autoCameraTargetViewRef.current = notebookAutoCameraViewRef.current ?? effectiveSystemMode;
+    } else {
+      notebookAutoCameraViewRef.current = null;
+      autoCameraTargetViewRef.current = displayMode;
+    }
     if (cameraLocked) {
       cameraMoveRef.current.active = false;
     }
@@ -4705,7 +1791,7 @@ export default function App() {
       });
       refs.controls.update();
     }
-  }, [activeView, cameraAuto, cameraLocked, displayMode, effectiveSystemMode, workspaceMode, zoomLocked]);
+  }, [activeView, cameraLocked, displayMode, effectiveSystemMode, workspaceMode, zoomLocked]);
 
   const updateVectorValue = useCallback((id, axis, value) => {
     setVectors((previous) =>
@@ -4832,6 +1918,7 @@ export default function App() {
   const notebookMeasurementExpressionForTargets = useCallback((type, targetIds) => {
     const names = targetIds.map(notebookNameForMeasureTarget).filter(Boolean);
     if (type === 'dot') return names.length >= 2 ? `dot(${names[0]}, ${names[1]})` : null;
+    if (type === 'sum') return names.length >= 2 ? `sum(${names[0]}, ${names[1]})` : null;
     if (type === 'volume') return names.length >= 2 ? `det(${names.join(', ')})` : null;
     return null;
   }, [notebookNameForMeasureTarget]);
@@ -4845,9 +1932,9 @@ export default function App() {
 
   const resolveNotebookMeasurementAlias = useCallback((lines, currentAlias, nextType) => {
     const normalized = normalizeNotebookVariableName(currentAlias ?? '');
-    const generated = /^(?:dot|det)\d+$/iu.test(normalized);
+    const generated = /^(?:dot|det|sum)\d+$/iu.test(normalized);
     if (normalized && !generated) return normalized;
-    const prefix = nextType === 'dot' ? 'dot' : 'det';
+    const prefix = nextType === 'dot' ? 'dot' : nextType === 'sum' ? 'sum' : 'det';
     if (normalized && notebookVariableKey(normalized).startsWith(prefix)) return normalized;
     return nextNotebookMeasurementAlias(lines, prefix);
   }, [nextNotebookMeasurementAlias]);
@@ -4896,14 +1983,14 @@ export default function App() {
     setMeasurements((previous) => previous.filter((item) => item.id !== id));
   }, [notebookMeasurementExpressionForTargets]);
 
-  const reverseDotMeasurement = useCallback((id) => {
+  const reverseMeasurementOrder = useCallback((id) => {
     const source = measurementsRef.current.find((item) => item.id === id);
-    if (source?.type === 'dot' && source.targets.length >= 2) {
-      updateNotebookMeasurementFormula(source, 'dot', [...source.targets].reverse());
+    if ((source?.type === 'dot' || source?.type === 'sum') && source.targets.length >= 2) {
+      updateNotebookMeasurementFormula(source, source.type, [...source.targets].reverse());
     }
     setMeasurements((previous) =>
       previous.map((item) => (
-        item.id === id && item.type === 'dot' && item.targets.length >= 2
+        item.id === id && (item.type === 'dot' || item.type === 'sum') && item.targets.length >= 2
           ? { ...item, targets: [...item.targets].reverse() }
           : item
       ))
@@ -4956,22 +2043,24 @@ export default function App() {
     if (workspaceModeRef.current !== 'system') return;
     const expression = notebookMeasurementExpressionForTargets(type, targetIds);
     if (!expression) return;
-    const aliasPrefix = type === 'dot' ? 'dot' : 'det';
+    const aliasPrefix = type === 'dot' ? 'dot' : type === 'sum' ? 'sum' : 'det';
 
     setNotebookText((previous) => {
       const normalized = String(previous ?? '').replace(/\r/g, '');
-      const alreadyExists = normalized
-        .split('\n')
+      const lines = normalized ? normalized.split('\n') : [];
+      const alreadyExists = lines
         .some((line) => splitNotebookLineMeta(line).body.trim() === expression);
       if (alreadyExists) return previous;
 
       const aliasPattern = new RegExp(`#${aliasPrefix}(\\d+)\\b`, 'gi');
       const nextIndex = [...normalized.matchAll(aliasPattern)]
         .reduce((max, match) => Math.max(max, Number(match[1]) || 0), 0) + 1;
-      const prefix = normalized.trimEnd() ? '\n' : '';
-      return `${normalized.trimEnd()}${prefix}${expression}  #${aliasPrefix}${nextIndex}`;
+      const insertionLineIndex = notebookInsertionLineIndexForCursor(normalized, notebookCursor);
+      lines.splice(insertionLineIndex, 0, `${expression}  #${aliasPrefix}${nextIndex}`);
+      pendingNotebookUiInsertionRef.current = { lineIndex: insertionLineIndex };
+      return lines.join('\n');
     });
-  }, [notebookMeasurementExpressionForTargets]);
+  }, [notebookCursor, notebookMeasurementExpressionForTargets]);
 
   const pickMeasureTarget = useCallback((targetId) => {
     if (!measureMode || measureDraft.length === 0) return false;
@@ -5072,6 +2161,18 @@ export default function App() {
       }}
     >
       <button
+        className={measureMode === 'sum' && measureDraft.includes(targetId) ? 'active' : ''}
+        onClick={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          startMeasurementFrom('sum', targetId, event);
+        }}
+        title={t(locale, 'sumConnect')}
+        type="button"
+      >
+        <Plus size={13} />
+      </button>
+      <button
         className={measureMode === 'dot' && measureDraft.includes(targetId) ? 'active' : ''}
         onClick={(event) => {
           event.preventDefault();
@@ -5119,7 +2220,7 @@ export default function App() {
   const renderMeasurementLabelTools = useCallback((item) => {
     const targetIds = item?.targetIds ?? item?.targets ?? [];
     const canContinueDot = item?.type === 'dot' && targetIds.length >= 2;
-    const canReverseDot = item?.type === 'dot' && targetIds.length >= 2;
+    const canReverseOrder = (item?.type === 'dot' || item?.type === 'sum') && targetIds.length >= 2;
     const canConvertMeasurement = (item?.type === 'dot' || item?.type === 'volume') && targetIds.length >= 2;
     const canContinueVolume = item?.type === 'volume' && targetIds.length === 2 && displayMode === '3d';
 
@@ -5151,13 +2252,13 @@ export default function App() {
             </span>
           </button>
         )}
-        {canReverseDot && (
+        {canReverseOrder && (
           <button
             className="measurement-label-reverse"
             onClick={(event) => {
               event.preventDefault();
               event.stopPropagation();
-              reverseDotMeasurement(item.id);
+              reverseMeasurementOrder(item.id);
             }}
             title={t(locale, 'reverseDirection')}
             type="button"
@@ -5210,7 +2311,7 @@ export default function App() {
         </button>
       </span>
     );
-  }, [continueDotMeasurement, continueMeasurement, convertMeasurementType, displayMode, locale, removeMeasurement, reverseDotMeasurement]);
+  }, [continueDotMeasurement, continueMeasurement, convertMeasurementType, displayMode, locale, removeMeasurement, reverseMeasurementOrder]);
 
   const renderMeasurementChip = useCallback((item) => (
     <div
@@ -5219,12 +2320,14 @@ export default function App() {
     >
       <button
         onClick={() => toggleMeasurementVisible(item.id)}
-        title={t(locale, 'toggleMeasurement', { type: item.type === 'dot' ? t(locale, 'dot') : t(locale, 'volume') })}
+        title={t(locale, 'toggleMeasurement', {
+          type: item.type === 'dot' ? t(locale, 'dot') : item.type === 'sum' ? t(locale, 'sum') : t(locale, 'volume'),
+        })}
         type="button"
       >
-        <span>{item.type === 'dot' ? 'Σ' : '□'}</span>
+        <span>{item.type === 'dot' ? 'Σ' : item.type === 'sum' ? '+' : '□'}</span>
         <strong>{item.label}</strong>
-        {item.value !== null && <em>{formatNumber(item.value)}</em>}
+        {item.value !== null && <em>{item.valueText ?? formatNumber(item.value)}</em>}
       </button>
       {(item.type === 'dot' || item.type === 'volume') && item.targetIds?.length >= 2 && (
         <button
@@ -5339,27 +2442,30 @@ export default function App() {
     refs.equationGroup.visible = true;
 
     if (lineSystem.mode === '3d') {
-      const hasSolutionHighlight =
-        lineSystem.solution?.status === 'infinite' &&
-        lineSystem.solution?.nullspaceBasis?.length === 1;
-      lineSystem.planes.forEach((plane) => {
-        createPlaneObjects(plane, 6.5, hasSolutionHighlight).forEach((object) => {
+      lineSystem.planes.forEach((plane, index) => {
+        const focusName = equationSceneLabelName(plane, '3d', index);
+        createPlaneObjects(plane, 6.5, false).forEach((object, objectIndex) => {
           object.userData.revealKey = `equation:plane:${plane.index}`;
+          object.userData.focusName = focusName;
+          object.userData.focusRole = objectIndex === 0 ? 'surface' : 'edge';
           refs.equationGroup.add(object);
         });
       });
-      createSolutionHighlightObjects(lineSystem.solution, 0xf1b434).forEach((object) => {
+      createSolutionHighlightObjects(lineSystem.solution, 0xf1b434).forEach((object, objectIndex) => {
         object.userData.revealKey = `equation:solution:${lineSystem.solution?.status ?? 'none'}`;
+        object.userData.solutionGeometry = true;
+        object.userData.focusRole = objectIndex === 0
+          ? 'solution-glow'
+          : objectIndex === 1 ? 'solution-core' : 'solution-point';
         refs.equationGroup.add(object);
       });
     } else {
-      lineSystem.lines.forEach((line) => {
+      lineSystem.lines.forEach((line, index) => {
         const segment = lineSegmentForEquation(line);
         if (segment.length < 2) return;
-        const geometry = new THREE.BufferGeometry().setFromPoints([
-          new THREE.Vector3(segment[0][0], segment[0][1], 0.018),
-          new THREE.Vector3(segment[1][0], segment[1][1], 0.018),
-        ]);
+        const start = new THREE.Vector3(segment[0][0], segment[0][1], 0.018);
+        const end = new THREE.Vector3(segment[1][0], segment[1][1], 0.018);
+        const geometry = new THREE.BufferGeometry().setFromPoints([start, end]);
         const material = new THREE.LineBasicMaterial({
           color: line.color,
           transparent: true,
@@ -5370,7 +2476,26 @@ export default function App() {
         const lineMesh = new THREE.Line(geometry, material);
         lineMesh.renderOrder = 32;
         lineMesh.userData.revealKey = `equation:line:${line.index}`;
-        refs.equationGroup.add(lineMesh);
+        lineMesh.userData.focusName = equationSceneLabelName(line, '2d', index);
+        lineMesh.userData.focusRole = 'line';
+
+        const focusHalo = new THREE.Mesh(
+          new THREE.TubeGeometry(new THREE.LineCurve3(start, end), 32, 0.028, 8, false),
+          new THREE.MeshBasicMaterial({
+            color: line.color,
+            transparent: true,
+            opacity: 0,
+            depthTest: false,
+            depthWrite: false,
+            blending: THREE.AdditiveBlending,
+          })
+        );
+        focusHalo.position.z = -0.012;
+        focusHalo.renderOrder = 31;
+        focusHalo.visible = false;
+        focusHalo.userData.focusName = equationSceneLabelName(line, '2d', index);
+        focusHalo.userData.focusRole = 'halo';
+        refs.equationGroup.add(focusHalo, lineMesh);
       });
     }
 
@@ -5521,45 +2646,86 @@ export default function App() {
     return adjusted;
   }, [previewDraggedMatrix]);
 
-  const syncNotebookVectorLineFromDrag = useCallback((vectorId, solved) => {
+  const beginNotebookVectorLineDrag = useCallback((vectorId) => {
     if (workspaceModeRef.current !== 'system' || !vectorId?.startsWith('notebook-')) return;
-    if (!Array.isArray(solved) || !solved.every(Number.isFinite)) return;
+    const normalized = String(notebookTextRef.current ?? '').replace(/\r/g, '');
+    const parsed = parseNotebookScript(normalized);
+    const visualIndexByName = new Map();
+    let targetCell = null;
 
-    setNotebookText((previous) => {
-      const normalized = String(previous ?? '').replace(/\r/g, '');
-      const parsed = parseNotebookScript(normalized);
-      const visualIndexByName = new Map();
-      let targetCell = null;
-
-      parsed.cells.forEach((cell) => {
-        if (cell.type !== 'vector' && cell.type !== 'calc') return;
-        const key = notebookVariableKey(cell.name);
-        if (!visualIndexByName.has(key)) {
-          visualIndexByName.set(key, visualIndexByName.size);
-        }
-        const candidateId = notebookVectorIdForName(cell.name, visualIndexByName.get(key));
-        if (candidateId === vectorId) targetCell = cell;
-      });
-
-      if (!targetCell || !Number.isFinite(targetCell.lineStart)) return previous;
-      const lines = normalized.split('\n');
-      const sourceLine = lines[targetCell.lineStart] ?? '';
-      const sourceVector = parseNotebookVectorLine(sourceLine);
-      const sourceDimension = sourceVector?.dimension ?? targetCell.dimension;
-      const dimension = sourceDimension >= 3 || Math.abs(solved[2] ?? 0) > 0.001 ? 3 : 2;
-      const vectorText = solved
-        .slice(0, dimension)
-        .map((value) => formatVectorInputValue(value))
-        .join(', ');
-      const sourceMeta = splitNotebookLineMeta(sourceLine);
-      lines[targetCell.lineStart] = appendNotebookLineMeta(vectorText, {
-        ...sourceMeta,
-        alias: targetCell.name,
-      });
-      const next = lines.join('\n');
-      return next === normalized ? previous : next;
+    parsed.cells.forEach((cell) => {
+      if (cell.type !== 'vector' && cell.type !== 'calc') return;
+      const key = notebookVariableKey(cell.name);
+      if (!visualIndexByName.has(key)) {
+        visualIndexByName.set(key, visualIndexByName.size);
+      }
+      const candidateId = notebookVectorIdForName(cell.name, visualIndexByName.get(key));
+      if (candidateId === vectorId) targetCell = cell;
     });
+
+    if (!targetCell || !Number.isFinite(targetCell.lineStart)) return;
+    const sourceLine = normalized.split('\n')[targetCell.lineStart] ?? '';
+    const sourceVector = parseNotebookVectorLine(sourceLine);
+    if (notebookEditorRuntimeTimerRef.current) {
+      window.clearTimeout(notebookEditorRuntimeTimerRef.current);
+      notebookEditorRuntimeTimerRef.current = null;
+    }
+    notebookEditorTypingRef.current = true;
+    notebookVectorDragSyncRef.current = {
+      vectorId,
+      lineIndex: targetCell.lineStart,
+      name: targetCell.name,
+      sourceDimension: sourceVector?.dimension ?? targetCell.dimension,
+      sourceMeta: splitNotebookLineMeta(sourceLine),
+      lastLine: sourceLine,
+      lastText: normalized,
+    };
   }, []);
+
+  const syncNotebookVectorLineFromDrag = useCallback((vectorId, solved) => {
+    if (!Array.isArray(solved) || !solved.every(Number.isFinite)) return;
+    if (notebookVectorDragSyncRef.current?.vectorId !== vectorId) {
+      beginNotebookVectorLineDrag(vectorId);
+    }
+    const dragSync = notebookVectorDragSyncRef.current;
+    if (!dragSync || dragSync.vectorId !== vectorId) return;
+
+    const dimension =
+      dragSync.sourceDimension >= 3 || Math.abs(solved[2] ?? 0) > 0.001 ? 3 : 2;
+    const vectorText = solved
+      .slice(0, dimension)
+      .map((value) => formatVectorInputValue(value))
+      .join(', ');
+    const nextLine = appendNotebookLineMeta(vectorText, {
+      ...dragSync.sourceMeta,
+      alias: dragSync.name,
+    });
+    if (nextLine === dragSync.lastLine) return;
+
+    const editorValue = notebookEditorRef.current?.replaceLine?.(
+      dragSync.lineIndex,
+      nextLine
+    );
+    if (typeof editorValue === 'string') {
+      dragSync.lastText = editorValue;
+    } else {
+      const lines = dragSync.lastText.split('\n');
+      lines[dragSync.lineIndex] = nextLine;
+      dragSync.lastText = lines.join('\n');
+    }
+    dragSync.lastLine = nextLine;
+    notebookTextRef.current = dragSync.lastText;
+  }, [beginNotebookVectorLineDrag]);
+
+  const commitNotebookVectorLineDrag = useCallback(() => {
+    const dragSync = notebookVectorDragSyncRef.current;
+    notebookVectorDragSyncRef.current = null;
+    notebookEditorTypingRef.current = false;
+    if (!dragSync || dragSync.lastText === notebookText) return;
+    notebookTextRef.current = dragSync.lastText;
+    setNotebookText(dragSync.lastText);
+    setNotebookRuntimeText(dragSync.lastText);
+  }, [notebookText]);
 
   const updateUserVectorFromDrag = useCallback((worldVector, dragState = null) => {
     const vectorId = vectorIdFromDragKey(dragState?.key) ?? activeVectorIdRef.current;
@@ -5594,12 +2760,31 @@ export default function App() {
     if (activeVectorIdRef.current === vectorId) {
       userVectorRef.current = [solved[0], solved[1], solved[2]];
     }
+    if (dragState) dragState.latestInputVector = [...solved];
     syncNotebookVectorLineFromDrag(vectorId, solved);
-    setVectors((previous) =>
-      previous.map((item) => (item.id === vectorId ? { ...item, ...nextVector } : item))
+    vectorsRef.current = vectorsRef.current.map((item) =>
+      item.id === vectorId
+        ? { ...item, ...nextVector, values: [...solved] }
+        : item
     );
     return new THREE.Vector3(adjustedWorld[0], adjustedWorld[1], adjustedWorld[2]);
   }, [snapToInteger, syncNotebookVectorLineFromDrag]);
+
+  const commitUserVectorDrag = useCallback((dragState) => {
+    const vectorId = vectorIdFromDragKey(dragState?.key);
+    const solved = dragState?.latestInputVector;
+    if (vectorId && Array.isArray(solved) && solved.every(Number.isFinite)) {
+      const nextVector = {
+        x: formatVectorInputValue(solved[0]),
+        y: formatVectorInputValue(solved[1]),
+        z: formatVectorInputValue(solved[2]),
+      };
+      setVectors((previous) =>
+        previous.map((item) => (item.id === vectorId ? { ...item, ...nextVector } : item))
+      );
+    }
+    commitNotebookVectorLineDrag();
+  }, [commitNotebookVectorLineDrag]);
 
   const updateScalarConstraintFromDrag = useCallback((worldVector, dragState = null) => {
     const vectorId = scalarIdFromDragKey(dragState?.key);
@@ -5633,12 +2818,21 @@ export default function App() {
 
   useEffect(() => {
     dragActionsRef.current = {
+      beginNotebookVectorLineDrag,
       commitBasisDrag,
+      commitUserVectorDrag,
       updateBasisVectorFromDrag,
       updateScalarConstraintFromDrag,
       updateUserVectorFromDrag,
     };
-  }, [commitBasisDrag, updateBasisVectorFromDrag, updateScalarConstraintFromDrag, updateUserVectorFromDrag]);
+  }, [
+    beginNotebookVectorLineDrag,
+    commitBasisDrag,
+    commitUserVectorDrag,
+    updateBasisVectorFromDrag,
+    updateScalarConstraintFromDrag,
+    updateUserVectorFromDrag,
+  ]);
 
   const controlLocksFromRefs = useCallback(() => ({
     camera: cameraLockedRef.current,
@@ -5664,38 +2858,79 @@ export default function App() {
   const setCameraAtProgress = useCallback((rawProgress) => {
     const refs = threeRef.current;
     if (!refs) return;
-
-    if (cameraLockedRef.current) {
-      cameraMoveRef.current.active = false;
-      refs.controls.update();
-      return;
-    }
-    if (workspaceModeRef.current === 'system') {
-      refs.controls.update();
-      return;
-    }
-
-    cameraMoveRef.current.active = false;
-    const clamped = Math.max(0, Math.min(1, rawProgress));
-    const eased = easeInOut(clamped);
-    const fromKey = animationViewFromRef.current;
-    const toKey = animationViewToRef.current;
-    const target = refs.controls.target.clone();
-    const distance = Math.max(refs.camera.position.distanceTo(refs.controls.target), EPSILON);
-    const direction = viewDirectionForKey(fromKey).lerp(viewDirectionForKey(toKey), eased);
-    if (direction.lengthSq() < EPSILON) direction.copy(viewDirectionForKey(toKey));
-    direction.normalize();
-    refs.controls.target.copy(target);
-    refs.camera.position.copy(target).addScaledVector(direction, distance);
-    if (clamped <= 0.001) configureControlsForView(refs.controls, fromKey, controlLocksFromRefs());
-    if (clamped >= 0.999) configureControlsForView(refs.controls, toKey, controlLocksFromRefs());
     refs.controls.update();
-
-    const nextActiveView = clamped <= 0.001 ? fromKey : clamped >= 0.999 ? toKey : null;
-    setActiveView((previous) => (previous === nextActiveView ? previous : nextActiveView));
   }, []);
 
-  const setMatrixAtProgress = useCallback((rawProgress) => {
+  const setNotebookCameraDirective = useCallback((directive, { syncUi = true } = {}) => {
+    const refs = threeRef.current;
+    if (!refs || cameraLockedRef.current || !directive) return;
+    const hasView = Boolean(directive.viewFrom && directive.viewTo);
+    const hasZoom = Boolean(directive.hasZoom);
+    const hasOrbit = Boolean(directive.hasOrbit);
+    if (!hasView && !hasZoom && !hasOrbit) return;
+
+    cameraMoveRef.current.active = false;
+    const target = refs.controls.target.clone();
+    const currentOffset = refs.camera.position.clone().sub(target);
+    let direction = currentOffset.lengthSq() > EPSILON
+      ? currentOffset.normalize()
+      : viewDirectionForKey(directive.viewTo ?? '3d');
+
+    if (hasView) {
+      const viewProgress = clamp01(directive.viewProgress ?? 1);
+      const easedView = easeInOut(viewProgress);
+      direction = viewDirectionForKey(directive.viewFrom)
+        .lerp(viewDirectionForKey(directive.viewTo), easedView);
+      if (direction.lengthSq() < EPSILON) direction.copy(viewDirectionForKey(directive.viewTo));
+      direction.normalize();
+      if (viewProgress >= 0.999) {
+        configureControlsForView(refs.controls, directive.viewTo, controlLocksFromRefs());
+        if (syncUi) setActiveView(directive.viewTo);
+      } else if (syncUi) {
+        setActiveView(null);
+      }
+    }
+
+    if (hasOrbit) {
+      const orbitView = directive.orbitView ?? directive.viewTo ?? '3d';
+      const orbitProgress = clamp01(directive.orbitProgress ?? 0);
+      const orbitAngle = easeInOut(orbitProgress) * Math.PI * 2;
+      direction = viewDirectionForKey(orbitView)
+        .applyAxisAngle(new THREE.Vector3(0, 1, 0), orbitAngle)
+        .normalize();
+      if (orbitProgress >= 0.999) {
+        configureControlsForView(refs.controls, orbitView, controlLocksFromRefs());
+        if (syncUi) setActiveView(orbitView);
+      } else if (syncUi) {
+        setActiveView(null);
+      }
+    }
+
+    let distance = Math.max(refs.camera.position.distanceTo(target), EPSILON);
+    if (hasZoom && !zoomLockedRef.current) {
+      const zoomProgress = clamp01(directive.zoomProgress ?? 1);
+      const easedZoom = easeInOut(zoomProgress);
+      const zoomFrom = Math.max(NOTEBOOK_ZOOM_MIN, Number(directive.zoomFrom) || NOTEBOOK_SCENE_DEFAULTS.zoom);
+      const zoomTo = Math.max(NOTEBOOK_ZOOM_MIN, Number(directive.zoomTo) || zoomFrom);
+      const zoomReferenceViewFrom =
+        directive.zoomReferenceViewFrom ??
+        directive.viewTo ??
+        autoCameraTargetViewRef.current ??
+        '3d';
+      const zoomReferenceViewTo =
+        directive.zoomReferenceViewTo ??
+        zoomReferenceViewFrom;
+      const distanceFrom = notebookCameraDistanceForZoom(zoomReferenceViewFrom, zoomFrom);
+      const distanceTo = notebookCameraDistanceForZoom(zoomReferenceViewTo, zoomTo);
+      distance = distanceFrom + (distanceTo - distanceFrom) * easedZoom;
+    }
+
+    refs.controls.target.copy(target);
+    refs.camera.position.copy(target).addScaledVector(direction, distance);
+    refs.controls.update();
+  }, [controlLocksFromRefs]);
+
+  const setMatrixAtProgress = useCallback((rawProgress, { syncUi = true } = {}) => {
     const clamped = Math.max(0, Math.min(1, rawProgress));
     const eased = easeInOut(clamped);
 
@@ -5709,9 +2944,11 @@ export default function App() {
       currentMatrixRef.current = [...targetMatrixRef.current];
     }
 
-    setProgress(clamped);
-    setDisplayMatrix([...currentMatrixRef.current]);
-    setBasisControlMatrix([...currentMatrixRef.current]);
+    if (syncUi) {
+      setProgress(clamped);
+      setDisplayMatrix([...currentMatrixRef.current]);
+      setBasisControlMatrix([...currentMatrixRef.current]);
+    }
     setCameraAtProgress(clamped);
   }, [setCameraAtProgress]);
 
@@ -5781,33 +3018,69 @@ export default function App() {
     const refs = threeRef.current;
     const label = labelRef?.current ?? labelRef;
     const allowOrigin = options.allowOrigin ?? false;
+    const hideLabel = () => {
+      if (!label || label.style.display === 'none') return;
+      label.style.display = 'none';
+      if (refs) refs.labelLayoutDirty = true;
+    };
     if (!refs || !label || !visible || !isFiniteVector3(vector3) || (!allowOrigin && vector3.length() < EPSILON)) {
-      if (label) label.style.display = 'none';
+      hideLabel();
       return;
     }
 
     const projected = vector3.clone().project(refs.camera);
     if (projected.z > 1 || projected.z < -1) {
-      label.style.display = 'none';
+      hideLabel();
       return;
     }
 
-    const width = refs.renderer.domElement.clientWidth;
-    const height = refs.renderer.domElement.clientHeight;
+    const width = refs.viewportSize.width;
+    const height = refs.viewportSize.height;
     const x = (projected.x * 0.5 + 0.5) * width;
     const y = (projected.y * -0.5 + 0.5) * height;
     const labelX = x + offset[0];
     const labelY = y + offset[1];
     if (!Number.isFinite(labelX) || !Number.isFinite(labelY)) {
-      label.style.display = 'none';
+      hideLabel();
       return;
     }
-    setAxisLabelText(label, text);
-    label.dataset.labelX = String(labelX);
-    label.dataset.labelY = String(labelY);
-    label.style.display = 'block';
-    label.style.transform =
-      `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)`;
+    let changed = setAxisLabelText(label, text);
+    const setLabelData = (key, value) => {
+      const nextValue = String(value);
+      if (label.dataset[key] === nextValue) return;
+      label.dataset[key] = nextValue;
+      changed = true;
+    };
+    const clearLabelData = (key) => {
+      if (!(key in label.dataset)) return;
+      delete label.dataset[key];
+      changed = true;
+    };
+    setLabelData('labelX', labelX);
+    setLabelData('labelY', labelY);
+    setLabelData('labelAnchorX', x);
+    setLabelData('labelAnchorY', y);
+    if (options.placement) setLabelData('labelPlacement', options.placement);
+    else clearLabelData('labelPlacement');
+    const avoidanceBounds = Array.isArray(options.avoidancePoints)
+      ? projectedScreenBounds(options.avoidancePoints, refs.camera, width, height)
+      : null;
+    if (avoidanceBounds) {
+      setLabelData('labelAvoidLeft', avoidanceBounds.left);
+      setLabelData('labelAvoidRight', avoidanceBounds.right);
+      setLabelData('labelAvoidTop', avoidanceBounds.top);
+      setLabelData('labelAvoidBottom', avoidanceBounds.bottom);
+    } else {
+      clearLabelData('labelAvoidLeft');
+      clearLabelData('labelAvoidRight');
+      clearLabelData('labelAvoidTop');
+      clearLabelData('labelAvoidBottom');
+    }
+    if (label.style.display !== 'block') {
+      label.style.display = 'block';
+      changed = true;
+    }
+    if (changed) refs.labelLayoutDirty = true;
   }, []);
 
   const queueCameraShareUpdate = useCallback((delay = 180) => {
@@ -5820,33 +3093,9 @@ export default function App() {
       const next = cameraShareStateFromRefs(threeRef.current);
       if (!next) return;
       setCameraState((previous) => (cameraStatesAlmostEqual(previous, next) ? previous : next));
-      if (delay <= 0) patchCameraStateInUrl(next, locale);
+      if (delay <= 0) patchCameraStateInUrl(next, { locale, title: t(locale, 'title') });
     }, delay);
   }, [locale]);
-
-  const snapCameraToAutoView = useCallback(() => {
-    if (!cameraAutoRef.current || cameraLockedRef.current) return false;
-    const refs = threeRef.current;
-    const viewKey = autoCameraTargetViewRef.current;
-    if (!refs || !viewPresets[viewKey]) return false;
-
-    const destination = cameraStateForView(viewKey, refs.camera.position, refs.controls.target);
-    setActiveView(viewKey);
-    setCameraState({
-      position: cameraVectorToShareArray(destination.position),
-      target: cameraVectorToShareArray(destination.target),
-    });
-    configureControlsForView(refs.controls, viewKey, controlLocksFromRefs());
-    cameraMoveRef.current = {
-      active: true,
-      startTime: null,
-      positionFrom: refs.camera.position.clone(),
-      targetFrom: refs.controls.target.clone(),
-      positionTo: destination.position,
-      targetTo: destination.target,
-    };
-    return true;
-  }, [controlLocksFromRefs]);
 
   const animate = useCallback((time) => {
     frameIdRef.current = requestAnimationFrame(animate);
@@ -5857,14 +3106,21 @@ export default function App() {
     if (cameraMove.active) {
       if (cameraLockedRef.current) {
         cameraMove.active = false;
+        cameraMove.onComplete = null;
       } else {
         if (cameraMove.startTime === null) cameraMove.startTime = time;
-        const raw = Math.min((time - cameraMove.startTime) / CAMERA_MOVE_MS, 1);
+        const raw = Math.min(
+          (time - cameraMove.startTime) / Math.max(1, cameraMove.duration ?? CAMERA_MOVE_MS),
+          1
+        );
         const eased = easeInOut(raw);
         refs.camera.position.lerpVectors(cameraMove.positionFrom, cameraMove.positionTo, eased);
         refs.controls.target.lerpVectors(cameraMove.targetFrom, cameraMove.targetTo, eased);
         if (raw >= 1) {
           cameraMove.active = false;
+          const onComplete = cameraMove.onComplete;
+          cameraMove.onComplete = null;
+          onComplete?.();
         }
       }
     }
@@ -5961,7 +3217,6 @@ export default function App() {
       (iVector.lengthSq() > EPSILON || jVector.lengthSq() > EPSILON);
     refs.staticGrid.visible = showStaticGrid;
     refs.referenceGrid.visible = showReferenceGrid;
-    refs.axesHelper.visible = uiStateRef.current.showAxes;
     refs.dynamicGrid.visible = showDynamicGrid3D;
     refs.dynamicPlaneGrid.visible = showDynamicGrid2D;
     setMaterialOpacity(refs.staticGrid.material, isSystem3D ? 0.22 : 0.07 + kAxisBlend * 0.14);
@@ -5976,11 +3231,82 @@ export default function App() {
     refs.equationGroup.visible = isSystemMode;
     if (isSystemMode) {
       refs.equationGroup.matrix.copy(matrix4);
+      refs.solutionTraceVisual.group.matrix.copy(matrix4);
     } else {
       refs.equationGroup.matrix.identity();
+      refs.solutionTraceVisual.group.matrix.identity();
     }
     refs.equationGroup.matrixWorldNeedsUpdate = true;
-    refs.equationPoint.visible = isSystemMode && refs.equationPoint.userData.visible;
+    refs.solutionTraceVisual.group.matrixWorldNeedsUpdate = true;
+    const notebookSolutionSelection = uiStateRef.current.notebookSolutionSelection;
+    const notebookSolutionProgress = notebookSolutionSelection
+      ? clamp01(notebookSolutionSelection.progress ?? 1)
+      : 1;
+    const notebookSolutionCommitProgress = notebookSolutionSelection
+      ? easeOutCubic(
+          clamp01(
+            (notebookSolutionProgress - SOLUTION_TRACE_TRAVEL_END) /
+              (SOLUTION_TRACE_FADE_END - SOLUTION_TRACE_TRAVEL_END)
+          )
+        )
+      : 1;
+    const showEquationSolution = Boolean(
+      uiStateRef.current.showAutomaticSolution || notebookSolutionSelection
+    );
+    const solutionLineSystem = lineSystemRef.current;
+    const solutionTargetValues = solutionLineSystem?.point;
+    const solutionConvergesToPoint = Boolean(
+      solutionTargetValues &&
+      (solutionLineSystem?.status === 'unique' || solutionLineSystem?.status === 'unique3d')
+    );
+    const solutionTarget = solutionConvergesToPoint
+      ? new THREE.Vector3(
+          solutionTargetValues[0] ?? 0,
+          solutionTargetValues[1] ?? 0,
+          solutionLineSystem?.mode === '3d' ? solutionTargetValues[2] ?? 0 : 0.055
+        )
+      : solutionTraceHasNoCommonPoint(solutionLineSystem)
+        ? solutionTraceAnchor(solutionLineSystem, notebookSolutionSelection)
+        : null;
+    let solutionTraceStartsAbove = false;
+    if (notebookSolutionSelection && solutionTarget) {
+      const directionKey = [
+        uiStateRef.current.notebookActiveCellId ?? 'solution',
+        solutionLineSystem?.status ?? 'unknown',
+        ...(notebookSolutionSelection.names ?? []),
+        ...solutionTarget.toArray(),
+      ].join(':');
+      if (refs.solutionTraceVisual.directionKey !== directionKey) {
+        refs.solutionTraceVisual.directionKey = directionKey;
+        refs.solutionTraceVisual.startFromAbove = solutionTraceStartsNearCaption(
+          notebookCaptionRef.current,
+          refs.renderer,
+          refs.camera,
+          solutionTarget,
+          matrix4
+        );
+      }
+      solutionTraceStartsAbove = refs.solutionTraceVisual.startFromAbove;
+    } else {
+      refs.solutionTraceVisual.directionKey = null;
+      refs.solutionTraceVisual.startFromAbove = false;
+    }
+    updateSolutionTraceVisual(
+      refs.solutionTraceVisual,
+      lineSystemRef.current,
+      isSystemMode ? notebookSolutionSelection : null,
+      notebookSolutionProgress,
+      {
+        camera: refs.camera,
+        sceneMatrix: matrix4,
+        startFromAbove: solutionTraceStartsAbove,
+      }
+    );
+    refs.equationPoint.visible =
+      isSystemMode &&
+      showEquationSolution &&
+      refs.equationPoint.userData.visible &&
+      notebookSolutionCommitProgress > 0.002;
     if (refs.equationPoint.visible && refs.equationPoint.userData.inputPoint) {
       const transformedPoint = transformVector3(matrix, refs.equationPoint.userData.inputPoint);
       refs.equationPoint.position.set(transformedPoint[0], transformedPoint[1], transformedPoint[2]);
@@ -5991,11 +3317,21 @@ export default function App() {
     const activeEquationRevealKeys = new Set();
     if (isSystemMode) {
       refs.equationGroup.traverse((object) => {
+        if (object.userData?.solutionGeometry) {
+          object.visible = showEquationSolution;
+          if (!showEquationSolution) return;
+        }
         const revealKey = object.userData?.revealKey;
         if (!revealKey) return;
         activeEquationRevealKeys.add(revealKey);
         if (!equationSpawnTimes.has(revealKey)) equationSpawnTimes.set(revealKey, time);
-        setObjectRevealOpacity(object, (time - (equationSpawnTimes.get(revealKey) ?? time)) / VECTOR_SPAWN_MS);
+        const revealDuration = object.userData?.solutionGeometry
+          ? SOLUTION_REVEAL_MS
+          : VECTOR_SPAWN_MS;
+        setObjectRevealOpacity(
+          object,
+          (time - (equationSpawnTimes.get(revealKey) ?? time)) / revealDuration
+        );
       });
       const pointRevealKey = refs.equationPoint.userData.revealKey;
       if (refs.equationPoint.visible && pointRevealKey) {
@@ -6003,7 +3339,7 @@ export default function App() {
         if (!equationSpawnTimes.has(pointRevealKey)) equationSpawnTimes.set(pointRevealKey, time);
         setObjectRevealOpacity(
           refs.equationPoint,
-          (time - (equationSpawnTimes.get(pointRevealKey) ?? time)) / VECTOR_SPAWN_MS
+          (time - (equationSpawnTimes.get(pointRevealKey) ?? time)) / SOLUTION_REVEAL_MS
         );
       }
     }
@@ -6011,21 +3347,255 @@ export default function App() {
       if (!activeEquationRevealKeys.has(revealKey)) equationSpawnTimes.delete(revealKey);
     });
 
-    const basisVisible = uiStateRef.current.showRelativeAxes;
+    const authoredNotebookFocusedNames = new Set(uiStateRef.current.notebookFocusedNames ?? []);
+    const captionHoverName = uiStateRef.current.notebookCaptionHoverName;
+    const authoredHardFocusRequested =
+      uiStateRef.current.notebookFocusMode === 'hard' && authoredNotebookFocusedNames.size > 0;
+    const authoredHardFocusExpiresAt =
+      Number(uiStateRef.current.notebookHardFocusExpiresAt ?? 0);
+    const authoredHardFocusStartsAt =
+      authoredHardFocusExpiresAt - NOTEBOOK_AUTHORED_HARD_FOCUS_COMPARE_MS;
+    const authoredHardFocusLive = authoredHardFocusRequested &&
+      time >= authoredHardFocusStartsAt &&
+      time < authoredHardFocusExpiresAt;
+    const authoredHardFocusProgress = authoredHardFocusLive
+      ? clamp01(
+          (time - authoredHardFocusStartsAt) /
+            NOTEBOOK_AUTHORED_HARD_FOCUS_COMPARE_MS
+        )
+      : 0;
+    const authoredHardFocusAccentStrength = authoredHardFocusLive
+      ? 0.5 - 0.5 * Math.cos(authoredHardFocusProgress * Math.PI * 4)
+      : 0;
+    const hardFocusTargetNames = captionHoverName
+      ? new Set([captionHoverName])
+      : authoredHardFocusLive
+        ? authoredNotebookFocusedNames
+        : null;
+    const hardFocusAccentStrength = captionHoverName
+      ? 1
+      : authoredHardFocusAccentStrength;
+    const authoredHardFocusComparing = !captionHoverName && authoredHardFocusLive;
+    const hardFocusTarget = captionHoverName
+      ? 1
+      : authoredHardFocusComparing
+        ? authoredHardFocusAccentStrength
+        : 0;
+    const previousHardFocusBlend = Number.isFinite(refs.notebookHardFocusBlend)
+      ? refs.notebookHardFocusBlend
+      : 0;
+    const previousHardFocusTime = Number.isFinite(refs.notebookHardFocusTime)
+      ? refs.notebookHardFocusTime
+      : time - 16;
+    const hardFocusElapsed = Math.max(0, Math.min(64, time - previousHardFocusTime));
+    const pointerHardFocusReleasing =
+      !captionHoverName && Boolean(refs.notebookPointerHardFocusActive);
+    const hardFocusTau = hardFocusTarget > previousHardFocusBlend
+      ? NOTEBOOK_HARD_FOCUS_BLEND_IN_TAU_MS
+      : pointerHardFocusReleasing
+        ? NOTEBOOK_CAPTION_HARD_FOCUS_BLEND_OUT_TAU_MS
+        : NOTEBOOK_HARD_FOCUS_BLEND_OUT_TAU_MS;
+    const hardFocusBlendStep = 1 - Math.exp(-hardFocusElapsed / hardFocusTau);
+    let notebookHardFocusBlend = authoredHardFocusComparing
+      ? hardFocusTarget
+      : previousHardFocusBlend +
+        (hardFocusTarget - previousHardFocusBlend) * hardFocusBlendStep;
+    if (Math.abs(notebookHardFocusBlend - hardFocusTarget) < 0.004) {
+      notebookHardFocusBlend = hardFocusTarget;
+    }
+    refs.notebookHardFocusBlend = notebookHardFocusBlend;
+    refs.notebookHardFocusTime = time;
+    if (captionHoverName) {
+      refs.notebookPointerHardFocusActive = true;
+    } else if (notebookHardFocusBlend <= 0.01) {
+      refs.notebookPointerHardFocusActive = false;
+    }
+    if (hardFocusTargetNames?.size) {
+      refs.notebookHardFocusDisplayNames = new Set(hardFocusTargetNames);
+    }
+    const releasingHardFocusNames = notebookHardFocusBlend > 0.01
+      ? new Set(refs.notebookHardFocusDisplayNames ?? [])
+      : null;
+    const notebookFocusedNames = hardFocusTargetNames
+      ?? releasingHardFocusNames
+      ?? (authoredHardFocusRequested ? new Set() : authoredNotebookFocusedNames);
+    const notebookHardFocusActive = notebookHardFocusBlend > 0.01 && notebookFocusedNames.size > 0;
+    const preserveAuthoredFocusPresentation = Boolean(refs.notebookPointerHardFocusActive);
+    const hardFocusHasLiveTarget = Boolean(hardFocusTargetNames?.size);
+    const hardFocusAccentVisible = hardFocusAccentStrength > 0.3;
+    const hardFocusPresentationVisible = captionHoverName
+      ? true
+      : hardFocusAccentStrength > 0.02;
+    const hardFocusVisibilityFactor = 1 - notebookHardFocusBlend * 0.84;
+    const hardFocusGeometryOpacityFactor = hardFocusVisibilityFactor;
+    const hardFocusLabelOpacityFactor = hardFocusVisibilityFactor;
+    const notebookObjectFocusState = (name) => {
+      const key = notebookVariableKey(name);
+      const focused = notebookFocusedNames.has(key);
+      const authoredFocused = authoredNotebookFocusedNames.has(key);
+      return {
+        focused,
+        presentationFocused:
+          (hardFocusHasLiveTarget && hardFocusPresentationVisible && focused) ||
+          (preserveAuthoredFocusPresentation && authoredFocused) ||
+          (!authoredHardFocusComparing && !notebookHardFocusActive && focused),
+        hardFocused: hardFocusAccentVisible && focused,
+        labelPresentationFocused:
+          (hardFocusHasLiveTarget && focused) ||
+          (preserveAuthoredFocusPresentation && authoredFocused) ||
+          (!authoredHardFocusComparing && !notebookHardFocusActive && focused),
+        labelHardFocused:
+          (captionHoverName ? hardFocusAccentVisible : authoredHardFocusComparing) && focused,
+        hardDimmed: notebookHardFocusActive && !focused,
+        hardAccentStrength: focused ? hardFocusAccentStrength : 0,
+      };
+    };
+    const syncNotebookLabelFocusState = (label, focusState, baseOpacity = 1) => {
+      if (!label) return;
+      const normalizedBaseOpacity = Number.isFinite(baseOpacity) ? baseOpacity : 1;
+      label.classList.toggle(
+        'notebook-focused',
+        focusState.labelPresentationFocused ?? focusState.presentationFocused
+      );
+      label.classList.toggle(
+        'notebook-hard-focused',
+        focusState.labelHardFocused ?? focusState.hardFocused
+      );
+      label.classList.toggle('notebook-hard-dimmed', focusState.hardDimmed);
+      label.style.setProperty(
+        '--notebook-hard-focus-opacity',
+        String(normalizedBaseOpacity * (focusState.hardDimmed ? hardFocusLabelOpacityFactor : 1))
+      );
+      label.style.setProperty(
+        '--notebook-hard-focus-saturation',
+        String(1 - notebookHardFocusBlend * 0.65)
+      );
+      label.style.setProperty(
+        '--notebook-hard-focus-brightness',
+        String(1 - notebookHardFocusBlend * 0.32)
+      );
+      label.style.setProperty(
+        '--notebook-hard-focus-blur',
+        `${notebookHardFocusBlend * 0.25}px`
+      );
+    };
+    [
+      ['i', iLabelRef.current],
+      ['j', jLabelRef.current],
+      ['k', kLabelRef.current],
+    ].forEach(([name, label]) => {
+      const focusState = notebookObjectFocusState(name);
+      syncNotebookLabelFocusState(label, focusState);
+    });
+    const equationFocusStartTimes = refs.equationFocusStartTimes ?? new Map();
+    refs.equationFocusStartTimes = equationFocusStartTimes;
+    const activeEquationFocusNames = new Set();
+    if (isSystemMode) {
+      refs.equationGroup.traverse((object) => {
+        const focusName = object.userData?.solutionGeometry
+          ? notebookSolutionSelection?.name
+          : object.userData?.focusName;
+        if (!focusName) return;
+        const focusKey = notebookVariableKey(focusName);
+        const focusState = notebookObjectFocusState(focusName);
+        const focused = focusState.presentationFocused;
+        const hardDimmed = focusState.hardDimmed;
+        const hardAccentStrength = focusState.hardAccentStrength;
+        const solutionRevealFactor =
+          object.userData?.solutionGeometry && notebookSolutionSelection
+            ? notebookSolutionCommitProgress
+            : 1;
+        if (focused) {
+          activeEquationFocusNames.add(focusKey);
+          if (!equationFocusStartTimes.has(focusKey)) equationFocusStartTimes.set(focusKey, time);
+        }
+        const settle = focused
+          ? easeOutCubic((time - (equationFocusStartTimes.get(focusKey) ?? time)) / NOTEBOOK_FOCUS_SETTLE_MS)
+          : 0;
+        const role = object.userData?.focusRole;
+        const material = object.material;
+        if (role === 'halo') {
+          object.visible = focused;
+          const haloOpacity = authoredHardFocusComparing
+            ? 0.42 * hardAccentStrength
+            : (notebookHardFocusActive ? 0.42 : 0.32);
+          setMaterialOpacity(
+            material,
+            focused
+              ? haloOpacity * settle *
+                (hardDimmed ? hardFocusGeometryOpacityFactor : 1)
+              : 0
+          );
+          return;
+        }
+        const materials = Array.isArray(material) ? material : [material];
+        materials.forEach((item) => {
+          if (!item) return;
+          const baseOpacity = Number.isFinite(item.userData.baseOpacity)
+            ? item.userData.baseOpacity
+            : Number.isFinite(item.opacity) ? item.opacity : 1;
+          const focusOpacity = role === 'surface'
+            ? Math.max(baseOpacity, 0.24)
+            : role === 'solution-glow'
+              ? Math.max(baseOpacity, 0.2)
+              : Math.max(baseOpacity, 0.96);
+          item.transparent = true;
+          item.opacity = (hardDimmed
+            ? baseOpacity * hardFocusGeometryOpacityFactor
+            : baseOpacity + (focusOpacity - baseOpacity) * settle) * solutionRevealFactor;
+        });
+      });
+    }
+    equationFocusStartTimes.forEach((_, focusKey) => {
+      if (!activeEquationFocusNames.has(focusKey)) equationFocusStartTimes.delete(focusKey);
+    });
+
+    const absoluteAxisVisible = uiStateRef.current.showAxes;
+    const relativeAxisVisible = uiStateRef.current.showRelativeAxes;
+    const basisVisible = uiStateRef.current.showBasis;
     const basisVisibility = uiStateRef.current.basisVisibility ?? { i: true, j: true, k: true };
     const basisLengthByKey = {
       i: Math.hypot(matrix[0], matrix[3], matrix[6]),
       j: Math.hypot(matrix[1], matrix[4], matrix[7]),
       k: Math.hypot(matrix[2], matrix[5], matrix[8]),
     };
+    const relativeAxisVisibleByKey = {
+      i: relativeAxisVisible && basisVisibility.i !== false && basisLengthByKey.i > EPSILON,
+      j: relativeAxisVisible && basisVisibility.j !== false && basisLengthByKey.j > EPSILON,
+      k: relativeAxisVisible && basisVisibility.k !== false && basisLengthByKey.k > EPSILON,
+    };
     const basisVisibleByKey = {
       i: basisVisible && basisVisibility.i !== false && basisLengthByKey.i > EPSILON,
       j: basisVisible && basisVisibility.j !== false && basisLengthByKey.j > EPSILON,
       k: basisVisible && basisVisibility.k !== false && basisLengthByKey.k > EPSILON,
     };
+    setAxisLineVector(refs.iAbsoluteAxis, 1, 0, 0, absoluteAxisVisible);
+    setAxisLineVector(refs.jAbsoluteAxis, 0, 1, 0, absoluteAxisVisible);
+    setAxisLineVector(refs.kAbsoluteAxis, 0, 0, 1, absoluteAxisVisible && (coordMode === '3d' || isSystem3D));
+    setAxisLineVector(refs.iRelativeAxis, matrix[0], matrix[3], matrix[6], relativeAxisVisibleByKey.i);
+    setAxisLineVector(refs.jRelativeAxis, matrix[1], matrix[4], matrix[7], relativeAxisVisibleByKey.j);
+    setAxisLineVector(
+      refs.kRelativeAxis,
+      matrix[2],
+      matrix[5],
+      matrix[8],
+      relativeAxisVisibleByKey.k && (coordMode === '3d' || isSystem3D)
+    );
     setArrowVector(refs.iArrow, matrix[0], matrix[3], matrix[6], basisVisibleByKey.i);
     setArrowVector(refs.jArrow, matrix[1], matrix[4], matrix[7], basisVisibleByKey.j);
     setArrowVector(refs.kArrow, matrix[2], matrix[5], matrix[8], basisVisibleByKey.k);
+    [
+      ['i', refs.iArrow],
+      ['j', refs.jArrow],
+      ['k', refs.kArrow],
+    ].forEach(([name, arrow]) => {
+      const { hardDimmed } = notebookObjectFocusState(name);
+      [arrow?.line?.material, arrow?.cone?.material].forEach((material) => {
+        if (!material) return;
+        material.transparent = true;
+        material.opacity = hardDimmed ? hardFocusGeometryOpacityFactor : 1;
+      });
+    });
 
     const activeDragKey = arrowDragRef.current.active ? arrowDragRef.current.key : null;
     const activeDragVectorId = vectorIdFromDragKey(activeDragKey) ?? scalarIdFromDragKey(activeDragKey);
@@ -6033,7 +3603,10 @@ export default function App() {
     const vectorRenderValues = vectorRenderValuesRef.current;
     vectorsRef.current.forEach((vectorItem) => {
       const targetValues = vectorItem.values;
-      const previousValues = vectorRenderValues.get(vectorItem.id) ?? targetValues;
+      const cachedValues = vectorRenderValues.get(vectorItem.id);
+      const previousValues = Array.isArray(cachedValues) && cachedValues.length === targetValues.length
+        ? cachedValues
+        : targetValues;
       const shouldSnap = activeDragVectorId === vectorItem.id || vectorItem.scalarEnabled;
       const nextValues = shouldSnap
         ? [...targetValues]
@@ -6190,19 +3763,64 @@ export default function App() {
     let equationSolutionText = equationSolutionPoint
       ? `${t(locale, 'solution')} x = ${formatCoord(equationSolutionPoint, equationSolutionMode)}`
       : '';
-    let equationSolutionVisible = refs.equationPoint.visible && labelsVisible;
+    let equationSolutionVisible = showEquationSolution && refs.equationPoint.visible && labelsVisible;
 
-    if (!equationSolutionVisible && isSystemMode && frameEquationSolution?.status === 'infinite') {
-      const anchor = solutionLabelAnchor(frameEquationSolution);
-      const labelKindKey = solutionGeometryLabelKey(frameEquationSolution);
-      if (anchor && labelKindKey) {
+    if (
+      showEquationSolution &&
+      !equationSolutionVisible &&
+      isSystemMode &&
+      frameEquationSolution?.status === 'infinite' &&
+      frameLineSystem?.status !== 'single' &&
+      frameLineSystem?.status !== 'single3d'
+    ) {
+      const frameSolutionMode = frameLineSystem?.mode ?? systemDimensionRef.current;
+      const anchor = solutionLabelAnchor(frameEquationSolution, frameSolutionMode);
+      const sceneSolutionLabel = formatSceneSolutionGeometryLabel(
+        frameEquationSolution,
+        locale,
+        coordinatesVisible,
+        frameSolutionMode
+      );
+      if (anchor && sceneSolutionLabel) {
         equationSolutionWorld = new THREE.Vector3(...transformVector3(matrix, anchor));
-        equationSolutionText = coordinatesVisible
-          ? `${t(locale, 'solution')} ${t(locale, labelKindKey)} ${formatGeneralSolution(frameEquationSolution)}`
-          : `${t(locale, 'solution')} ${t(locale, labelKindKey)}`;
+        equationSolutionText = sceneSolutionLabel;
         equationSolutionVisible = true;
       }
     }
+
+    const notebookSolutionSelected = Boolean(notebookSolutionSelection && equationSolutionVisible);
+    const notebookSolutionFocusState = notebookSolutionSelection
+      ? notebookObjectFocusState(notebookSolutionSelection.name)
+      : { focused: false, presentationFocused: false, hardFocused: false, hardDimmed: false };
+    const notebookSolutionFocused = notebookSolutionFocusState.presentationFocused;
+    const notebookSolutionHardDimmed = notebookSolutionFocusState.hardDimmed;
+    const notebookSolutionHardAccentStrength =
+      notebookSolutionFocusState.hardAccentStrength ?? 0;
+    if (notebookSolutionSelected) {
+      equationSolutionText = equationSolutionPoint
+        ? `${notebookSolutionSelection.name} = ${formatCoord(equationSolutionPoint, equationSolutionMode)}`
+        : `${notebookSolutionSelection.name} · ${equationSolutionText}`;
+    }
+    refs.equationPoint.material.color.setHex(notebookSolutionSelected ? 0xf1b434 : 0xffffff);
+    refs.equationPoint.material.transparent = true;
+    refs.equationPoint.material.opacity =
+      (notebookSolutionHardDimmed ? hardFocusGeometryOpacityFactor : 1) *
+      (notebookSolutionSelection ? notebookSolutionCommitProgress : 1);
+    const equationPointRevealScale = notebookSolutionSelection
+      ? 0.78 + notebookSolutionCommitProgress * 0.22
+      : 1;
+    refs.equationPoint.scale.setScalar(
+      (
+        notebookSolutionSelected
+          ? notebookSolutionFocused
+            ? authoredHardFocusComparing
+              ? 1.16 + notebookSolutionHardAccentStrength * 0.2
+              : 1.36
+            : 1.16
+          : 1
+      ) *
+      equationPointRevealScale
+    );
 
     updateLabel(
       equationSolutionLabelRef,
@@ -6212,6 +3830,18 @@ export default function App() {
       [38, -20],
       { allowOrigin: true }
     );
+    if (equationSolutionLabelRef.current) {
+      const equationSolutionLabelOpacity = notebookSolutionSelection
+        ? notebookSolutionCommitProgress
+        : 1;
+      equationSolutionLabelRef.current.style.opacity = String(equationSolutionLabelOpacity);
+      syncNotebookLabelFocusState(
+        equationSolutionLabelRef.current,
+        notebookSolutionFocusState,
+        equationSolutionLabelOpacity
+      );
+      equationSolutionLabelRef.current.classList.toggle('solution-selected', notebookSolutionSelected);
+    }
 
     const equationLabels = isSystemMode
       ? (frameLineSystem?.mode === '3d'
@@ -6244,12 +3874,18 @@ export default function App() {
           : [28, -20 - (index % 3) * 10],
         { allowOrigin: true, keepNameWhenCoordinatesHidden: true }
       );
-      labelNode.style.opacity = String(0.18 + revealEase * 0.82);
+      const equationName = equationSceneLabelName(item, equationLabelMode, index);
+      const equationFocusState = notebookObjectFocusState(equationName);
+      const equationLabelOpacity = 0.18 + revealEase * 0.82;
+      labelNode.style.opacity = String(equationLabelOpacity);
+      syncNotebookLabelFocusState(labelNode, equationFocusState, equationLabelOpacity);
     });
     equationLabelRefs.current.forEach((labelNode, key) => {
       if (activeEquationLabelKeys.has(key)) return;
       labelNode.style.display = 'none';
       labelNode.style.opacity = '1';
+      labelNode.classList.remove('notebook-focused');
+      labelNode.classList.remove('notebook-hard-focused', 'notebook-hard-dimmed');
     });
 
     const dragHandles = refs.dragHandles ?? {};
@@ -6313,10 +3949,16 @@ export default function App() {
     const activeMeasurementVisuals = new Set();
     const measurementSpawnTimes = refs.measurementSpawnTimes ?? new Map();
     refs.measurementSpawnTimes = measurementSpawnTimes;
-    const measurementRevealEase = (id) => {
-      if (!measurementSpawnTimes.has(id)) measurementSpawnTimes.set(id, time);
-      return easeOutCubic((time - (measurementSpawnTimes.get(id) ?? time)) / VECTOR_SPAWN_MS);
+    const measurementRevealProgress = (item) => {
+      if (item?.source === 'notebook') {
+        return uiStateRef.current.notebookActiveCellId === item.cellId
+          ? clamp01(uiStateRef.current.notebookActiveCellProgress)
+          : 1;
+      }
+      if (!measurementSpawnTimes.has(item.id)) measurementSpawnTimes.set(item.id, time);
+      return clamp01((time - (measurementSpawnTimes.get(item.id) ?? time)) / VECTOR_SPAWN_MS);
     };
+    const measurementRevealEase = (item) => easeOutCubic(measurementRevealProgress(item));
     refs.measurementVisuals?.forEach((visual) => {
       visual.group.visible = false;
     });
@@ -6345,21 +3987,21 @@ export default function App() {
         ? [measureTargetToken(targetId)]
         : [{ text: ' · ', className: 'measurement-operator' }, measureTargetToken(targetId)]
     ));
-    const getMeasureTargetWorld = (targetId) => {
+    const getMeasureTargetWorld = (targetId, allowZero = false) => {
       if (targetId === 'b:i') {
-        if (!uiStateRef.current.showRelativeAxes || uiStateRef.current.basisVisibility?.i === false) return null;
+        if (!uiStateRef.current.showBasis || uiStateRef.current.basisVisibility?.i === false) return null;
         const vector = new THREE.Vector3(matrix[0], matrix[3], matrix[6]);
-        return vector.lengthSq() > EPSILON ? vector : null;
+        return allowZero || vector.lengthSq() > EPSILON ? vector : null;
       }
       if (targetId === 'b:j') {
-        if (!uiStateRef.current.showRelativeAxes || uiStateRef.current.basisVisibility?.j === false) return null;
+        if (!uiStateRef.current.showBasis || uiStateRef.current.basisVisibility?.j === false) return null;
         const vector = new THREE.Vector3(matrix[1], matrix[4], matrix[7]);
-        return vector.lengthSq() > EPSILON ? vector : null;
+        return allowZero || vector.lengthSq() > EPSILON ? vector : null;
       }
       if (targetId === 'b:k') {
-        if (!uiStateRef.current.showRelativeAxes || uiStateRef.current.basisVisibility?.k === false) return null;
+        if (!uiStateRef.current.showBasis || uiStateRef.current.basisVisibility?.k === false) return null;
         const vector = new THREE.Vector3(matrix[2], matrix[5], matrix[8]);
-        return vector.lengthSq() > EPSILON ? vector : null;
+        return allowZero || vector.lengthSq() > EPSILON ? vector : null;
       }
       const vectorId = targetId?.startsWith('v:') ? targetId.slice(2) : null;
       const vectorItem = vectorsRef.current.find((item) => item.id === vectorId);
@@ -6372,15 +4014,94 @@ export default function App() {
       .filter((item) => item.visible !== false)
       .forEach((item, index) => {
           const targetEntries = item.targets
-            .map((targetId) => ({ id: targetId, vector: getMeasureTargetWorld(targetId) }))
+            .map((targetId) => ({
+              id: targetId,
+              vector: getMeasureTargetWorld(targetId, item.type === 'volume'),
+            }))
             .filter((entry) => entry.vector);
           const targets = targetEntries.map((entry) => entry.vector);
           const visibleTargetIds = targetEntries.map((entry) => entry.id);
+          if (item.type === 'sum' && targets.length >= 2) {
+            const [first, second] = targets;
+            const sum = first.clone().add(second);
+            const visual = getMeasurementVisual(refs, item, 'sum');
+            activeMeasurementVisuals.add(item.id);
+            const revealProgress = measurementRevealProgress(item);
+            const guideProgress = easeInOut(clamp01(revealProgress / 0.68));
+            const guideOpacity = easeOutCubic(clamp01(revealProgress / 0.16));
+            const meetProgress = easeOutCubic(clamp01((revealProgress - 0.5) / 0.2));
+            const resultProgress = easeOutCubic(clamp01((revealProgress - 0.56) / 0.44));
+            const firstColor = getMeasureTargetColor(visibleTargetIds[0]) ?? '#8b5cf6';
+            const secondColor = getMeasureTargetColor(visibleTargetIds[1]) ?? '#a7f3e3';
+
+            visual.resultArrow.position.set(0, 0, 0);
+            setArrowVectorAtProgress(visual.resultArrow, sum, resultProgress, true);
+            visual.resultArrow.line.material.color.set(MEASURE_SUM_HEX);
+            visual.resultArrow.cone.material.color.set(MEASURE_SUM_HEX);
+            visual.resultArrow.line.material.opacity = 0.96 * resultProgress;
+            visual.resultArrow.cone.material.opacity = resultProgress;
+            visual.resultArrow.renderOrder = 23 + index;
+            visual.resultArrow.line.renderOrder = 23 + index;
+            visual.resultArrow.cone.renderOrder = 24 + index;
+
+            const translatedGuideEnd = first.clone().lerp(sum, guideProgress);
+            setGeometryPositions(visual.translatedGuide.geometry, [
+              first.x, first.y, first.z,
+              translatedGuideEnd.x, translatedGuideEnd.y, translatedGuideEnd.z,
+            ]);
+            visual.translatedGuide.material.color.set(secondColor);
+            visual.translatedGuide.computeLineDistances();
+            visual.translatedGuide.material.opacity = 0.42 * guideOpacity;
+            visual.translatedGuide.renderOrder = 21 + index;
+
+            const parallelGuideEnd = second.clone().lerp(sum, guideProgress);
+            setGeometryPositions(visual.parallelGuide.geometry, [
+              second.x, second.y, second.z,
+              parallelGuideEnd.x, parallelGuideEnd.y, parallelGuideEnd.z,
+            ]);
+            visual.parallelGuide.material.color.set(firstColor);
+            visual.parallelGuide.computeLineDistances();
+            visual.parallelGuide.material.opacity = 0.42 * guideOpacity;
+            visual.parallelGuide.renderOrder = 20 + index;
+
+            visual.point.position.copy(sum);
+            visual.point.visible = meetProgress > 0.002;
+            visual.point.material.opacity = meetProgress;
+            const meetSettle = Math.sin(
+              Math.PI * clamp01((revealProgress - 0.58) / 0.42)
+            );
+            visual.point.scale.setScalar(0.76 + meetProgress * 0.24 + meetSettle * 0.16);
+            visual.point.renderOrder = 25 + index;
+
+            const labelPosition = sum.lengthSq() > EPSILON
+              ? sum.clone()
+              : first.clone().multiplyScalar(0.5);
+            activeMeasurementLabels.add(item.id);
+            const labelNode = measurementLabelRefs.current.get(item.id);
+            updateLabel(
+              labelNode,
+              labelPosition,
+              [
+                { text: `${t(locale, 'sum')} `, className: 'measurement-symbol' },
+                measureTargetToken(visibleTargetIds[0]),
+                { text: ' + ', className: 'measurement-operator' },
+                measureTargetToken(visibleTargetIds[1]),
+                {
+                  text: ` = ${formatCoord([sum.x, sum.y, sum.z], coordMode)}`,
+                  className: 'measurement-value-token',
+                },
+              ],
+              labelsVisible,
+              [48, -24 - (index % 3) * 10],
+              { allowOrigin: true, placement: 'result-side' }
+            );
+            if (labelNode) labelNode.style.opacity = String(resultProgress);
+          }
           if (item.type === 'dot' && targets.length >= 2) {
             const [secondary, primary] = targets;
             const visual = getMeasurementVisual(refs, item, 'dot');
             activeMeasurementVisuals.add(item.id);
-            const revealEase = measurementRevealEase(item.id);
+            const revealEase = measurementRevealEase(item);
             const dotValue = primary.dot(secondary);
             const projection = primary.lengthSq() > EPSILON
               ? primary.clone().multiplyScalar(dotValue / primary.lengthSq())
@@ -6419,15 +4140,16 @@ export default function App() {
             if (labelNode) labelNode.style.opacity = String(0.18 + revealEase * 0.82);
           }
           if (item.type === 'volume' && targets.length >= 1) {
-            const targetCount = effectiveVolumeTargetCount(targets.length, coordMode);
+            const targetCount = effectiveVolumeTargetCount(targets.length);
             const measureTargets = targets.slice(0, targetCount);
             const measureTargetIds = visibleTargetIds.slice(0, targetCount);
             const [a, b, c] = measureTargets;
             const visual = getMeasurementVisual(refs, item, 'volume');
             activeMeasurementVisuals.add(item.id);
-            const revealEase = measurementRevealEase(item.id);
+            const revealEase = measurementRevealEase(item);
             const isVolume3D = targetCount >= 3;
             const isArea2D = targetCount === 2;
+            const degenerateArea = isArea2D && isDegenerateArea(a, b);
             if (isVolume3D) {
               updateVolumeGeometry(visual.mesh.geometry, visual.edges.geometry, a, b, c);
             } else if (isArea2D) {
@@ -6435,8 +4157,8 @@ export default function App() {
             } else {
               updateLengthGeometry(visual.mesh.geometry, visual.edges.geometry, a);
             }
-            visual.mesh.visible = isArea2D || isVolume3D;
-            visual.edges.visible = true;
+            visual.mesh.visible = (isArea2D || isVolume3D) && !degenerateArea;
+            visual.edges.visible = !degenerateArea;
             visual.mesh.material.color.setHex(isVolume3D ? MEASURE_VOLUME_HEX : MEASURE_AREA_HEX);
             visual.mesh.material.opacity = (isVolume3D ? 0.23 : 0.2) * revealEase;
             visual.mesh.renderOrder = 16 + index;
@@ -6456,6 +4178,7 @@ export default function App() {
               .reduce((sum, vector) => sum.add(vector), new THREE.Vector3())
               .multiplyScalar(1 / measureTargets.length));
             const labelPrefix = t(locale, isVolume3D ? 'volume' : isArea2D ? 'area' : 'length');
+            const avoidancePoints = measurementPlacementPoints(measureTargets);
             activeMeasurementLabels.add(item.id);
             const labelNode = measurementLabelRefs.current.get(item.id);
             updateLabel(
@@ -6467,8 +4190,12 @@ export default function App() {
                 { text: ` = ${formatNumber(value)}`, className: 'measurement-value-token' },
               ],
               labelsVisible,
-              [0, -32 - (index % 3) * 10],
-              { allowOrigin: true }
+              degenerateArea
+                ? [0, 34 + (index % 3) * 10]
+                : [0, -32 - (index % 3) * 10],
+              degenerateArea
+                ? { allowOrigin: true }
+                : { allowOrigin: true, placement: 'outside-bounds', avoidancePoints }
             );
             if (labelNode) labelNode.style.opacity = String(0.18 + revealEase * 0.82);
           }
@@ -6477,12 +4204,29 @@ export default function App() {
       if (!activeMeasurementVisuals.has(id)) {
         disposeMeasurementVisual(visual);
         refs.measurementVisuals.delete(id);
+        return;
+      }
+      const item = measurementsRef.current.find((candidate) => candidate.id === id);
+      const { hardDimmed } = notebookObjectFocusState(item?.name);
+      if (hardDimmed) {
+        visual.group.traverse((object) => {
+          const materials = Array.isArray(object.material) ? object.material : [object.material];
+          materials.forEach((material) => {
+            if (!material || !Number.isFinite(material.opacity)) return;
+            material.transparent = true;
+            material.opacity *= hardFocusGeometryOpacityFactor;
+          });
+        });
       }
     });
     measurementSpawnTimes.forEach((_, id) => {
       if (!activeMeasurementVisuals.has(id)) measurementSpawnTimes.delete(id);
     });
     measurementLabelRefs.current.forEach((label, id) => {
+      const item = measurementsRef.current.find((candidate) => candidate.id === id);
+      const focusState = notebookObjectFocusState(item?.name);
+      const measurementLabelOpacity = Number.parseFloat(label.style.opacity || '1');
+      syncNotebookLabelFocusState(label, focusState, measurementLabelOpacity);
       if (!activeMeasurementLabels.has(id)) {
         label.style.display = 'none';
         label.style.opacity = '1';
@@ -6492,6 +4236,12 @@ export default function App() {
     const activeVectorKeys = new Set();
     const vectorVisuals = refs.vectorVisuals ?? new Map();
     vectorsRef.current.forEach((vectorItem, vectorRenderIndex) => {
+      const vectorFocusState = notebookObjectFocusState(vectorItem.name);
+      const vectorFocused = vectorFocusState.presentationFocused;
+      const vectorHardFocused = vectorFocusState.hardFocused;
+      const vectorHardDimmed = vectorFocusState.hardDimmed;
+      const vectorHardAccentStrength = vectorFocusState.hardAccentStrength ?? 0;
+      const vectorFocusOpacity = vectorHardDimmed ? hardFocusGeometryOpacityFactor : 1;
       activeVectorKeys.add(vectorItem.id);
       let visual = vectorVisuals.get(vectorItem.id);
       if (!visual) {
@@ -6525,6 +4275,7 @@ export default function App() {
       const userVector = new THREE.Vector3(vx, vy, vz);
       const spawnEase = vectorSpawnEase(vectorItem.id);
       const vectorItemVisible = vectorItem.visible !== false;
+      const pointOnly = vectorItem.renderKind === 'point';
       const isActiveVector = vectorItem.id === activeVectorIdRef.current;
       const baseLengthSquared = userVector.lengthSq();
       const activeLengthSquared = activeVectorWorld?.lengthSq() ?? 0;
@@ -6548,17 +4299,53 @@ export default function App() {
           ? userVector.clone().multiplyScalar(activeVectorWorld.dot(userVector) / baseLengthSquared)
           : new THREE.Vector3(0, 0, 0);
       const vectorVisible = uiStateRef.current.showVector && vectorItemVisible && vectorSceneAllowed;
-      const arrowVisible = vectorVisible && !scalarEnabled;
-      const dotDisplayVisible = uiStateRef.current.showDot && vectorItemVisible;
+      const arrowVisible = vectorVisible && !scalarEnabled && !pointOnly;
+      const pointOnlyVisible = vectorVisible && !scalarEnabled && pointOnly;
+      const zeroVectorVisible = vectorVisible && !scalarEnabled && !pointOnly && baseLengthSquared <= EPSILON;
+      const dotDisplayVisible = !isSystemMode && uiStateRef.current.showDot && vectorItemVisible;
       setArrowVector(visual.arrow, vx, vy, vz, arrowVisible);
-      setMaterialOpacity(visual.arrow.line.material, spawnEase);
-      setMaterialOpacity(visual.arrow.cone.material, spawnEase);
+      setVectorFocusHalo(
+        visual.focusHalo,
+        vx,
+        vy,
+        vz,
+        arrowVisible && vectorFocused
+      );
+      if (visual.focusHaloMaterial) {
+        visual.focusHaloMaterial.uniforms.glowColor.value.setHex(vectorItem.color);
+        const vectorFocusGlowOpacity = authoredHardFocusComparing && vectorFocused
+          ? 0.4 * vectorHardAccentStrength
+          : vectorHardFocused
+            ? 0.28 + notebookHardFocusBlend * 0.12
+            : 0.28;
+        visual.focusHaloMaterial.uniforms.glowOpacity.value =
+          spawnEase * vectorFocusGlowOpacity * vectorFocusOpacity;
+      }
+      visual.arrow.line.material.transparent = true;
+      visual.arrow.cone.material.transparent = true;
+      visual.arrow.line.material.color.setHex(vectorItem.color);
+      visual.arrow.cone.material.color.setHex(vectorItem.color);
+      visual.arrow.line.material.linewidth = vectorFocused
+        ? authoredHardFocusComparing
+          ? 1 + vectorHardAccentStrength
+          : 2
+        : 1;
+      visual.arrow.line.material.opacity = spawnEase * vectorFocusOpacity;
+      visual.arrow.cone.material.opacity = spawnEase * vectorFocusOpacity;
+      if (vectorFocused && visual.arrow.cone.visible) {
+        visual.arrow.cone.scale.multiplyScalar(
+          authoredHardFocusComparing
+            ? 1 + vectorHardAccentStrength * 0.08
+            : 1.08
+        );
+      }
       const dotVisible =
         dotDisplayVisible &&
         arrowVisible &&
         !!activeVectorWorld &&
         !isActiveVector &&
         !scalarEnabled &&
+        !pointOnly &&
         baseLengthSquared > EPSILON &&
         activeLengthSquared > EPSILON;
       const dotScalar = activeVectorWorld ? activeVectorWorld.dot(userVector) : 0;
@@ -6569,10 +4356,17 @@ export default function App() {
       dotPositions.setXYZ(3, activeVectorWorld?.x ?? 0, activeVectorWorld?.y ?? 0, activeVectorWorld?.z ?? 0);
       dotPositions.needsUpdate = true;
       visual.dotLine.visible = dotVisible;
-      visual.dotMaterial.opacity = 0.86 * spawnEase;
-      visual.dotPoint.position.copy(projection);
-      visual.dotPoint.visible = dotVisible;
-      setMaterialOpacity(visual.dotPointMaterial, spawnEase);
+      visual.dotMaterial.opacity = 0.86 * spawnEase * vectorFocusOpacity;
+      visual.dotPoint.position.copy(pointOnly || zeroVectorVisible ? userVector : projection);
+      visual.dotPoint.visible = pointOnlyVisible || zeroVectorVisible || dotVisible;
+      visual.dotPoint.scale.setScalar(
+        pointOnly
+          ? (vectorFocused ? 1.9 : 1.45)
+          : zeroVectorVisible
+            ? (vectorFocused ? 1.75 : 1.3)
+            : 1
+      );
+      setMaterialOpacity(visual.dotPointMaterial, spawnEase * vectorFocusOpacity);
       handleTargets[vectorDragKey] = scalarEnabled ? scalarAnchor : userVector;
       const scalarHighlightIndices = scalarEnabled
         ? scalarLockHighlightIndices(
@@ -6594,13 +4388,16 @@ export default function App() {
         new THREE.Vector3(vx * 1.06, vy * 1.06, vz * 1.06),
         vectorLabelText,
         vectorLabelsVisible && vectorVisible,
-        [0, -18],
-        { keepNameWhenCoordinatesHidden: true }
+        zeroVectorVisible ? [22, -22] : [0, -18],
+        { keepNameWhenCoordinatesHidden: true, allowOrigin: zeroVectorVisible }
       );
       if (vectorLabel) {
+        vectorLabel.classList.remove('notebook-dimmed');
+        const vectorLabelOpacity = 0.18 + spawnEase * 0.82;
         vectorLabel.style.opacity = vectorLabelsVisible && vectorVisible
-          ? String(0.18 + spawnEase * 0.82)
+          ? String(vectorLabelOpacity)
           : '';
+        syncNotebookLabelFocusState(vectorLabel, vectorFocusState, vectorLabelOpacity);
       }
       updateLabel(
         vectorDotLabelRefs.current.get(vectorItem.id),
@@ -6693,27 +4490,49 @@ export default function App() {
       [10, -18],
       { keepNameWhenCoordinatesHidden: true }
     );
-    resolveSceneLabelOverlaps(containerRef.current);
+    if (refs.labelLayoutDirty) {
+      const mobileLabelSafeArea =
+        typeof window !== 'undefined' &&
+        window.matchMedia('(max-width: 760px)').matches;
+      const labelViewportHeight = mobileLabelSafeArea
+        ? Math.max(1, refs.viewportSize.height - 116)
+        : refs.viewportSize.height;
+      resolveSceneLabelOverlaps(
+        containerRef.current,
+        refs.viewportSize.width,
+        labelViewportHeight
+      );
+      refs.labelLayoutDirty = false;
+    }
     refs.renderer.render(refs.scene, refs.camera);
   }, [locale, updateLabel]);
 
   useEffect(() => {
+    if (showFlowHome) return undefined;
     const container = containerRef.current;
     if (!container) return undefined;
 
+    const viewportSize = {
+      width: Math.max(container.clientWidth, 1),
+      height: Math.max(container.clientHeight, 1),
+    };
     const scene = new THREE.Scene();
     scene.background = new THREE.Color('#121210');
 
     const camera = new THREE.PerspectiveCamera(
-      45,
-      container.clientWidth / Math.max(container.clientHeight, 1),
+      sceneVerticalFovForViewport(
+        viewportSize.width,
+        viewportSize.height,
+        CAMERA_FOV_DEG
+      ),
+      viewportSize.width / viewportSize.height,
       0.1,
       1000
     );
     camera.position.copy(initialCameraPositionRef.current);
 
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
-    renderer.setSize(container.clientWidth, container.clientHeight);
+    renderer.setSize(viewportSize.width, viewportSize.height);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     container.appendChild(renderer.domElement);
@@ -6726,13 +4545,14 @@ export default function App() {
     controls.update();
     const handleControlsStart = () => {
       cameraMoveRef.current.active = false;
+      cameraMoveRef.current.onComplete = null;
+      notebookStopCameraRestorePendingRef.current = false;
       setActiveView(null);
     };
     const handleControlsChange = () => {
-      if (!cameraAutoRef.current) queueCameraShareUpdate(220);
+      queueCameraShareUpdate(220);
     };
     const handleControlsEnd = () => {
-      if (snapCameraToAutoView()) return;
       queueCameraShareUpdate(0);
     };
     controls.addEventListener('start', handleControlsStart);
@@ -6770,9 +4590,13 @@ export default function App() {
     referenceGrid.visible = false;
     scene.add(referenceGrid);
 
-    const axesHelper = new THREE.AxesHelper(8);
-    axesHelper.renderOrder = 5;
-    scene.add(axesHelper);
+    const iAbsoluteAxis = createAxisLine(0xe05263);
+    const jAbsoluteAxis = createAxisLine(0x1f9d55);
+    const kAbsoluteAxis = createAxisLine(0x3f7ee8);
+    const iRelativeAxis = createAxisLine(0xe05263);
+    const jRelativeAxis = createAxisLine(0x1f9d55);
+    const kRelativeAxis = createAxisLine(0x3f7ee8);
+    scene.add(iAbsoluteAxis, jAbsoluteAxis, kAbsoluteAxis, iRelativeAxis, jRelativeAxis, kRelativeAxis);
 
     const dynamicGroup = new THREE.Group();
     scene.add(dynamicGroup);
@@ -6854,6 +4678,9 @@ export default function App() {
     equationGroup.visible = false;
     scene.add(equationGroup);
 
+    const solutionTraceVisual = createSolutionTraceVisual();
+    scene.add(solutionTraceVisual.group);
+
     const vectorScalarGroup = new THREE.Group();
     vectorScalarGroup.visible = false;
     scene.add(vectorScalarGroup);
@@ -6873,7 +4700,7 @@ export default function App() {
     scalarSolutionPoint.visible = false;
     scene.add(scalarSolutionPoint);
 
-    const equationPointGeometry = new THREE.SphereGeometry(0.11, 24, 16);
+    const equationPointGeometry = new THREE.SphereGeometry(0.075, 24, 16);
     const equationPointMaterial = new THREE.MeshBasicMaterial({
       color: 0xffffff,
       depthTest: false,
@@ -7010,11 +4837,15 @@ export default function App() {
     scene.add(vectorVolumeEdges);
 
     const resizeObserver = new ResizeObserver(() => {
-      const width = container.clientWidth;
+      const width = Math.max(container.clientWidth, 1);
       const height = Math.max(container.clientHeight, 1);
+      viewportSize.width = width;
+      viewportSize.height = height;
       camera.aspect = width / height;
+      camera.fov = sceneVerticalFovForViewport(width, height, CAMERA_FOV_DEG);
       camera.updateProjectionMatrix();
       renderer.setSize(width, height);
+      if (threeRef.current) threeRef.current.labelLayoutDirty = true;
     });
     resizeObserver.observe(container);
 
@@ -7023,9 +4854,16 @@ export default function App() {
       scene,
       camera,
       controls,
+      viewportSize,
+      labelLayoutDirty: true,
       staticGrid,
       referenceGrid,
-      axesHelper,
+      iAbsoluteAxis,
+      jAbsoluteAxis,
+      kAbsoluteAxis,
+      iRelativeAxis,
+      jRelativeAxis,
+      kRelativeAxis,
       dynamicGrid,
       dynamicPlaneGrid,
       iArrow,
@@ -7035,6 +4873,7 @@ export default function App() {
       dotLine,
       dotPoint,
       equationGroup,
+      solutionTraceVisual,
       vectorScalarGroup,
       measurementGroup,
       measurementVisuals: new Map(),
@@ -7064,6 +4903,18 @@ export default function App() {
       disposable: [
         staticGrid.geometry,
         staticGridMaterial,
+        iAbsoluteAxis.geometry,
+        iAbsoluteAxis.material,
+        jAbsoluteAxis.geometry,
+        jAbsoluteAxis.material,
+        kAbsoluteAxis.geometry,
+        kAbsoluteAxis.material,
+        iRelativeAxis.geometry,
+        iRelativeAxis.material,
+        jRelativeAxis.geometry,
+        jRelativeAxis.material,
+        kRelativeAxis.geometry,
+        kRelativeAxis.material,
         gridMaterial,
         referenceGrid.geometry,
         referenceGridMaterial,
@@ -7143,13 +4994,11 @@ export default function App() {
         setDragSnapGuide(null);
         return;
       }
-      const label = snapGuideLabelForVectors(rawWorld, snappedWorld, mode);
       setDragSnapGuide({
         x1: rawPoint.x,
         y1: rawPoint.y,
         x2: snappedPoint.x,
         y2: snappedPoint.y,
-        label,
       });
     };
 
@@ -7359,6 +5208,9 @@ export default function App() {
       const draggedScalarId = scalarIdFromDragKey(dragKey);
       const draggedAnyVectorId = draggedVectorId ?? draggedScalarId;
       if (draggedAnyVectorId) setActiveVectorId(draggedAnyVectorId);
+      if (draggedVectorId) {
+        dragActionsRef.current.beginNotebookVectorLineDrag?.(draggedVectorId);
+      }
       const startInputVector =
         vectorsRef.current.find((item) => item.id === draggedAnyVectorId)?.values ??
         userVectorRef.current;
@@ -7425,6 +5277,9 @@ export default function App() {
       if (dragState.key && !vectorIdFromDragKey(dragState.key) && !scalarIdFromDragKey(dragState.key)) {
         dragActionsRef.current.commitBasisDrag?.(dragState.startMatrix, finalMatrix, dragState.key);
       }
+      if (vectorIdFromDragKey(dragState.key)) {
+        dragActionsRef.current.commitUserVectorDrag?.(dragState);
+      }
       arrowDragRef.current.active = false;
       arrowDragRef.current.key = null;
       arrowDragRef.current.snapped = false;
@@ -7458,6 +5313,8 @@ export default function App() {
       controls.removeEventListener('end', handleControlsEnd);
       controls.dispose();
       clearEquationGroup(equationGroup);
+      disposeObject3D(solutionTraceVisual.group);
+      scene.remove(solutionTraceVisual.group);
       clearEquationGroup(vectorScalarGroup);
       threeRef.current?.measurementVisuals?.forEach(disposeMeasurementVisual);
       threeRef.current?.vectorVisuals?.forEach((visual) => disposeVectorVisual(scene, visual));
@@ -7468,26 +5325,41 @@ export default function App() {
       }
       threeRef.current = null;
     };
-  }, [animate, queueCameraShareUpdate, snapCameraToAutoView]);
+  }, [animate, queueCameraShareUpdate, showFlowHome]);
 
-  const moveCameraToView = useCallback((viewKey) => {
+  const moveCameraToView = useCallback((viewKey, options = {}) => {
     const refs = threeRef.current;
     const preset = viewPresets[viewKey];
     if (!preset) return;
+    const resetLocks = Boolean(options.resetLocks);
+    if (resetLocks) {
+      cameraLockedRef.current = false;
+      zoomLockedRef.current = false;
+      setCameraLocked(false);
+      setZoomLocked(false);
+    }
     if (cameraLockedRef.current) {
       cameraMoveRef.current.active = false;
       return;
     }
     setActiveView(viewKey);
+    const cameraOptions = {
+      resetDistance: Boolean(options.resetDistance),
+      resetTarget: Boolean(options.resetTarget),
+    };
     const destination = refs
-      ? cameraStateForView(viewKey, refs.camera.position, refs.controls.target)
-      : cameraStateForView(viewKey);
+      ? cameraStateForView(viewKey, refs.camera.position, refs.controls.target, cameraOptions)
+      : cameraStateForView(viewKey, undefined, undefined, cameraOptions);
     setCameraState({
       position: cameraVectorToShareArray(destination.position),
       target: cameraVectorToShareArray(destination.target),
     });
     if (!refs) return;
-    configureControlsForView(refs.controls, viewKey, controlLocksFromRefs());
+    configureControlsForView(
+      refs.controls,
+      viewKey,
+      resetLocks ? { camera: false, zoom: false } : controlLocksFromRefs()
+    );
     cameraMoveRef.current = {
       active: true,
       startTime: null,
@@ -7496,28 +5368,24 @@ export default function App() {
       positionTo: destination.position,
       targetTo: destination.target,
     };
-  }, []);
+  }, [controlLocksFromRefs]);
 
   const switchWorkspaceMode = useCallback((mode) => {
-    setWorkspaceMode(mode);
-    if (mode === 'system') {
-      setCameraAuto(true);
-      moveCameraToView(systemDimensionRef.current === '3d' ? '3d' : '2d');
-    } else {
-      setCameraAuto(false);
-    }
-  }, [moveCameraToView]);
+    const nextMode = TRANSFORM_WORKSPACE_ENABLED && mode === 'transform' ? 'transform' : 'system';
+    setWorkspaceMode(nextMode);
+    cameraMoveRef.current.active = false;
+    cameraProgressOverrideRef.current = null;
+    notebookCameraTransitionRef.current = null;
+    const baseView = nextMode === 'system' ? NOTEBOOK_SCENE_DEFAULTS.view : '3d';
+    notebookAutoCameraViewRef.current = baseView;
+    autoCameraTargetViewRef.current = baseView;
+    animationViewFromRef.current = baseView;
+    animationViewToRef.current = baseView;
+  }, []);
 
   useEffect(() => {
     systemDimensionRef.current = effectiveSystemMode;
-    if (workspaceMode === 'system') {
-      moveCameraToView(effectiveSystemMode);
-    }
-  }, [effectiveSystemMode, moveCameraToView, workspaceMode]);
-
-  const moveCameraForMatrix = useCallback((matrix) => {
-    moveCameraToView(viewKeyForMatrix(matrix));
-  }, [moveCameraToView]);
+  }, [effectiveSystemMode]);
 
   const startAnimationTo = useCallback((matrix, historyName, options = {}) => {
     const {
@@ -7568,12 +5436,24 @@ export default function App() {
       operationMode,
       isDimensionDrop: nextRank < previousRank,
     });
-    moveCameraForMatrix(next);
-  }, [moveCameraForMatrix, startAnimationTo]);
+  }, [startAnimationTo]);
 
   const applyNotebookCursor = useCallback((rawCursor, sourceCells = notebookScript.cells, options = {}) => {
+    const syncUi = options.syncUi !== false;
+    if (syncUi && options.preserveCompletion !== true) setNotebookCompleted(false);
     const cells = sourceCells.length ? sourceCells : [];
+    const openingSceneState = notebookOpeningSceneState(cells, NOTEBOOK_SCENE_DEFAULTS);
     const clamped = Math.max(0, Math.min(100, Number(rawCursor) || 0));
+    if (clamped <= 0.001) {
+      cameraProgressOverrideRef.current = null;
+      notebookCameraTransitionRef.current = null;
+      if (workspaceModeRef.current === 'system') {
+        notebookAutoCameraViewRef.current = openingSceneState.view;
+        autoCameraTargetViewRef.current = openingSceneState.view;
+        animationViewFromRef.current = openingSceneState.view;
+        animationViewToRef.current = openingSceneState.view;
+      }
+    }
     const hasLineMetadata = cells.some(
       (cell) => Number.isFinite(cell.lineStart) && Number.isFinite(cell.lineEnd)
     );
@@ -7581,23 +5461,159 @@ export default function App() {
     let equationText = '';
     let hasEquationText = false;
     let captionText = '';
-    const notebookMode = notebookModeForCells(cells, notebookScript.mode);
-    const notebookIdentity = identityMatrixForMode(notebookMode);
-    let startMatrix = [...notebookIdentity];
-    let targetMatrix = [...notebookIdentity];
+    let currentDimensionMode = openingSceneState.dimension;
+    let currentDimensionIdentity = identityMatrixForMode(currentDimensionMode);
+    let startMatrix = [...currentDimensionIdentity];
+    let targetMatrix = [...currentDimensionIdentity];
     let progressWithinCell = 1;
+    let activeCellProgress = clamped <= 0 ? 0 : 1;
     const scriptHasVectorCells = hasLineMetadata && cells.some(
       (cell) =>
         !cell.hidden &&
-        ((cell.type === 'vector' && cell.execute !== false && !cell.remove) ||
+        (((cell.type === 'vector' || cell.type === 'slice') && cell.execute !== false && !cell.remove) ||
           (cell.type === 'calc' && cell.resultKind === 'vector' && cell.execute === true) ||
           (cell.type === 'ref' && cell.refKind === 'vector' && !cell.remove))
     );
     const revealedVectors = [];
     const notebookVectorEnv = new Map();
     const notebookMatrixEnv = new Map();
+    const visibleNotebookMatrices = new Map();
     const notebookEquationEnv = new Map();
     const equationLineItems = [];
+    const sceneCells = cells.filter((cell) => cell.type === 'scene' && !cell.hidden);
+    const sceneCommandKinds = new Set(sceneCells.map((cell) => cell.command));
+    const scenePresets = sceneCells
+      .filter((cell) => cell.command === 'preset' && cell.value && typeof cell.value === 'object')
+      .map((cell) => cell.value);
+    const scriptHasViewCommand = Boolean(NOTEBOOK_SCENE_DEFAULTS.view) || sceneCommandKinds.has('view') || scenePresets.some(
+      (preset) => Boolean(preset.view)
+    ) || cells.some(
+      (cell) => !cell.hidden && cell.type === 'ref' && Boolean(cell.synchronizedView)
+    );
+    const scriptHasZoomCommand = Number.isFinite(NOTEBOOK_SCENE_DEFAULTS.zoom) || sceneCommandKinds.has('zoom') || scenePresets.some(
+      (preset) => Number.isFinite(preset.zoom)
+    );
+    const sceneToggleState = { ...NOTEBOOK_SCENE_DEFAULTS };
+    let sceneViewOverride = openingSceneState.view;
+    let sceneViewTransition = null;
+    let sceneOrbitTransition = null;
+    let sceneZoomFactor = NOTEBOOK_SCENE_DEFAULTS.zoom;
+    // A view-only cell rotates around the existing orbit radius. The reference
+    // view changes only when zoom is explicitly authored.
+    let sceneZoomReferenceView = openingSceneState.view;
+    let sceneZoomTransition = null;
+    let sceneFieldMode = NOTEBOOK_SCENE_DEFAULTS.field;
+    let focusedNames = new Set();
+    let focusMode = 'soft';
+    let hardFocusSourceId = null;
+    let solutionSelection = null;
+    let boardRowOperation = null;
+    let boardAnnotation = null;
+
+    const setBoardAnnotationFromCell = (cell, progress = 1) => {
+      boardAnnotation = cell?.clear
+        ? null
+        : {
+            kind: cell.kind,
+            matrixName: cell.matrixName,
+            row: cell.row,
+            column: cell.column,
+            progress: clamp01(progress),
+          };
+    };
+
+    const setFocusFromCell = (cell) => {
+      focusedNames = cell?.clear
+        ? new Set()
+        : new Set((cell?.names ?? []).map(notebookVariableKey));
+      focusMode = cell?.clear ? 'soft' : (cell?.mode === 'hard' ? 'hard' : 'soft');
+      hardFocusSourceId = focusMode === 'hard' && focusedNames.size
+        ? String(cell?.id ?? `${cell?.lineStart ?? 'focus'}:${[...focusedNames].join(',')}`)
+        : null;
+    };
+
+    const applyNotebookDimension = (value, localProgress = 1, animate = false) => {
+      const nextMode = ['1d', '2d', '3d'].includes(value) ? value : currentDimensionMode;
+      const nextIdentity = identityMatrixForMode(nextMode);
+      const previousView = sceneViewOverride;
+      const progress = clamp01(localProgress);
+      currentDimensionMode = nextMode;
+      currentDimensionIdentity = nextIdentity;
+      sceneViewOverride = nextMode;
+      if (animate && progress < 1) {
+        sceneViewTransition = {
+          from: previousView,
+          to: nextMode,
+          progress,
+        };
+        targetMatrix = [...nextIdentity];
+        progressWithinCell = progress;
+        return true;
+      }
+      startMatrix = [...nextIdentity];
+      targetMatrix = [...nextIdentity];
+      return false;
+    };
+
+    const applyNotebookScenePreset = (preset, localProgress = 1, animateCamera = false) => {
+      if (!preset || typeof preset !== 'object') return;
+      const progress = clamp01(localProgress);
+      const previousPresetView = sceneViewOverride;
+      if (preset.field === 'board' || preset.field === 'graph') {
+        sceneFieldMode = preset.field;
+      }
+      const hasDimensionTransition = preset.dimension
+        ? applyNotebookDimension(preset.dimension, progress, animateCamera)
+        : false;
+      if (preset.view) {
+        sceneViewOverride = preset.view;
+        if (animateCamera && progress < 1) {
+          sceneViewTransition = {
+            from: previousPresetView,
+            to: preset.view,
+            progress,
+          };
+        }
+      }
+      if (Number.isFinite(preset.zoom)) {
+        const previousZoom = sceneZoomFactor;
+        const previousZoomReferenceView = sceneZoomReferenceView;
+        const nextZoomReferenceView = sceneViewOverride ?? currentDimensionMode;
+        sceneZoomFactor = preset.zoom;
+        sceneZoomReferenceView = nextZoomReferenceView;
+        if (animateCamera && progress < 1) {
+          sceneZoomTransition = {
+            from: previousZoom,
+            to: preset.zoom,
+            referenceViewFrom: previousZoomReferenceView,
+            referenceViewTo: nextZoomReferenceView,
+            progress,
+          };
+        }
+      }
+      Object.keys(notebookSceneToggleAliases).forEach((command) => {
+        if (Object.hasOwn(preset, command)) sceneToggleState[command] = Boolean(preset[command]);
+      });
+      return hasDimensionTransition;
+    };
+
+    const showNotebookMatrix = (entry) => {
+      if (!entry?.name) return;
+      const key = notebookVariableKey(entry.name);
+      const previous = visibleNotebookMatrices.get(key);
+      visibleNotebookMatrices.set(notebookVariableKey(entry.name), {
+        name: entry.name,
+        color: entry.color ?? NOTEBOOK_MATRIX_HEX,
+        rows: entry.rows,
+        columns: entry.columns,
+        shapeValues: [...(entry.shapeValues ?? [])],
+        slices: [...(previous?.slices ?? [])],
+      });
+    };
+
+    const hideNotebookMatrix = (name) => {
+      visibleNotebookMatrices.delete(notebookVariableKey(name));
+    };
 
     const upsertNotebookEquation = (entry, options = {}) => {
       if (!entry?.name && options.allowAnonymous !== true) return null;
@@ -7639,14 +5655,27 @@ export default function App() {
       const key = notebookVariableKey(vectorName);
       const existingIndex = revealedVectors.findIndex((item) => notebookVariableKey(item.name) === key);
       const vectorIndex = existingIndex >= 0 ? existingIndex : revealedVectors.length;
+      const previousVector = existingIndex >= 0
+        ? revealedVectors[existingIndex]
+        : notebookVectorEnv.get(key);
+      const previousDimension = existingIndex >= 0
+        ? revealedVectors[existingIndex]?.dimension
+        : notebookVectorEnv.get(key)?.dimension;
+      const visualKind = options.visualKind ?? previousVector?.visualKind ?? previousVector?.renderKind ?? 'arrow';
+      const vectorDimension = Math.max(
+        1,
+        Math.min(3, Number(options.dimension ?? previousDimension ?? values.length ?? 3) || 3)
+      );
       const nextVector = createVectorState(vectorIndex, {
         id: notebookVectorIdForName(vectorName, vectorIndex),
         name: vectorName,
         color: color ?? vectorPalette[vectorIndex % vectorPalette.length],
+        dimension: vectorDimension,
         x: values[0] ?? '0',
         y: values[1] ?? '0',
         z: values[2] ?? '0',
         visible: true,
+        renderKind: visualKind,
       });
       if (reveal) {
         if (existingIndex >= 0) revealedVectors[existingIndex] = nextVector;
@@ -7656,6 +5685,8 @@ export default function App() {
         name: vectorName,
         values: [nextVector.x, nextVector.y, nextVector.z],
         color: nextVector.color,
+        dimension: vectorDimension,
+        visualKind: nextVector.renderKind,
       });
       return nextVector;
     };
@@ -7666,7 +5697,60 @@ export default function App() {
       if (index >= 0) revealedVectors.splice(index, 1);
     };
 
+    const revealNotebookMatrixSlice = (cell, options = {}) => {
+      const matrixEntry = notebookMatrixEnv.get(notebookVariableKey(cell.matrixName));
+      if (!matrixEntry) return null;
+      const values = notebookMatrixSliceValues(matrixEntry, cell.axis, cell.sliceIndex);
+      if (!values) return null;
+      showNotebookMatrix(matrixEntry);
+      const matrixKey = notebookVariableKey(matrixEntry.name);
+      const visibleMatrix = visibleNotebookMatrices.get(matrixKey);
+      if (visibleMatrix) {
+        const sliceKey = `${cell.axis}:${cell.sliceIndex}:${notebookVariableKey(cell.name)}`;
+        const slices = (visibleMatrix.slices ?? []).filter((item) => item.key !== sliceKey);
+        slices.push({
+          key: sliceKey,
+          name: cell.name,
+          axis: cell.axis,
+          index: cell.sliceIndex,
+          color: cell.color,
+        });
+        visibleNotebookMatrices.set(matrixKey, { ...visibleMatrix, slices });
+      }
+      return upsertNotebookVector(
+        cell.name,
+        values.map((value) => formatPresetInputValue(parseNumber(value))),
+        cell.color,
+        { reveal: options.reveal ?? true, dimension: cell.dimension }
+      );
+    };
+
     const evaluateNotebookCalculation = (cell) => {
+      if (cell.operation === 'linearCombination') {
+        const entries = (cell.terms ?? []).map((term) => ({
+          term,
+          vector: notebookVectorEnv.get(notebookVariableKey(term.name)),
+        }));
+        if (entries.length < 2 || entries.some((entry) => !entry.vector)) return null;
+        const dimension = Math.max(...entries.map((entry) => entry.vector.dimension ?? 2));
+        const sums = Array.from({ length: dimension }, (_, coordinateIndex) =>
+          entries.reduce(
+            (sum, entry) => sum + Number(entry.term.scalar ?? 1) * parseNumber(entry.vector.values[coordinateIndex] ?? 0),
+            0
+          )
+        );
+        const firstVector = entries[0].vector;
+        const updatesFirst = notebookVariableKey(cell.name) === notebookVariableKey(firstVector.name);
+        return {
+          type: 'vector',
+          values: sums.map(formatPresetInputValue),
+          fromValues: updatesFirst
+            ? firstVector.values
+            : Array.from({ length: dimension }, () => '0'),
+          dimension,
+          color: updatesFirst ? firstVector.color : cell.color ?? firstVector.color,
+        };
+      }
       const leftKey = notebookVariableKey(cell.left);
       const rightKey = notebookVariableKey(cell.right);
       const leftMatrix = notebookMatrixEnv.get(leftKey);
@@ -7675,10 +5759,35 @@ export default function App() {
       const rightVector = notebookVectorEnv.get(rightKey);
       const leftEquation = notebookEquationEnv.get(leftKey);
       const rightEquation = notebookEquationEnv.get(rightKey);
+      if (Number.isFinite(cell.leftScalar) && rightVector) {
+        const updatesSource = notebookVariableKey(cell.name) === notebookVariableKey(rightVector.name);
+        return {
+          type: 'vector',
+          values: rightVector.values.map((value) =>
+            formatPresetInputValue(cell.leftScalar * parseNumber(value))
+          ),
+          fromValues: rightVector.values,
+          dimension: rightVector.dimension,
+          color: updatesSource ? rightVector.color : cell.color ?? rightVector.color,
+        };
+      }
+      if (Number.isFinite(cell.rightScalar) && leftVector) {
+        const updatesSource = notebookVariableKey(cell.name) === notebookVariableKey(leftVector.name);
+        return {
+          type: 'vector',
+          values: leftVector.values.map((value) =>
+            formatPresetInputValue(cell.rightScalar * parseNumber(value))
+          ),
+          fromValues: leftVector.values,
+          dimension: leftVector.dimension,
+          color: updatesSource ? leftVector.color : cell.color ?? leftVector.color,
+        };
+      }
       if (leftMatrix && rightVector) {
         return {
           type: 'vector',
-          values: multiplyNotebookMatrixVector(leftMatrix.values, rightVector.values),
+          values: multiplyNotebookMatrixVector(leftMatrix, rightVector.values),
+          dimension: notebookMatrixShape(leftMatrix).rows,
           color: cell.color ?? rightVector.color,
         };
       }
@@ -7688,7 +5797,8 @@ export default function App() {
       if (rightMatrix && leftVector) {
         return {
           type: 'vector',
-          values: multiplyNotebookMatrixVector(rightMatrix.values, leftVector.values),
+          values: multiplyNotebookMatrixVector(rightMatrix, leftVector.values),
+          dimension: notebookMatrixShape(rightMatrix).rows,
           color: cell.color ?? leftVector.color,
         };
       }
@@ -7713,6 +5823,7 @@ export default function App() {
       );
       return {
         name: cell.name,
+        color: cell.color ?? NOTEBOOK_MATRIX_HEX,
         rows,
         columns,
         mode: operationModeForShape(rows, columns),
@@ -7725,6 +5836,7 @@ export default function App() {
       if (result?.type !== 'matrix') return null;
       const entry = {
         name: cell.name,
+        color: cell.color ?? result.color ?? NOTEBOOK_MATRIX_HEX,
         rows: result.rows,
         columns: result.columns,
         mode: result.mode,
@@ -7735,16 +5847,35 @@ export default function App() {
       return entry;
     };
 
+    const stageBoardRowOperation = (cell, resultEntry, localProgress = 1) => {
+      const leftMatrix = notebookMatrixEnv.get(notebookVariableKey(cell.left));
+      const rightMatrix = notebookMatrixEnv.get(notebookVariableKey(cell.right));
+      const analysis = analyzeElementaryRowProduct(leftMatrix, rightMatrix, resultEntry);
+      boardRowOperation = analysis
+        ? {
+            ...analysis,
+            leftName: leftMatrix.name,
+            rightName: rightMatrix.name,
+            resultName: resultEntry.name,
+            progress: clamp01(localProgress),
+          }
+        : null;
+    };
+
     const upsertNotebookCalculationResult = (cell, result, options = {}) => {
       const localProgress = Number.isFinite(options.localProgress) ? clamp01(options.localProgress) : 1;
       const easedProgress = easeInOut(localProgress);
       if (result?.type === 'vector') {
         const key = cell.name ? notebookVariableKey(cell.name) : '';
         const previous = key ? notebookVectorEnv.get(key) : null;
-        const values = previous && localProgress < 1
-          ? interpolateValueStrings(previous.values, result.values, easedProgress)
+        const fromValues = previous?.values ?? result.fromValues;
+        const values = fromValues && localProgress < 1
+          ? interpolateValueStrings(fromValues, result.values, easedProgress)
           : result.values;
-        return upsertNotebookVector(cell.name, values, result.color, { reveal: cell.execute === true });
+        return upsertNotebookVector(cell.name, values, result.color, {
+          reveal: cell.execute === true,
+          dimension: result.dimension,
+        });
       }
       if (result?.type === 'equation') {
         const key = cell.name ? notebookVariableKey(cell.name) : '';
@@ -7759,14 +5890,51 @@ export default function App() {
       return null;
     };
 
+    const seedNotebookEnvironmentCell = (cell) => {
+      if (!cell || cell.remove) return;
+      if (cell.type === 'equation') {
+        (cell.environmentEquations ?? cell.equations ?? []).forEach((entry) =>
+          upsertNotebookEquation(entry, { reveal: false })
+        );
+        return;
+      }
+      if (cell.type === 'vector') {
+        upsertNotebookVector(cell.name, cell.values ?? ['0', '0', '0'], cell.color, {
+          reveal: false,
+          dimension: cell.dimension,
+          visualKind: cell.visualKind,
+        });
+        return;
+      }
+      if (cell.type === 'slice') {
+        revealNotebookMatrixSlice(cell, { reveal: false });
+        return;
+      }
+      if (cell.type === 'matrix') {
+        const entry = matrixEntryForCell(cell);
+        notebookMatrixEnv.set(notebookVariableKey(cell.name), entry);
+        return;
+      }
+      if (cell.type === 'calc') {
+        const result = evaluateNotebookCalculation(cell);
+        if (result?.type === 'vector' || result?.type === 'equation') {
+          upsertNotebookCalculationResult({ ...cell, execute: false }, result, { localProgress: 1 });
+        }
+        if (result?.type === 'matrix') setMatrixCalculation(cell, result);
+      }
+    };
+
     if (hasLineMetadata) {
       const lastLineFromCells = Math.max(
         0,
         ...cells.map((cell, index) => Number.isFinite(cell.lineEnd) ? cell.lineEnd : index)
       );
-      const lineCount = Math.max(NOTEBOOK_MIN_VISIBLE_LINES, notebookScript.lineCount, lastLineFromCells + 1);
+      const sourceLineCount = Number.isFinite(options.lineCount)
+        ? options.lineCount
+        : notebookScript.lineCount;
+      const lineCount = Math.max(NOTEBOOK_MIN_VISIBLE_LINES, sourceLineCount, lastLineFromCells + 1);
       const linePosition = (clamped / 100) * lineCount;
-      const activeLine = clamped <= 0 ? -1 : Math.min(lineCount - 1, Math.max(0, Math.floor(linePosition)));
+      const activeLine = notebookActiveLineIndexForCursor(clamped, lineCount);
       const activeByLine = activeLine < 0
         ? null
         : cells.find((cell, index) => {
@@ -7789,12 +5957,124 @@ export default function App() {
         const lineStart = Number.isFinite(cell.lineStart) ? cell.lineStart : index;
         const lineEnd = Number.isFinite(cell.lineEnd) ? cell.lineEnd : lineStart;
         const span = Math.max(1, lineEnd - lineStart + 1);
-        const hasReachedCell = clamped >= 100 || linePosition > lineStart;
+        const cellProgress = clamp01((linePosition - lineStart) / span);
+        if (activeCell?.id === cell.id) activeCellProgress = cellProgress;
+        // Cursor percentages often land a few floating-point ulps past an exact
+        // line boundary. Do not let that reveal the first line after a checkpoint.
+        const hasReachedCell = clamped >= 100 || linePosition > lineStart + 0.000001;
         if (!hasReachedCell) continue;
-        if (cell.hidden) continue;
+        if (cell.type === 'equation') seedNotebookEnvironmentCell(cell);
+        if (cell.hidden) {
+          seedNotebookEnvironmentCell(cell);
+          continue;
+        }
 
         if (cell.type === 'caption') {
           captionText = cell.remove ? '' : cell.text ?? '';
+          continue;
+        }
+
+        if (cell.type === 'focus') {
+          setFocusFromCell(cell);
+          continue;
+        }
+
+        if (cell.type === 'boardAnnotation') {
+          setBoardAnnotationFromCell(cell);
+          continue;
+        }
+
+        if (cell.type === 'solution') {
+          solutionSelection = cell.remove
+            ? null
+            : {
+                name: cell.name,
+                names: [...(cell.names ?? [])],
+                progress: activeCell?.id === cell.id ? cellProgress : 1,
+              };
+          continue;
+        }
+
+          if (cell.type === 'scene') {
+          if (cell.command === 'clear') {
+            revealedVectors.splice(0, revealedVectors.length);
+            equationLineItems.splice(0, equationLineItems.length);
+            visibleNotebookMatrices.clear();
+            captionText = '';
+            focusedNames = new Set();
+            focusMode = 'soft';
+            hardFocusSourceId = null;
+            solutionSelection = null;
+            boardRowOperation = null;
+            boardAnnotation = null;
+          } else if (cell.command === 'dimension') {
+            const isComplete = cellProgress >= 1 || clamped >= 100;
+            const isTransitioning = applyNotebookDimension(cell.value, cellProgress, !isComplete);
+            if (isTransitioning) {
+              activeCell = cell;
+              isInsidePartialMatrix = true;
+              break;
+            }
+          } else if (cell.command === 'spaceReset') {
+            const isComplete = cellProgress >= 1 || clamped >= 100;
+            if (isComplete) {
+              startMatrix = [...currentDimensionIdentity];
+              targetMatrix = [...currentDimensionIdentity];
+            } else {
+              targetMatrix = [...currentDimensionIdentity];
+              progressWithinCell = cellProgress;
+              activeCell = cell;
+              isInsidePartialMatrix = true;
+              break;
+            }
+          } else if (cell.command === 'view') {
+            const previousView = sceneViewOverride;
+            sceneViewOverride = cell.value;
+            if (activeCell?.id === cell.id && cellProgress < 1) {
+              sceneViewTransition = {
+                from: previousView,
+                to: cell.value,
+                progress: cellProgress,
+              };
+            }
+          } else if (cell.command === 'orbit') {
+            if (activeCell?.id === cell.id && cellProgress < 1) {
+              sceneOrbitTransition = {
+                view: sceneViewOverride ?? currentDimensionMode,
+                progress: cellProgress,
+              };
+            }
+          } else if (cell.command === 'zoom') {
+            const previousZoom = sceneZoomFactor;
+            const previousZoomReferenceView = sceneZoomReferenceView;
+            const nextZoomReferenceView = sceneViewOverride ?? currentDimensionMode;
+            sceneZoomFactor = cell.value;
+            sceneZoomReferenceView = nextZoomReferenceView;
+            if (activeCell?.id === cell.id && cellProgress < 1) {
+              sceneZoomTransition = {
+                from: previousZoom,
+                to: cell.value,
+                referenceViewFrom: previousZoomReferenceView,
+                referenceViewTo: nextZoomReferenceView,
+                progress: cellProgress,
+              };
+            }
+          } else if (cell.command === 'field') {
+            sceneFieldMode = cell.value === 'board' ? 'board' : 'graph';
+          } else if (cell.command === 'preset') {
+            const isTransitioning = applyNotebookScenePreset(
+              cell.value,
+              cellProgress,
+              activeCell?.id === cell.id
+            );
+            if (isTransitioning) {
+              activeCell = cell;
+              isInsidePartialMatrix = true;
+              break;
+            }
+          } else if (Object.hasOwn(sceneToggleState, cell.command)) {
+            sceneToggleState[cell.command] = Boolean(cell.value);
+          }
           continue;
         }
 
@@ -7827,7 +6107,20 @@ export default function App() {
             removeNotebookVector(cell.name);
             continue;
           }
-          upsertNotebookVector(cell.name, values, cell.color, { reveal: cell.execute !== false });
+          upsertNotebookVector(cell.name, values, cell.color, {
+            reveal: cell.execute !== false,
+            dimension: cell.dimension,
+            visualKind: cell.visualKind,
+          });
+          continue;
+        }
+
+        if (cell.type === 'slice') {
+          if (cell.remove) {
+            removeNotebookVector(cell.name);
+            continue;
+          }
+          revealNotebookMatrixSlice(cell);
           continue;
         }
 
@@ -7835,7 +6128,6 @@ export default function App() {
           if (cell.remove) {
             if (cell.resultKind === 'vector') removeNotebookVector(cell.name);
             if (cell.resultKind === 'equation') removeNotebookEquation(cell.name);
-            if (cell.resultKind === 'matrix') notebookMatrixEnv.delete(notebookVariableKey(cell.name));
             continue;
           }
           const result = evaluateNotebookCalculation(cell);
@@ -7847,7 +6139,11 @@ export default function App() {
             upsertNotebookCalculationResult(cell, result, { localProgress });
           }
           if (result?.type === 'matrix') {
-            setMatrixCalculation(cell, result);
+            const entry = setMatrixCalculation(cell, result);
+            if (entry && cell.execute === true) {
+              showNotebookMatrix(entry);
+              stageBoardRowOperation(cell, entry, localProgress);
+            }
           }
           continue;
         }
@@ -7856,11 +6152,24 @@ export default function App() {
           if (cell.remove) {
             if (cell.refKind === 'vector') removeNotebookVector(cell.name);
             if (cell.refKind === 'equation') removeNotebookEquation(cell.name);
-            if (cell.refKind === 'matrix') notebookMatrixEnv.delete(notebookVariableKey(cell.name));
+            if (cell.refKind === 'matrix') hideNotebookMatrix(cell.name);
             continue;
           }
           if (cell.refKind === 'matrix') {
+            const previousView = sceneViewOverride;
+            if (cell.synchronizedView) {
+              sceneViewOverride = cell.synchronizedView;
+              if (activeCell?.id === cell.id && cellProgress < 1) {
+                sceneViewTransition = {
+                  from: previousView,
+                  to: cell.synchronizedView,
+                  progress: cellProgress,
+                };
+              }
+            }
             const entry = notebookMatrixEnv.get(notebookVariableKey(cell.name));
+            if (entry) showNotebookMatrix(entry);
+            if (cell.execute === false) continue;
             const localProgress = clamp01(linePosition - lineStart);
             const isComplete = localProgress >= 1 || clamped >= 100;
             if (entry && isComplete) {
@@ -7876,7 +6185,10 @@ export default function App() {
           }
           if (cell.refKind === 'vector') {
             const entry = notebookVectorEnv.get(notebookVariableKey(cell.name));
-            if (entry) upsertNotebookVector(entry.name, entry.values, entry.color);
+            if (entry) upsertNotebookVector(entry.name, entry.values, entry.color, {
+              dimension: entry.dimension,
+              visualKind: entry.visualKind,
+            });
           }
           if (cell.refKind === 'equation') {
             const entry = notebookEquationEnv.get(notebookVariableKey(cell.name));
@@ -7891,9 +6203,11 @@ export default function App() {
           const localProgress = clamp01((linePosition - lineStart) / span);
           const isComplete = localProgress >= 1 || clamped >= 100;
           if (cell.remove) {
-            if (isComplete) notebookMatrixEnv.delete(notebookVariableKey(cell.name));
+            hideNotebookMatrix(cell.name);
+            if (isComplete) notebookMatrixEnv.set(notebookVariableKey(cell.name), entry);
             continue;
           }
+          showNotebookMatrix(entry);
           if (isComplete) {
             notebookMatrixEnv.set(notebookVariableKey(cell.name), entry);
           }
@@ -7914,7 +6228,7 @@ export default function App() {
         targetMatrix = [...startMatrix];
         progressWithinCell = 1;
       }
-      equationText = equationLineItems.map((item) => item.text).join('\n');
+      equationText = equationLineItems.map(notebookEquationEntryText).join('\n');
       hasEquationText = equationLineItems.length > 0;
     } else {
       const scaled = (clamped / 100) * cells.length;
@@ -7930,10 +6244,49 @@ export default function App() {
           ? Math.min(1, scaled - activeIndex)
           : scaled - activeIndex;
       activeCell = cells[activeIndex];
+      activeCellProgress = clamp01(localProgress);
 
       for (let index = 0; index < activeIndex; index += 1) {
         const cell = cells[index];
         if (cell.hidden) continue;
+        if (cell.type === 'scene' && cell.command === 'dimension') {
+          applyNotebookDimension(cell.value);
+          continue;
+        }
+        if (cell.type === 'scene' && cell.command === 'spaceReset') {
+          startMatrix = [...currentDimensionIdentity];
+          continue;
+        }
+        if (cell.type === 'scene' && cell.command === 'field') {
+          sceneFieldMode = cell.value === 'board' ? 'board' : 'graph';
+          continue;
+        }
+        if (cell.type === 'scene' && cell.command === 'preset') {
+          applyNotebookScenePreset(cell.value);
+          continue;
+        }
+        if (cell.type === 'focus') {
+          setFocusFromCell(cell);
+          continue;
+        }
+        if (cell.type === 'boardAnnotation') {
+          setBoardAnnotationFromCell(cell);
+          continue;
+        }
+        if (cell.type === 'solution') {
+          solutionSelection = cell.remove
+            ? null
+            : { name: cell.name, names: [...(cell.names ?? [])], progress: 1 };
+          continue;
+        }
+        if (cell.type === 'scene' && cell.command === 'clear') {
+          focusedNames = new Set();
+          focusMode = 'soft';
+          hardFocusSourceId = null;
+          solutionSelection = null;
+          boardRowOperation = null;
+          boardAnnotation = null;
+        }
         if (cell.type === 'caption') {
           captionText = cell.remove ? '' : cell.text ?? '';
         }
@@ -7958,9 +6311,11 @@ export default function App() {
         if (cell.type === 'matrix') {
           const entry = matrixEntryForCell(cell);
           if (cell.remove) {
-            notebookMatrixEnv.delete(notebookVariableKey(cell.name));
+            hideNotebookMatrix(cell.name);
+            notebookMatrixEnv.set(notebookVariableKey(cell.name), entry);
             continue;
           }
+          showNotebookMatrix(entry);
           notebookMatrixEnv.set(notebookVariableKey(cell.name), entry);
           if (cell.execute === true) startMatrix = multiplyMatrix3(entry.values, startMatrix);
         }
@@ -7969,13 +6324,20 @@ export default function App() {
             removeNotebookVector(cell.name);
             continue;
           }
-          upsertNotebookVector(cell.name, cell.values ?? ['0', '0', '0'], cell.color, { reveal: cell.execute !== false });
+          upsertNotebookVector(cell.name, cell.values ?? ['0', '0', '0'], cell.color, {
+            reveal: cell.execute !== false,
+            dimension: cell.dimension,
+            visualKind: cell.visualKind,
+          });
+        }
+        if (cell.type === 'slice') {
+          if (cell.remove) removeNotebookVector(cell.name);
+          else revealNotebookMatrixSlice(cell);
         }
         if (cell.type === 'calc') {
           if (cell.remove) {
             if (cell.resultKind === 'vector') removeNotebookVector(cell.name);
             if (cell.resultKind === 'equation') removeNotebookEquation(cell.name);
-            if (cell.resultKind === 'matrix') notebookMatrixEnv.delete(notebookVariableKey(cell.name));
             continue;
           }
           const result = evaluateNotebookCalculation(cell);
@@ -7986,20 +6348,33 @@ export default function App() {
             upsertNotebookCalculationResult(cell, result, { localProgress: 1 });
           }
           if (result?.type === 'matrix') {
-            setMatrixCalculation(cell, result);
+            const entry = setMatrixCalculation(cell, result);
+            if (entry && cell.execute === true) {
+              showNotebookMatrix(entry);
+              stageBoardRowOperation(cell, entry, 1);
+            }
           }
         }
         if (cell.type === 'ref') {
           if (cell.remove) {
             if (cell.refKind === 'vector') removeNotebookVector(cell.name);
             if (cell.refKind === 'equation') removeNotebookEquation(cell.name);
-            if (cell.refKind === 'matrix') notebookMatrixEnv.delete(notebookVariableKey(cell.name));
+            if (cell.refKind === 'matrix') hideNotebookMatrix(cell.name);
           } else if (cell.refKind === 'matrix') {
+            if (cell.synchronizedView) sceneViewOverride = cell.synchronizedView;
             const entry = notebookMatrixEnv.get(notebookVariableKey(cell.name));
-            if (entry) startMatrix = multiplyMatrix3(entry.values, startMatrix);
+            if (entry) {
+              showNotebookMatrix(entry);
+              if (cell.execute !== false) {
+                startMatrix = multiplyMatrix3(entry.values, startMatrix);
+              }
+            }
           } else if (cell.refKind === 'vector') {
             const entry = notebookVectorEnv.get(notebookVariableKey(cell.name));
-            if (entry) upsertNotebookVector(entry.name, entry.values, entry.color);
+            if (entry) upsertNotebookVector(entry.name, entry.values, entry.color, {
+              dimension: entry.dimension,
+              visualKind: entry.visualKind,
+            });
           } else if (cell.refKind === 'equation') {
             const entry = notebookEquationEnv.get(notebookVariableKey(cell.name));
             if (entry) upsertNotebookEquation(entry);
@@ -8010,6 +6385,38 @@ export default function App() {
       targetMatrix = [...startMatrix];
       if (!activeCell || activeCell.hidden) {
         progressWithinCell = 1;
+      } else if (activeCell.type === 'focus') {
+        setFocusFromCell(activeCell);
+        progressWithinCell = localProgress;
+      } else if (activeCell.type === 'boardAnnotation') {
+        setBoardAnnotationFromCell(activeCell, localProgress);
+        progressWithinCell = localProgress;
+      } else if (activeCell.type === 'solution') {
+        solutionSelection = activeCell.remove
+          ? null
+          : {
+              name: activeCell.name,
+              names: [...(activeCell.names ?? [])],
+              progress: localProgress,
+            };
+        progressWithinCell = localProgress;
+      } else if (activeCell.type === 'scene' && activeCell.command === 'dimension') {
+        applyNotebookDimension(activeCell.value, localProgress, true);
+        progressWithinCell = localProgress;
+      } else if (activeCell.type === 'scene' && activeCell.command === 'spaceReset') {
+        targetMatrix = [...currentDimensionIdentity];
+        progressWithinCell = localProgress;
+      } else if (activeCell.type === 'scene' && activeCell.command === 'field') {
+        sceneFieldMode = activeCell.value === 'board' ? 'board' : 'graph';
+        progressWithinCell = localProgress;
+      } else if (activeCell.type === 'scene' && activeCell.command === 'orbit') {
+        sceneOrbitTransition = {
+          view: sceneViewOverride ?? currentDimensionMode,
+          progress: localProgress,
+        };
+        progressWithinCell = localProgress;
+      } else if (activeCell.type === 'scene' && activeCell.command === 'preset') {
+        applyNotebookScenePreset(activeCell.value, localProgress, true);
       } else if (activeCell.type === 'equation') {
         const sourceLines = activeCell.text.replace(/\r/g, '').split('\n').filter((line) => line.trim());
         const equationItems = activeCell.equations?.length
@@ -8033,13 +6440,20 @@ export default function App() {
       if (activeCell?.type === 'vector') {
         const values = activeCell.values ?? ['0', '0', '0'];
         if (activeCell.remove) removeNotebookVector(activeCell.name);
-        else upsertNotebookVector(activeCell.name, values, activeCell.color, { reveal: activeCell.execute !== false });
+        else upsertNotebookVector(activeCell.name, values, activeCell.color, {
+          reveal: activeCell.execute !== false,
+          dimension: activeCell.dimension,
+          visualKind: activeCell.visualKind,
+        });
+      }
+      if (activeCell?.type === 'slice') {
+        if (activeCell.remove) removeNotebookVector(activeCell.name);
+        else revealNotebookMatrixSlice(activeCell);
       }
       if (activeCell?.type === 'calc') {
         if (activeCell.remove) {
           if (activeCell.resultKind === 'vector') removeNotebookVector(activeCell.name);
           if (activeCell.resultKind === 'equation') removeNotebookEquation(activeCell.name);
-          if (activeCell.resultKind === 'matrix') notebookMatrixEnv.delete(notebookVariableKey(activeCell.name));
         } else {
         const result = evaluateNotebookCalculation(activeCell);
         if (result?.type === 'vector') {
@@ -8049,15 +6463,21 @@ export default function App() {
           upsertNotebookCalculationResult(activeCell, result, { localProgress });
         }
         if (result?.type === 'matrix') {
-          setMatrixCalculation(activeCell, result);
+          const entry = setMatrixCalculation(activeCell, result);
+          if (entry && activeCell.execute === true) {
+            showNotebookMatrix(entry);
+            stageBoardRowOperation(activeCell, entry, localProgress);
+          }
         }
         }
       }
       if (activeCell?.type === 'matrix') {
         const entry = matrixEntryForCell(activeCell);
         if (activeCell.remove) {
-          notebookMatrixEnv.delete(notebookVariableKey(activeCell.name));
+          hideNotebookMatrix(activeCell.name);
+          notebookMatrixEnv.set(notebookVariableKey(activeCell.name), entry);
         } else {
+          showNotebookMatrix(entry);
           notebookMatrixEnv.set(notebookVariableKey(activeCell.name), entry);
         if (activeCell.execute === true) {
           targetMatrix = multiplyMatrix3(entry.values, startMatrix);
@@ -8069,16 +6489,33 @@ export default function App() {
         if (activeCell.remove) {
           if (activeCell.refKind === 'vector') removeNotebookVector(activeCell.name);
           if (activeCell.refKind === 'equation') removeNotebookEquation(activeCell.name);
-          if (activeCell.refKind === 'matrix') notebookMatrixEnv.delete(notebookVariableKey(activeCell.name));
+          if (activeCell.refKind === 'matrix') hideNotebookMatrix(activeCell.name);
         } else if (activeCell.refKind === 'matrix') {
+          const previousView = sceneViewOverride;
+          if (activeCell.synchronizedView) {
+            sceneViewOverride = activeCell.synchronizedView;
+            if (localProgress < 1) {
+              sceneViewTransition = {
+                from: previousView,
+                to: activeCell.synchronizedView,
+                progress: localProgress,
+              };
+            }
+          }
           const entry = notebookMatrixEnv.get(notebookVariableKey(activeCell.name));
           if (entry) {
-            targetMatrix = multiplyMatrix3(entry.values, startMatrix);
-            progressWithinCell = localProgress;
+            showNotebookMatrix(entry);
+            if (activeCell.execute !== false) {
+              targetMatrix = multiplyMatrix3(entry.values, startMatrix);
+              progressWithinCell = localProgress;
+            }
           }
         } else if (activeCell.refKind === 'vector') {
           const entry = notebookVectorEnv.get(notebookVariableKey(activeCell.name));
-          if (entry) upsertNotebookVector(entry.name, entry.values, entry.color);
+          if (entry) upsertNotebookVector(entry.name, entry.values, entry.color, {
+            dimension: entry.dimension,
+            visualKind: entry.visualKind,
+          });
         } else if (activeCell.refKind === 'equation') {
           const entry = notebookEquationEnv.get(notebookVariableKey(activeCell.name));
           if (entry) upsertNotebookEquation(entry);
@@ -8086,40 +6523,201 @@ export default function App() {
       }
     }
 
-    equationText = equationLineItems.map((item) => item.text).join('\n');
-    hasEquationText = equationLineItems.length > 0;
-
-    setNotebookCursor(clamped);
-    setActiveNotebookCellId(activeCell?.id ?? null);
-    setActiveNotebookCaption(captionText);
-    if (hasLineMetadata || hasEquationText) {
-      const normalized = equationText.replace(/\r/g, '');
-      setEquations(normalized === '' ? [''] : normalized.split('\n'));
+    if (syncUi) setNotebookFieldMode(sceneFieldMode);
+    if (workspaceModeRef.current === 'system') {
+      if (syncUi) setShowAxes(sceneToggleState.axes);
+      uiStateRef.current.showAxes = sceneToggleState.axes;
+      if (syncUi) setShowRelativeAxes(sceneToggleState.relativeAxes);
+      uiStateRef.current.showRelativeAxes = sceneToggleState.relativeAxes;
+      if (syncUi) setShowGrid(sceneToggleState.grid);
+      uiStateRef.current.showGrid = sceneToggleState.grid;
+      if (syncUi) setShowRelativeGrid(sceneToggleState.relativeGrid);
+      uiStateRef.current.showRelativeGrid = sceneToggleState.relativeGrid;
+      if (syncUi) setShowCoordinates(sceneToggleState.coordinates);
+      uiStateRef.current.showCoordinateNumbers = sceneToggleState.coordinates;
+      if (syncUi) setShowBasis(sceneToggleState.basis);
+      uiStateRef.current.showBasis = sceneToggleState.basis;
+      if (syncUi) setShowVector(sceneToggleState.vectors);
+      uiStateRef.current.showVector = sceneToggleState.vectors;
     }
-    if (scriptHasVectorCells) {
-      const notebookVectorMatrix = startMatrix.map((value, matrixIndex) =>
-        value + progressWithinCell * (targetMatrix[matrixIndex] - value)
-      );
-      notebookVectorTransformRef.current = [...notebookVectorMatrix];
-      setVectors((previous) => {
-        const same = previous.length === revealedVectors.length && previous.every((item, index) => {
-          const next = revealedVectors[index];
-          return (
-            next &&
-            item.id === next.id &&
+    uiStateRef.current.notebookActiveCellId = activeCell?.id ?? null;
+    uiStateRef.current.notebookActiveCellProgress = activeCellProgress;
+    uiStateRef.current.notebookSolutionSelection = solutionSelection;
+    const nextHardFocusSourceId = focusMode === 'hard' && focusedNames.size
+      ? hardFocusSourceId
+      : null;
+    if (nextHardFocusSourceId) {
+      if (uiStateRef.current.notebookHardFocusSourceId !== nextHardFocusSourceId) {
+        uiStateRef.current.notebookHardFocusExpiresAt =
+          (globalThis.performance?.now?.() ?? Date.now()) +
+          NOTEBOOK_AUTHORED_HARD_FOCUS_COMPARE_MS;
+      }
+    } else {
+      uiStateRef.current.notebookHardFocusExpiresAt = 0;
+    }
+    uiStateRef.current.notebookHardFocusSourceId = nextHardFocusSourceId;
+    uiStateRef.current.notebookFocusedNames = new Set(focusedNames);
+    uiStateRef.current.notebookFocusMode = focusMode;
+
+    equationText = equationLineItems.map(notebookEquationEntryText).join('\n');
+    hasEquationText = equationLineItems.length > 0;
+    revealedVectors.forEach((item) => {
+      const focused = focusedNames.has(notebookVariableKey(item.name));
+      item.focused = focused;
+      item.dimmed = false;
+    });
+    const visibleSourceMode = currentDimensionMode;
+    const contentAutoCameraView = outputModeForSystemMode(visibleSourceMode, targetMatrix);
+    const nextAutoCameraView = sceneViewOverride ?? contentAutoCameraView;
+    const matrixCameraViewFrom = outputModeForSystemMode(visibleSourceMode, startMatrix);
+    const matrixCameraViewTo = nextAutoCameraView;
+    const previousAutoCameraView = autoCameraTargetViewRef.current;
+    let cameraViewFrom = matrixCameraViewFrom;
+    let cameraViewTo = matrixCameraViewTo;
+    let cameraProgressOverride = null;
+    const activeCameraCellId = activeCell?.id ?? 'none';
+    if (
+      workspaceModeRef.current === 'system' &&
+      matrixCameraViewFrom === matrixCameraViewTo &&
+      previousAutoCameraView
+    ) {
+      const existingTransition = notebookCameraTransitionRef.current;
+      if (
+        existingTransition &&
+        existingTransition.cellId === activeCameraCellId &&
+        existingTransition.to === nextAutoCameraView
+      ) {
+        cameraViewFrom = existingTransition.from;
+        cameraViewTo = existingTransition.to;
+        cameraProgressOverride = activeCellProgress;
+      } else if (previousAutoCameraView !== nextAutoCameraView) {
+        notebookCameraTransitionRef.current = {
+          cellId: activeCameraCellId,
+          from: previousAutoCameraView,
+          to: nextAutoCameraView,
+        };
+        cameraViewFrom = previousAutoCameraView;
+        cameraViewTo = nextAutoCameraView;
+        cameraProgressOverride = activeCellProgress;
+      } else {
+        notebookCameraTransitionRef.current = null;
+      }
+    } else if (matrixCameraViewFrom !== matrixCameraViewTo) {
+      notebookCameraTransitionRef.current = null;
+    }
+    if (scriptHasViewCommand) {
+      cameraViewFrom = sceneViewTransition?.from ?? sceneViewOverride ?? contentAutoCameraView;
+      cameraViewTo = sceneViewTransition?.to ?? sceneViewOverride ?? contentAutoCameraView;
+      cameraProgressOverride = sceneViewTransition?.progress ?? 1;
+      notebookCameraTransitionRef.current = null;
+    }
+    notebookAutoCameraViewRef.current = nextAutoCameraView;
+    autoCameraTargetViewRef.current = nextAutoCameraView;
+
+    const normalizedEquationText = equationText.replace(/\r/g, '');
+    const nextEquationLines = normalizedEquationText === '' ? [''] : normalizedEquationText.split('\n');
+    const nextEquationModeHint = equationLineItems.some((item) => (item.dimension ?? 2) >= 3)
+      ? '3d'
+      : null;
+    const nextEquationVisualKey = `${nextEquationModeHint ?? 'auto'}:${normalizedEquationText}`;
+    if (notebookEquationVisualKeyRef.current !== nextEquationVisualKey) {
+      notebookEquationVisualKeyRef.current = nextEquationVisualKey;
+      lineSystemRef.current = analyzeEquationGeometry(nextEquationLines, nextEquationModeHint);
+      // Keep the last committed equation scene mounted until the React-owned
+      // line system replaces it. Clearing a non-empty scene here creates an
+      // observable blank frame and drops the settled reveal time of equations
+      // that remain present while a later equation is entering.
+      if (equationLineItems.length === 0) {
+        const refs = threeRef.current;
+        if (refs?.equationGroup) clearEquationGroup(refs.equationGroup);
+        if (refs?.equationPoint) {
+          refs.equationPoint.userData.visible = false;
+          refs.equationPoint.visible = false;
+        }
+        equationLabelRefs.current.forEach((label) => {
+          if (label) label.style.display = 'none';
+        });
+        if (equationSolutionLabelRef.current) equationSolutionLabelRef.current.style.display = 'none';
+      }
+    }
+
+    const nextSceneMatrices = [...visibleNotebookMatrices.values()];
+    if (syncUi) {
+      setNotebookCursor(clamped);
+      setActiveNotebookCellId(activeCell?.id ?? null);
+      setActiveNotebookCaption(captionText);
+      if (hasLineMetadata || hasEquationText) {
+        setNotebookEquationModeHint(nextEquationModeHint);
+        setEquations(nextEquationLines);
+      }
+      setNotebookSceneMatrices((previous) => {
+        const same = previous.length === nextSceneMatrices.length && previous.every((item, index) => {
+          const next = nextSceneMatrices[index];
+          return next &&
             item.name === next.name &&
             item.color === next.color &&
-            item.x === next.x &&
-            item.y === next.y &&
-            item.z === next.z &&
-            item.visible === next.visible
-          );
+            item.rows === next.rows &&
+            item.columns === next.columns &&
+            item.shapeValues.length === next.shapeValues.length &&
+            item.shapeValues.every((value, valueIndex) => value === next.shapeValues[valueIndex]) &&
+            (item.slices?.length ?? 0) === (next.slices?.length ?? 0) &&
+            (item.slices ?? []).every((slice, sliceIndex) => {
+              const nextSlice = next.slices?.[sliceIndex];
+              return nextSlice &&
+                slice.key === nextSlice.key &&
+                slice.color === nextSlice.color;
+            });
         });
-        return same ? previous : revealedVectors;
+        return same ? previous : nextSceneMatrices;
       });
-      setActiveVectorId(revealedVectors.at(-1)?.id ?? null);
+      setNotebookBoardOperation((previous) =>
+        sameNotebookBoardProgressState(previous, boardRowOperation) ? previous : boardRowOperation
+      );
+      setNotebookBoardAnnotation((previous) =>
+        sameNotebookBoardProgressState(previous, boardAnnotation) ? previous : boardAnnotation
+      );
+    }
+    if (scriptHasVectorCells) {
+      // A bare notebook matrix action deforms the grid, basis, and tracked
+      // vectors as one space. Keep every object on the exact eased matrix
+      // progress used by setMatrixAtProgress; linear vector progress makes the
+      // arrow visibly chase the grid near the start and end of the cell.
+      const easedMatrixProgress = easeInOut(progressWithinCell);
+      const notebookVectorMatrix = startMatrix.map((value, matrixIndex) =>
+        value + easedMatrixProgress * (targetMatrix[matrixIndex] - value)
+      );
+      notebookVectorTransformRef.current = [...notebookVectorMatrix];
+      vectorsRef.current = revealedVectors.map((item) => ({
+        ...item,
+        colorHex: colorToHex(item.color),
+        values: [parseNumber(item.x), parseNumber(item.y), parseNumber(item.z)],
+        scalarValue: parseNumber(item.scalar),
+      }));
+      activeVectorIdRef.current = revealedVectors.at(-1)?.id ?? null;
+      if (syncUi) {
+        setVectors((previous) => {
+          const same = previous.length === revealedVectors.length && previous.every((item, index) => {
+            const next = revealedVectors[index];
+            return (
+              next &&
+              item.id === next.id &&
+              item.name === next.name &&
+              item.color === next.color &&
+              item.x === next.x &&
+              item.y === next.y &&
+              item.z === next.z &&
+              item.renderKind === next.renderKind &&
+              item.visible === next.visible &&
+              item.focused === next.focused &&
+              item.dimmed === next.dimmed
+            );
+          });
+          return same ? previous : revealedVectors;
+        });
+        setActiveVectorId(revealedVectors.at(-1)?.id ?? null);
+      }
     } else {
-      notebookVectorTransformRef.current = [...notebookIdentity];
+      notebookVectorTransformRef.current = [...currentDimensionIdentity];
     }
 
     if (options.animate) {
@@ -8129,25 +6727,68 @@ export default function App() {
       );
       startMatrixRef.current = [...currentMatrixRef.current];
       targetMatrixRef.current = desiredMatrix;
-      animationViewFromRef.current = viewKeyForMatrix(currentMatrixRef.current);
-      animationViewToRef.current = viewKeyForMatrix(desiredMatrix);
+      animationViewFromRef.current =
+        workspaceModeRef.current === 'system'
+          ? outputModeForSystemMode(visibleSourceMode, currentMatrixRef.current)
+          : viewKeyForMatrix(currentMatrixRef.current);
+      animationViewToRef.current =
+        workspaceModeRef.current === 'system'
+          ? outputModeForSystemMode(visibleSourceMode, desiredMatrix)
+          : viewKeyForMatrix(desiredMatrix);
       animationStartRef.current = null;
       lastUiSyncRef.current = 0;
       isAnimatingRef.current = true;
-      setProgress(0);
-      setBasisControlMatrix(desiredMatrix);
+      if (syncUi) {
+        setProgress(0);
+        setBasisControlMatrix(desiredMatrix);
+      }
       return;
     }
 
     stopAutoAnimation();
     startMatrixRef.current = [...startMatrix];
     targetMatrixRef.current = [...targetMatrix];
-    animationViewFromRef.current = viewKeyForMatrix(startMatrix);
-    animationViewToRef.current = viewKeyForMatrix(targetMatrix);
+    animationViewFromRef.current =
+      workspaceModeRef.current === 'system' ? cameraViewFrom : viewKeyForMatrix(startMatrix);
+    animationViewToRef.current =
+      workspaceModeRef.current === 'system' ? cameraViewTo : viewKeyForMatrix(targetMatrix);
     animationStartRef.current = null;
     lastUiSyncRef.current = 0;
-    setMatrixAtProgress(progressWithinCell);
-  }, [notebookScript.cells, notebookScript.lineCount, notebookScript.mode, setMatrixAtProgress, stopAutoAnimation]);
+    cameraProgressOverrideRef.current = cameraProgressOverride;
+    setMatrixAtProgress(progressWithinCell, { syncUi });
+    cameraProgressOverrideRef.current = null;
+    const activeCellHasExplicitCamera = Boolean(
+      activeCell?.type === 'scene' && (
+        ['dimension', 'view', 'zoom', 'orbit'].includes(activeCell.command) ||
+        (
+          activeCell.command === 'preset' &&
+          (activeCell.value?.dimension || activeCell.value?.view || Number.isFinite(activeCell.value?.zoom))
+        )
+      )
+    ) || Boolean(activeCell?.type === 'ref' && activeCell.synchronizedView);
+    if (!options.preserveCameraUntilExplicit || activeCellHasExplicitCamera) {
+      setNotebookCameraDirective({
+        viewFrom: scriptHasViewCommand
+          ? sceneViewTransition?.from ?? sceneViewOverride ?? contentAutoCameraView
+          : null,
+        viewTo: scriptHasViewCommand
+          ? sceneViewTransition?.to ?? sceneViewOverride ?? contentAutoCameraView
+          : null,
+        viewProgress: sceneViewTransition?.progress ?? 1,
+        hasZoom: scriptHasZoomCommand,
+        zoomFrom: sceneZoomTransition?.from ?? sceneZoomFactor,
+        zoomTo: sceneZoomTransition?.to ?? sceneZoomFactor,
+        zoomReferenceViewFrom:
+          sceneZoomTransition?.referenceViewFrom ?? sceneZoomReferenceView,
+        zoomReferenceViewTo:
+          sceneZoomTransition?.referenceViewTo ?? sceneZoomReferenceView,
+        zoomProgress: sceneZoomTransition?.progress ?? 1,
+        hasOrbit: Boolean(sceneOrbitTransition),
+        orbitView: sceneOrbitTransition?.view,
+        orbitProgress: sceneOrbitTransition?.progress ?? 0,
+      }, { syncUi });
+    }
+  }, [notebookScript.cells, notebookScript.lineCount, notebookScript.mode, setMatrixAtProgress, setNotebookCameraDirective, stopAutoAnimation]);
 
   const runNotebookCell = useCallback((cellId) => {
     const index = notebookCells.findIndex((cell) => cell.id === cellId);
@@ -8161,84 +6802,75 @@ export default function App() {
       window.cancelAnimationFrame(notebookPlaybackFrameRef.current);
       notebookPlaybackFrameRef.current = null;
     }
+    cameraProgressOverrideRef.current = null;
+    notebookCameraTransitionRef.current = null;
+    lastNotebookUiSyncRef.current = 0;
     setNotebookPlaying(false);
   }, []);
 
-  const playNotebookCursorRange = useCallback((startCursor, endCursor, sourceCells = notebookScript.cells, duration = 900, onComplete) => {
+  useEffect(() => {
+    const pendingInsertion = pendingNotebookUiInsertionRef.current;
+    if (!pendingInsertion) return;
+    pendingNotebookUiInsertionRef.current = null;
+
     cancelNotebookPlayback();
+    setNotebookCheckpoint(null);
+    const parsed = parseNotebookScript(notebookText);
+    const lastLineFromCells = Math.max(
+      0,
+      ...parsed.cells.map((cell, index) => Number.isFinite(cell.lineEnd) ? cell.lineEnd : index)
+    );
+    const lineCount = Math.max(NOTEBOOK_MIN_VISIBLE_LINES, parsed.lineCount, lastLineFromCells + 1);
+    const insertedLineIndex = Math.max(
+      0,
+      Math.min(lineCount - 1, Number(pendingInsertion.lineIndex) || 0)
+    );
+    const cursorAfterInsertedCell = Math.min(100, ((insertedLineIndex + 1) / lineCount) * 100);
+    applyNotebookCursor(cursorAfterInsertedCell, parsed.cells, { lineCount: parsed.lineCount });
+  }, [applyNotebookCursor, cancelNotebookPlayback, notebookText]);
+
+  const playNotebookCursorRange = useCallback((
+    startCursor,
+    endCursor,
+    sourceCells = notebookScript.cells,
+    duration = 900,
+    onComplete,
+    sourceLineCount = notebookScript.lineCount,
+    playbackOptions = {}
+  ) => {
+    cancelNotebookPlayback();
+    setNotebookCuedLineIndex(null);
     const startValue = Math.max(0, Math.min(100, Number(startCursor) || 0));
-    const endValue = Math.max(0, Math.min(100, Number(endCursor) || 0));
-    const delta = endValue - startValue;
-    const direction = Math.sign(delta) || 1;
+    if (startValue <= 0.001 && workspaceModeRef.current === 'system') {
+      cameraProgressOverrideRef.current = null;
+      notebookCameraTransitionRef.current = null;
+      notebookAutoCameraViewRef.current = NOTEBOOK_SCENE_DEFAULTS.view;
+      autoCameraTargetViewRef.current = NOTEBOOK_SCENE_DEFAULTS.view;
+      animationViewFromRef.current = NOTEBOOK_SCENE_DEFAULTS.view;
+      animationViewToRef.current = NOTEBOOK_SCENE_DEFAULTS.view;
+    }
     const lastLineFromCells = Math.max(
       0,
       ...sourceCells.map((cell, index) => Number.isFinite(cell.lineEnd) ? cell.lineEnd : index)
     );
-    const lineCount = Math.max(NOTEBOOK_MIN_VISIBLE_LINES, notebookScript.lineCount, lastLineFromCells + 1);
+    const lineCount = Math.max(NOTEBOOK_MIN_VISIBLE_LINES, sourceLineCount, lastLineFromCells + 1);
     const speed = getNotebookPlaybackRate(notebookSpeed);
-    const timedCells = direction > 0
-      ? [...sourceCells]
-        .flatMap((cell, index) => {
-          const lineDurations = Array.isArray(cell.lineDurations) ? cell.lineDurations : [];
-          if (lineDurations.length) {
-            return lineDurations
-              .filter((item) => Number.isFinite(item.durationSec) && item.durationSec > 0)
-              .map((item) => {
-                const line = Number.isFinite(item.line)
-                  ? item.line
-                  : (Number.isFinite(cell.lineStart) ? cell.lineStart : index);
-                const start = (line / lineCount) * 100;
-                const end = ((line + 1) / lineCount) * 100;
-                return {
-                  start: Math.max(startValue, Math.min(endValue, start)),
-                  end: Math.max(startValue, Math.min(endValue, end)),
-                  duration: Math.max(120, item.durationSec * 1000 / speed),
-                };
-              });
-          }
-          if (!Number.isFinite(cell.durationSec) || cell.durationSec <= 0) return [];
-          const start = ((Number.isFinite(cell.lineStart) ? cell.lineStart : index) / lineCount) * 100;
-          const end = (((Number.isFinite(cell.lineEnd) ? cell.lineEnd : cell.lineStart ?? index) + 1) / lineCount) * 100;
-          return [{
-            start: Math.max(startValue, Math.min(endValue, start)),
-            end: Math.max(startValue, Math.min(endValue, end)),
-            duration: Math.max(120, cell.durationSec * 1000 / speed),
-          }];
-        })
-        .filter((segment) => segment.end - segment.start > 0.001)
-        .sort((a, b) => a.start - b.start)
-      : [];
-    const defaultMsPerCursor = Math.max(1, duration / Math.max(1, Math.abs(delta)));
-    const segments = [];
-    let cursor = startValue;
-    timedCells.forEach((cellSegment) => {
-      if (cellSegment.start > cursor + 0.001) {
-        segments.push({
-          from: cursor,
-          to: cellSegment.start,
-          duration: Math.max(80, (cellSegment.start - cursor) * defaultMsPerCursor),
-        });
-      }
-      segments.push({
-        from: cellSegment.start,
-        to: cellSegment.end,
-        duration: cellSegment.duration,
-      });
-      cursor = Math.max(cursor, cellSegment.end);
+    const effectiveSegments = buildNotebookPlaybackSegments({
+      startCursor: startValue,
+      endCursor,
+      sourceCells,
+      lineCount,
+      duration,
+      speed,
     });
-    if (endValue > cursor + 0.001) {
-      segments.push({
-        from: cursor,
-        to: endValue,
-        duration: Math.max(80, (endValue - cursor) * defaultMsPerCursor),
-      });
-    }
-    const effectiveSegments = segments.length
-      ? segments
-      : [{ from: startValue, to: endValue, duration: Math.max(1, duration) }];
     const totalDuration = effectiveSegments.reduce((sum, segment) => sum + segment.duration, 0);
     let startTime = null;
-    applyNotebookCursor(startValue, sourceCells);
+    const cursorOptions = {
+      lineCount,
+      preserveCameraUntilExplicit: playbackOptions.preserveCameraUntilExplicit === true,
+    };
+    applyNotebookCursor(startValue, sourceCells, cursorOptions);
+    lastNotebookUiSyncRef.current = globalThis.performance?.now?.() ?? Date.now();
     setNotebookPlaying(true);
 
     const tick = (time) => {
@@ -8256,29 +6888,144 @@ export default function App() {
       const segmentRatio = currentSegment.duration > 0
         ? Math.min(1, Math.max(0, (elapsed - passed) / currentSegment.duration))
         : 1;
+      const syncUi = elapsed >= totalDuration || time - lastNotebookUiSyncRef.current >= NOTEBOOK_UI_SYNC_MS;
+      if (syncUi) lastNotebookUiSyncRef.current = time;
       applyNotebookCursor(
-        currentSegment.from + easeInOut(segmentRatio) * (currentSegment.to - currentSegment.from),
-        sourceCells
+        currentSegment.from + segmentRatio * (currentSegment.to - currentSegment.from),
+        sourceCells,
+        syncUi ? cursorOptions : { ...cursorOptions, syncUi: false }
       );
       if (elapsed < totalDuration) {
         notebookPlaybackFrameRef.current = window.requestAnimationFrame(tick);
       } else {
         notebookPlaybackFrameRef.current = null;
+        cameraProgressOverrideRef.current = null;
+        notebookCameraTransitionRef.current = null;
+        // Finish the current run before exposing a checkpoint. If the callback
+        // starts another range, that new run will set this back to true.
+        setNotebookPlaying(false);
         onComplete?.();
-        if (!notebookPlaybackFrameRef.current) {
-          setNotebookPlaying(false);
-        }
       }
     };
 
     notebookPlaybackFrameRef.current = window.requestAnimationFrame(tick);
   }, [applyNotebookCursor, cancelNotebookPlayback, notebookScript.cells, notebookScript.lineCount, notebookSpeed]);
 
-  const runSmartNotebook = useCallback(() => {
+  const playNotebookToNextStop = useCallback((
+    rawStartCursor,
+    sourceCells,
+    sourceLineCount,
+    options = {}
+  ) => {
+    const lineCount = notebookPlaybackLineCount(
+      sourceCells,
+      sourceLineCount,
+      NOTEBOOK_MIN_VISIBLE_LINES
+    );
+    const playbackStops = notebookPlaybackStops(
+      sourceCells,
+      sourceLineCount,
+      NOTEBOOK_MIN_VISIBLE_LINES
+    );
+    const afterStopIndex = options.afterStopId
+      ? sourceCells.findIndex((cell) => cell.id === options.afterStopId)
+      : -1;
+    const stopCursor = playbackStops.find(
+      (item) => item.cell.id === options.afterStopId
+    )?.cursor ?? null;
+    const rawClampedCursor = Math.max(0, Math.min(100, Number(rawStartCursor) || 0));
+    const startCursor = afterStopIndex >= 0
+      ? Math.min(100, Math.max(rawClampedCursor, (stopCursor ?? rawClampedCursor) + 0.001))
+      : rawClampedCursor >= 99.8
+        ? 0
+        : rawClampedCursor;
+    const nextStop = options.targetStopId
+      ? playbackStops.find((item) => item.cell.id === options.targetStopId)
+      : playbackStops.find((item) => afterStopIndex >= 0
+          ? item.index > afterStopIndex
+          : item.cursor > startCursor + 0.01);
+    const endCursor = nextStop?.cursor ?? 100;
+    const remainingRatio = Math.max(0.08, (endCursor - startCursor) / 100);
     const speed = getNotebookPlaybackRate(notebookSpeed);
-    const duration = Math.max(900, Math.min(5600, notebookScript.lineCount * 420)) / speed;
-    playNotebookCursorRange(0, 100, notebookScript.cells, duration);
-  }, [notebookScript.cells, notebookScript.lineCount, notebookSpeed, playNotebookCursorRange]);
+    const duration = (Math.max(900, Math.min(5600, sourceLineCount * 420)) * remainingRatio) / speed;
+    playNotebookCursorRange(
+      startCursor,
+      endCursor,
+      sourceCells,
+      duration,
+      nextStop
+        ? () => setNotebookCheckpoint({
+            cellId: nextStop.cell.id,
+            cursor: nextStop.cursor,
+            kind: nextStop.cell.type,
+          })
+        : () => {
+            setNotebookCheckpoint(null);
+            setNotebookCompleted(true);
+          },
+      sourceLineCount,
+      { preserveCameraUntilExplicit: afterStopIndex >= 0 }
+    );
+  }, [notebookSpeed, playNotebookCursorRange]);
+
+  const runSmartNotebook = useCallback((options = {}) => {
+    const rawStartCursor = Number.isFinite(options.startCursor)
+      ? options.startCursor
+      : notebookCursor;
+    playNotebookToNextStop(
+      rawStartCursor,
+      notebookScript.cells,
+      notebookScript.lineCount,
+      { afterStopId: options.afterStopId }
+    );
+  }, [notebookCursor, notebookScript.cells, notebookScript.lineCount, playNotebookToNextStop]);
+
+  const restoreNotebookStopCamera = useCallback((onRestored) => {
+    const refs = threeRef.current;
+    const snapshot = notebookStopCameraRef.current;
+    if (
+      !refs ||
+      !snapshot ||
+      snapshot.cellId !== notebookActiveReviewStopId ||
+      cameraLockedRef.current
+    ) {
+      onRestored?.();
+      return;
+    }
+
+    const alreadyRestored = (
+      refs.camera.position.distanceToSquared(snapshot.position) < 0.000001 &&
+      refs.controls.target.distanceToSquared(snapshot.target) < 0.000001
+    );
+    if (alreadyRestored) {
+      if (snapshot.view) {
+        configureControlsForView(refs.controls, snapshot.view, controlLocksFromRefs());
+        setActiveView(snapshot.view);
+      }
+      onRestored?.();
+      return;
+    }
+
+    notebookStopCameraRestorePendingRef.current = true;
+    cameraMoveRef.current = {
+      active: true,
+      startTime: null,
+      duration: 560,
+      positionFrom: refs.camera.position.clone(),
+      targetFrom: refs.controls.target.clone(),
+      positionTo: snapshot.position.clone(),
+      targetTo: snapshot.target.clone(),
+      onComplete: () => {
+        notebookStopCameraRestorePendingRef.current = false;
+        if (snapshot.view) {
+          configureControlsForView(refs.controls, snapshot.view, controlLocksFromRefs());
+          setActiveView(snapshot.view);
+        }
+        queueCameraShareUpdate(0);
+        onRestored?.();
+      },
+    };
+  }, [controlLocksFromRefs, notebookActiveReviewStopId, queueCameraShareUpdate]);
 
   const playNotebookMatrixCell = useCallback((cell, options = {}) => {
     if (
@@ -8298,49 +7045,265 @@ export default function App() {
     const continueToEnd = Boolean(options.continueToEnd);
     const playRestOfNotebook = () => {
       if (!continueToEnd || endCursor >= 99.8) return;
-      const remainingLines = Math.max(1, lineCount - ((cell.lineEnd ?? cell.lineStart ?? 0) + 1));
-      const restDuration = Math.max(520, Math.min(3600, remainingLines * 320)) / speed;
-      playNotebookCursorRange(endCursor, 100, notebookScript.cells, restDuration);
+      playNotebookToNextStop(endCursor, notebookScript.cells, notebookScript.lineCount);
     };
     playNotebookCursorRange(startCursor, endCursor, notebookScript.cells, duration, playRestOfNotebook);
-  }, [notebookScript.cells, notebookScript.lineCount, notebookSpeed, playNotebookCursorRange]);
+  }, [notebookScript.cells, notebookScript.lineCount, notebookSpeed, playNotebookCursorRange, playNotebookToNextStop]);
 
-  const playSmartNotebookFromLine = useCallback((lineIndex) => {
+  const cueSmartNotebookAtLine = useCallback((lineIndex) => {
     const lineCount = Math.max(NOTEBOOK_MIN_VISIBLE_LINES, notebookScript.lineCount, lineIndex + 1);
-    const startCursor = (Math.max(0, lineIndex) / lineCount) * 100;
-    const remainingLines = Math.max(1, lineCount - Math.max(0, lineIndex));
-    const speed = getNotebookPlaybackRate(notebookSpeed);
-    const duration = Math.max(620, Math.min(5200, remainingLines * 360)) / speed;
-    playNotebookCursorRange(startCursor, 100, notebookScript.cells, duration);
-  }, [notebookScript.cells, notebookScript.lineCount, notebookSpeed, playNotebookCursorRange]);
+    const startCursor = notebookCursorForLineStart(lineIndex, lineCount);
+    if (notebookCuedLineIndex === lineIndex) {
+      setNotebookCuedLineIndex(null);
+      setNotebookCheckpoint(null);
+      setNotebookCompleted(false);
+      runSmartNotebook({ startCursor });
+      return;
+    }
+    cancelNotebookPlayback();
+    setNotebookCuedLineIndex(lineIndex);
+    setNotebookCheckpoint(null);
+    setNotebookCompleted(false);
+    applyNotebookCursor(
+      startCursor,
+      notebookScript.cells,
+      { lineCount: notebookScript.lineCount }
+    );
+  }, [
+    applyNotebookCursor,
+    cancelNotebookPlayback,
+    notebookCuedLineIndex,
+    notebookScript.cells,
+    notebookScript.lineCount,
+    runSmartNotebook,
+  ]);
 
   const toggleSmartNotebookPlayback = useCallback(() => {
+    setNotebookCuedLineIndex(null);
+    if (notebookCheckpoint) {
+      if (notebookStopCameraRestorePendingRef.current) return;
+      const resumeCursor = notebookCheckpoint.cursor;
+      const resumeStopId = notebookCheckpoint.cellId;
+      restoreNotebookStopCamera(() => {
+        setNotebookCheckpoint(null);
+        runSmartNotebook({
+          startCursor: resumeCursor,
+          afterStopId: resumeStopId,
+        });
+      });
+      return;
+    }
     if (notebookPlaying) {
       cancelNotebookPlayback();
       return;
     }
     runSmartNotebook();
-  }, [cancelNotebookPlayback, notebookPlaying, runSmartNotebook]);
+  }, [
+    cancelNotebookPlayback,
+    notebookCheckpoint,
+    notebookPlaying,
+    restoreNotebookStopCamera,
+    runSmartNotebook,
+  ]);
 
-  const scrubNotebookToClientY = useCallback((clientY) => {
+  const returnToPreviousNotebookStep = useCallback(() => {
+    if ((!notebookCheckpoint && !notebookCompleted) || !previousNotebookReviewStep) return;
     cancelNotebookPlayback();
+    applyNotebookCursor(
+      previousNotebookReviewStep.cursor,
+      notebookScript.cells,
+      {
+        lineCount: notebookScript.lineCount,
+        preserveCompletion: notebookCompleted,
+      }
+    );
+  }, [
+    applyNotebookCursor,
+    cancelNotebookPlayback,
+    notebookCheckpoint,
+    notebookCompleted,
+    notebookScript.cells,
+    notebookScript.lineCount,
+    previousNotebookReviewStep,
+  ]);
+
+  const advanceToNextNotebookStep = useCallback(() => {
+    if (
+      (!notebookCheckpoint && !notebookCompleted) ||
+      !Number.isFinite(nextNotebookReviewCursor)
+    ) return;
+    cancelNotebookPlayback();
+    applyNotebookCursor(
+      nextNotebookReviewCursor,
+      notebookScript.cells,
+      {
+        lineCount: notebookScript.lineCount,
+        preserveCompletion: notebookCompleted,
+      }
+    );
+  }, [
+    applyNotebookCursor,
+    cancelNotebookPlayback,
+    nextNotebookReviewCursor,
+    notebookCheckpoint,
+    notebookCompleted,
+    notebookScript.cells,
+    notebookScript.lineCount,
+  ]);
+
+  const playCurrentNotebookCheckpoint = useCallback(() => {
+    if (!notebookCheckpoint || !activeNotebookSegment) return;
+    const startCursor = notebookStopReviewing
+      ? notebookCursor
+      : activeNotebookSegment.startCursor;
+    setNotebookCheckpoint(null);
+    setNotebookCompleted(false);
+    playNotebookToNextStop(
+      startCursor,
+      notebookScript.cells,
+      notebookScript.lineCount,
+      {
+        afterStopId: activeNotebookSegment.previousStopId,
+        targetStopId: notebookCheckpoint.cellId,
+      }
+    );
+  }, [
+    activeNotebookSegment,
+    notebookCheckpoint,
+    notebookStopReviewing,
+    notebookCursor,
+    notebookScript.cells,
+    notebookScript.lineCount,
+    playNotebookToNextStop,
+  ]);
+
+  const selectNotebookPlaybackSegment = useCallback((segmentId) => {
+    const segment = notebookPlaybackSegmentsList.find((item) => item.id === segmentId);
+    if (!segment) return;
+    cancelNotebookPlayback();
+    applyNotebookCursor(
+      segment.endCursor,
+      notebookScript.cells,
+      { lineCount: notebookScript.lineCount }
+    );
+    setNotebookCompleted(segment.kind === 'final');
+    setNotebookCheckpoint(segment.stop
+      ? {
+          cellId: segment.stop.cell.id,
+          cursor: segment.stop.cursor,
+          kind: segment.stop.cell.type,
+        }
+      : null);
+  }, [
+    applyNotebookCursor,
+    cancelNotebookPlayback,
+    notebookPlaybackSegmentsList,
+    notebookScript.cells,
+    notebookScript.lineCount,
+  ]);
+
+  const playActiveNotebookSegment = useCallback((segmentId = null) => {
+    const segment = notebookPlaybackSegmentsList.find((item) => item.id === segmentId)
+      ?? activeNotebookSegment;
+    if (!segment) return;
+    const reachedSegmentEnd = notebookCursor >= segment.endCursor - 0.0001;
+    const startCursor = reachedSegmentEnd
+      ? segment.startCursor
+      : Math.max(segment.startCursor, notebookCursor);
+    setNotebookCheckpoint(null);
+    setNotebookCompleted(false);
+    if (segment.stop) {
+      playNotebookToNextStop(
+        startCursor,
+        notebookScript.cells,
+        notebookScript.lineCount,
+        {
+          afterStopId: segment.previousStopId,
+          targetStopId: segment.stop.cell.id,
+        }
+      );
+      return;
+    }
+
+    const spanRatio = Math.max(
+      0.08,
+      (segment.endCursor - startCursor) / 100
+    );
+    const speed = getNotebookPlaybackRate(notebookSpeed);
+    const duration = (
+      Math.max(900, Math.min(5600, notebookScript.lineCount * 420)) * spanRatio
+    ) / speed;
+    playNotebookCursorRange(
+      startCursor,
+      segment.endCursor,
+      notebookScript.cells,
+      duration,
+      () => {
+        setNotebookCheckpoint(null);
+        setNotebookCompleted(true);
+      },
+      notebookScript.lineCount,
+      { preserveCameraUntilExplicit: Boolean(segment.previousStopId) }
+    );
+  }, [
+    activeNotebookSegment,
+    notebookCursor,
+    notebookPlaybackSegmentsList,
+    notebookScript.cells,
+    notebookScript.lineCount,
+    notebookSpeed,
+    playNotebookCursorRange,
+    playNotebookToNextStop,
+  ]);
+
+  const toggleNotebookSceneSegmentPlayback = useCallback((segmentId = null) => {
+    if (notebookPlaying) {
+      cancelNotebookPlayback();
+      return;
+    }
+    playActiveNotebookSegment(segmentId);
+  }, [
+    cancelNotebookPlayback,
+    notebookPlaying,
+    playActiveNotebookSegment,
+  ]);
+
+  useEffect(() => {
+    setNotebookCheckpointCaptionHidden(false);
+  }, [notebookActiveReviewStopId]);
+
+  const scrubNotebookToClientY = useCallback((clientY, dragRect = null, pointerOffsetY = 0) => {
     const track = notebookProgressRef.current;
-    if (!track) return;
-    const rect = track.getBoundingClientRect();
-    const raw = rect.height > 0 ? ((clientY - rect.top) / rect.height) * 100 : 0;
+    const rect = dragRect ?? track?.getBoundingClientRect();
+    if (!rect) return;
+    setNotebookCheckpoint(null);
+    const trackTop = rect.top + NOTEBOOK_PROGRESS_HANDLE_CENTER_INSET;
+    const trackHeight = Math.max(
+      1,
+      rect.height - NOTEBOOK_PROGRESS_HANDLE_CENTER_INSET * 2
+    );
+    const raw = trackHeight > 0
+      ? ((clientY - pointerOffsetY - trackTop) / trackHeight) * 100
+      : 0;
     applyNotebookCursor(raw, notebookScript.cells);
-  }, [applyNotebookCursor, cancelNotebookPlayback, notebookScript.cells]);
+  }, [applyNotebookCursor, notebookScript.cells]);
 
   const scrubNotebookToClientX = useCallback((clientX, track = notebookSceneProgressRef.current) => {
     cancelNotebookPlayback();
+    setNotebookCheckpoint(null);
+    setNotebookCompleted(false);
     if (!track) return;
     const rect = track.getBoundingClientRect();
-    const raw = rect.width > 0 ? ((clientX - rect.left) / rect.width) * 100 : 0;
-    applyNotebookCursor(raw, notebookScript.cells);
-  }, [applyNotebookCursor, cancelNotebookPlayback, notebookScript.cells]);
+    const localProgress = rect.width > 0 ? ((clientX - rect.left) / rect.width) * 100 : 0;
+    applyNotebookCursor(
+      notebookCursorForSegmentProgress(localProgress, activeNotebookSegment),
+      notebookScript.cells
+    );
+  }, [activeNotebookSegment, applyNotebookCursor, cancelNotebookPlayback, notebookScript.cells]);
 
   const stepNotebookCursor = useCallback((delta) => {
     cancelNotebookPlayback();
+    setNotebookCheckpoint(null);
     applyNotebookCursor(notebookCursor + delta, notebookScript.cells);
   }, [applyNotebookCursor, cancelNotebookPlayback, notebookCursor, notebookScript.cells]);
 
@@ -8348,12 +7311,14 @@ export default function App() {
     if (event.key === 'Home') {
       event.preventDefault();
       cancelNotebookPlayback();
+      setNotebookCheckpoint(null);
       applyNotebookCursor(0, notebookScript.cells);
       return;
     }
     if (event.key === 'End') {
       event.preventDefault();
       cancelNotebookPlayback();
+      setNotebookCheckpoint(null);
       applyNotebookCursor(100, notebookScript.cells);
       return;
     }
@@ -8372,20 +7337,49 @@ export default function App() {
 
   const handleNotebookProgressPointerDown = useCallback((event) => {
     event.preventDefault();
+    event.stopPropagation();
+    cancelNotebookPlayback();
     const input = event.currentTarget;
+    const rect = input.getBoundingClientRect();
+    const trackHeight = Math.max(
+      1,
+      rect.height - NOTEBOOK_PROGRESS_HANDLE_CENTER_INSET * 2
+    );
+    const logicalHandleY =
+      rect.top +
+      NOTEBOOK_PROGRESS_HANDLE_CENTER_INSET +
+      (Math.max(0, Math.min(100, notebookCursor)) / 100) * trackHeight;
+    const handleRect = input.querySelector('span')?.getBoundingClientRect();
+    const pressedNearHandle = handleRect
+      ? event.clientY >= handleRect.top - 16 && event.clientY <= handleRect.bottom + 16
+      : Math.abs(event.clientY - logicalHandleY) <= 18;
+    const pointerOffsetY = pressedNearHandle
+      ? event.clientY - logicalHandleY
+      : 0;
+    notebookProgressDragRef.current = { pointerId: event.pointerId, rect, pointerOffsetY };
+    setNotebookProgressDragging(true);
+    input.focus?.({ preventScroll: true });
     input.setPointerCapture?.(event.pointerId);
-    scrubNotebookToClientY(event.clientY);
+    scrubNotebookToClientY(event.clientY, rect, pointerOffsetY);
+  }, [cancelNotebookPlayback, notebookCursor, scrubNotebookToClientY]);
 
-    const handleMove = (moveEvent) => scrubNotebookToClientY(moveEvent.clientY);
-    const handleUp = (upEvent) => {
-      scrubNotebookToClientY(upEvent.clientY);
-      input.releasePointerCapture?.(event.pointerId);
-      window.removeEventListener('pointermove', handleMove);
-      window.removeEventListener('pointerup', handleUp);
-    };
+  const handleNotebookProgressPointerMove = useCallback((event) => {
+    const drag = notebookProgressDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    event.preventDefault();
+    event.stopPropagation();
+    scrubNotebookToClientY(event.clientY, drag.rect, drag.pointerOffsetY);
+  }, [scrubNotebookToClientY]);
 
-    window.addEventListener('pointermove', handleMove);
-    window.addEventListener('pointerup', handleUp, { once: true });
+  const finishNotebookProgressDrag = useCallback((event) => {
+    const drag = notebookProgressDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    event.preventDefault();
+    event.stopPropagation();
+    scrubNotebookToClientY(event.clientY, drag.rect, drag.pointerOffsetY);
+    notebookProgressDragRef.current = null;
+    setNotebookProgressDragging(false);
+    event.currentTarget.releasePointerCapture?.(event.pointerId);
   }, [scrubNotebookToClientY]);
 
   const handleNotebookSceneProgressPointerDown = useCallback((event) => {
@@ -8406,11 +7400,125 @@ export default function App() {
     window.addEventListener('pointerup', handleUp, { once: true });
   }, [scrubNotebookToClientX]);
 
+  const handleNotebookSceneProgressKeyDown = useCallback((event) => {
+    if (!activeNotebookSegment) return;
+    const localStep = event.shiftKey ? 10 : 2;
+    let nextProgress = null;
+    if (event.key === 'Home') nextProgress = 0;
+    if (event.key === 'End') nextProgress = 100;
+    if (event.key === 'ArrowLeft' || event.key === 'ArrowDown') {
+      nextProgress = activeNotebookSegmentProgress - localStep;
+    }
+    if (event.key === 'ArrowRight' || event.key === 'ArrowUp') {
+      nextProgress = activeNotebookSegmentProgress + localStep;
+    }
+    if (nextProgress === null) return;
+    event.preventDefault();
+    cancelNotebookPlayback();
+    setNotebookCheckpoint(null);
+    setNotebookCompleted(false);
+    applyNotebookCursor(
+      notebookCursorForSegmentProgress(nextProgress, activeNotebookSegment),
+      notebookScript.cells
+    );
+  }, [
+    activeNotebookSegment,
+    activeNotebookSegmentProgress,
+    applyNotebookCursor,
+    cancelNotebookPlayback,
+    notebookScript.cells,
+  ]);
+
   const jumpNotebookToLine = useCallback((lineIndex) => {
     cancelNotebookPlayback();
-    const cursor = Math.max(0, Math.min(100, ((lineIndex + 1) / notebookLineCount) * 100));
+    const cursor = notebookCursorForLineReveal(lineIndex, notebookLineCount);
     applyNotebookCursor(cursor, notebookScript.cells);
   }, [applyNotebookCursor, cancelNotebookPlayback, notebookLineCount, notebookScript.cells]);
+
+  useEffect(() => {
+    if (
+      !isAnimationViewer ||
+      !isLoaded ||
+      animationViewerInitializedRef.current ||
+      !notebookScript.cells.length
+    ) {
+      return;
+    }
+    animationViewerInitializedRef.current = true;
+    cameraProgressOverrideRef.current = null;
+    notebookCameraTransitionRef.current = null;
+    const previewStartCell = isAnimationPreview
+      ? notebookScript.cells.find((cell) => !cell.hidden && cell.type !== 'scene')
+      : null;
+    const previewStartCursor = previewStartCell
+      ? notebookCursorForLineStart(previewStartCell.lineStart ?? 0, notebookScript.lineCount)
+      : 0;
+    applyNotebookCursor(
+      previewStartCursor,
+      notebookScript.cells,
+      { lineCount: notebookScript.lineCount }
+    );
+    if (!isAnimationPreview) return undefined;
+    if (prefersReducedMotion) {
+      applyNotebookCursor(100, notebookScript.cells, { lineCount: notebookScript.lineCount });
+      return undefined;
+    }
+    animationPreviewStartTimerRef.current = window.setTimeout(() => {
+      animationPreviewStartTimerRef.current = null;
+      runSmartNotebook({ startCursor: previewStartCursor });
+    }, 320);
+    return undefined;
+  }, [
+    applyNotebookCursor,
+    isAnimationPreview,
+    isAnimationViewer,
+    isLoaded,
+    notebookScript.cells,
+    notebookScript.lineCount,
+    prefersReducedMotion,
+    runSmartNotebook,
+  ]);
+
+  useEffect(() => () => {
+    if (animationPreviewStartTimerRef.current) {
+      window.clearTimeout(animationPreviewStartTimerRef.current);
+      animationPreviewStartTimerRef.current = null;
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!isAnimationPreview || !isLoaded || !notebookScript.cells.length) return undefined;
+
+    let cancelled = false;
+    let firstFrame = null;
+    let secondFrame = null;
+    let readyTimer = null;
+    const fontsReady = document.fonts?.ready ?? Promise.resolve();
+
+    Promise.resolve(fontsReady)
+      .catch(() => undefined)
+      .then(() => {
+        if (cancelled) return;
+        firstFrame = window.requestAnimationFrame(() => {
+          secondFrame = window.requestAnimationFrame(() => {
+            readyTimer = window.setTimeout(() => {
+              if (cancelled || window.parent === window) return;
+              window.parent.postMessage(
+                { type: 'flow-math-preview-ready' },
+                window.location.origin
+              );
+            }, 120);
+          });
+        });
+      });
+
+    return () => {
+      cancelled = true;
+      if (firstFrame !== null) window.cancelAnimationFrame(firstFrame);
+      if (secondFrame !== null) window.cancelAnimationFrame(secondFrame);
+      if (readyTimer !== null) window.clearTimeout(readyTimer);
+    };
+  }, [isAnimationPreview, isLoaded, notebookScript.cells.length]);
 
   useEffect(() => {
     const previousVisualKey = notebookVisualSignatureRef.current;
@@ -8423,7 +7531,7 @@ export default function App() {
       notebookReplayFromStartRef.current = false;
       if (workspaceMode !== 'system') return undefined;
       const timer = window.setTimeout(() => {
-        runSmartNotebook();
+        runSmartNotebook({ startCursor: 0 });
       }, 70);
       return () => window.clearTimeout(timer);
     }
@@ -8516,10 +7624,9 @@ export default function App() {
     const target = history[index];
     if (!target) return;
     startAnimationTo(target.matrix, null);
-    moveCameraForMatrix(target.matrix);
     setActiveHistoryIndex(index);
     setHoveredHistoryIndex(null);
-  }, [history, moveCameraForMatrix, startAnimationTo]);
+  }, [history, startAnimationTo]);
 
   const deleteHistoryEntry = useCallback((index, event) => {
     event.stopPropagation();
@@ -8541,9 +7648,8 @@ export default function App() {
 
     if (index === activeHistoryIndex && target) {
       startAnimationTo(target.matrix, null);
-      moveCameraForMatrix(target.matrix);
     }
-  }, [activeHistoryIndex, history, moveCameraForMatrix, startAnimationTo]);
+  }, [activeHistoryIndex, history, startAnimationTo]);
 
   const getMatrixInputValues = useCallback(() => {
     return { values: matrixInputValues, columns: inputColumns };
@@ -8635,7 +7741,7 @@ export default function App() {
       if (captionMatch[1]) pieces.push(captionMatch[1]);
       pieces.push(
         <span className="smart-inline-caption" key={`caption-${lineIndex}`}>
-          {captionMatch[2]}
+          {renderNotebookTaggedText(captionMatch[2], notebookTokenStyles, 'smart-caption-variable')}
         </span>
       );
       return pieces;
@@ -8692,6 +7798,7 @@ export default function App() {
   }, [notebookScript.marks, notebookTokenStyles]);
 
   const updateEquation = useCallback((index, value) => {
+    setNotebookEquationModeHint(null);
     setEquations((previous) => previous.map((equation, equationIndex) =>
       equationIndex === index ? value : equation
     ));
@@ -8699,87 +7806,99 @@ export default function App() {
 
   const updateEquationNote = useCallback((value) => {
     const normalized = value.replace(/\r/g, '');
+    setNotebookEquationModeHint(null);
     setEquations(normalized === '' ? [''] : normalized.split('\n'));
   }, []);
 
   const updateSmartNotebookText = useCallback((value, options = {}) => {
     const normalized = String(value ?? '').replace(/\r/g, '');
+    const textChanged = normalized !== notebookTextRef.current;
+    if (notebookEditorRuntimeTimerRef.current) {
+      window.clearTimeout(notebookEditorRuntimeTimerRef.current);
+      notebookEditorRuntimeTimerRef.current = null;
+    }
+    notebookEditorTypingRef.current = false;
+    notebookTextRef.current = normalized;
+    if (textChanged) {
+      setNotebookCuedLineIndex(null);
+      if (!options.preserveCheckpoint) setNotebookCheckpoint(null);
+    }
     setNotebookText(normalized);
+    setNotebookRuntimeText(normalized);
     const parsed = parseNotebookScript(normalized);
-    const equationLines = parsed.cells
-      .filter((cell) => cell.type === 'equation' && !cell.hidden)
-      .flatMap((cell) => cell.text.split('\n'))
-      .filter((line) => parsedEquationLine(line));
-    setEquations(equationLines.length ? equationLines : ['']);
-    if (options.revealAll && !notebookReplayFromStartRef.current) {
-      applyNotebookCursor(100, parsed.cells);
-    }
-  }, [applyNotebookCursor]);
+    const hasCheckpoint = parsed.cells.some((cell) => cell.type === 'checkpoint' && !cell.hidden);
+    const targetCursor = notebookReplayFromStartRef.current
+      ? 0
+      : options.revealAll && !hasCheckpoint
+        ? 100
+        : notebookCursor;
+    applyNotebookCursor(targetCursor, parsed.cells, { lineCount: parsed.lineCount });
+  }, [applyNotebookCursor, notebookCursor]);
 
-  const renameSmartNotebookVariable = useCallback((lineIndex, currentName) => {
-    if (typeof window === 'undefined') return;
-    const nextName = normalizeNotebookVariableName(window.prompt('변수명', currentName) ?? '', currentName);
-    if (!nextName || nextName === currentName) return;
-    const lines = String(notebookText ?? '').replace(/\r/g, '').split('\n');
-    const sourceLine = lines[lineIndex] ?? '';
-    const vectorLine = parseNotebookVectorLine(sourceLine);
-    const calculationLine = parseNotebookCalculationLine(sourceLine);
-    if (vectorLine) {
-      const vectorText = vectorLine.values.slice(0, vectorLine.dimension).join(', ');
-      lines[lineIndex] = `${nextName} = ${vectorText}`;
-      updateSmartNotebookText(lines.join('\n'));
-      return;
-    }
-    if (calculationLine) {
-      lines[lineIndex] = `${nextName} = ${calculationLine.left} * ${calculationLine.right}`;
-      updateSmartNotebookText(lines.join('\n'));
-    }
-  }, [notebookText, updateSmartNotebookText]);
+  const handleNotebookEditorChange = useCallback((value, options = {}) => {
+    const normalized = String(value ?? '').replace(/\r/g, '');
+    if (normalized === notebookTextRef.current) return;
 
-  const handleSmartNotebookKeyDown = useCallback((event) => {
-    const textarea = event.currentTarget;
-    const current = textarea.value;
-    const starter = notebookStarterText(locale);
-
-    if (event.key === 'Enter' && !event.shiftKey) {
-      event.preventDefault();
-      const start = textarea.selectionStart ?? current.length;
-      const end = textarea.selectionEnd ?? start;
-      const lineIndex = current.slice(0, start).split('\n').length - 1;
-      const next = prettifyNotebookScriptText(`${current.slice(0, start)}\n${current.slice(end)}`);
-      const nextLines = next.split('\n');
-      const cursor = nextLines.slice(0, lineIndex + 1).join('\n').length + 1;
-      updateSmartNotebookText(next);
-      window.requestAnimationFrame(() => {
-        textarea.selectionStart = cursor;
-        textarea.selectionEnd = cursor;
-      });
-      return;
+    const wasTyping = notebookEditorTypingRef.current;
+    notebookEditorTypingRef.current = true;
+    notebookTextRef.current = normalized;
+    if (!wasTyping) {
+      cancelNotebookPlayback();
+      setNotebookCuedLineIndex(null);
+      setNotebookCheckpoint(null);
     }
 
-    if (event.key !== 'Tab') return;
-    event.preventDefault();
+    if (notebookEditorRuntimeTimerRef.current) {
+      window.clearTimeout(notebookEditorRuntimeTimerRef.current);
+    }
+    const commitRuntime = () => {
+      notebookEditorRuntimeTimerRef.current = null;
+      notebookEditorTypingRef.current = false;
 
-    if (!current.trim()) {
-      const next = starter;
-      notebookReplayFromStartRef.current = true;
-      updateSmartNotebookText(next, { revealAll: true });
-      window.requestAnimationFrame(() => {
-        textarea.selectionStart = next.length;
-        textarea.selectionEnd = next.length;
-      });
+      const latestText = notebookTextRef.current;
+      setNotebookText(latestText);
+      setNotebookRuntimeText(latestText);
+      const parsed = parseNotebookScript(latestText);
+      const hasCheckpoint = parsed.cells.some(
+        (cell) => cell.type === 'checkpoint' && !cell.hidden
+      );
+      const targetCursor = notebookReplayFromStartRef.current
+        ? 0
+        : hasCheckpoint
+          ? notebookCursor
+          : 100;
+      applyNotebookCursor(targetCursor, parsed.cells, { lineCount: parsed.lineCount });
+    };
+
+    if (options.commitNow) {
+      commitRuntime();
       return;
     }
 
-    const start = textarea.selectionStart ?? current.length;
-    const end = textarea.selectionEnd ?? start;
-    const next = `${current.slice(0, start)}  ${current.slice(end)}`;
-    updateSmartNotebookText(next, { revealAll: true });
+    notebookEditorRuntimeTimerRef.current = window.setTimeout(
+      commitRuntime,
+      NOTEBOOK_EDITOR_RUNTIME_DEBOUNCE_MS
+    );
+  }, [applyNotebookCursor, cancelNotebookPlayback, notebookCursor]);
+
+  const handleNotebookEditorBlur = useCallback((value) => {
+    updateSmartNotebookText(prettifyNotebookScriptText(value), { preserveCheckpoint: true });
+  }, [updateSmartNotebookText]);
+
+  const handleNotebookEditorPaste = useCallback((options = {}) => {
+    notebookReplayFromStartRef.current = options.replayFromStart === true;
+  }, []);
+
+  const acceptSmartNotebookStarter = useCallback((source = notebookStarterText()) => {
+    const next = String(source ?? notebookStarterText());
+    const parsed = parseNotebookScript(next);
+    notebookReplayFromStartRef.current = false;
+    updateSmartNotebookText(next);
     window.requestAnimationFrame(() => {
-      textarea.selectionStart = start + 2;
-      textarea.selectionEnd = start + 2;
+      playNotebookToNextStop(0, parsed.cells, parsed.lineCount);
     });
-  }, [locale, updateSmartNotebookText]);
+    return next;
+  }, [playNotebookToNextStop, updateSmartNotebookText]);
 
   const handleEquationNoteKeyDown = useCallback((event) => {
     const textarea = event.currentTarget;
@@ -8825,10 +7944,12 @@ export default function App() {
   }, [locale, updateEquationNote]);
 
   const addEquation = useCallback(() => {
+    setNotebookEquationModeHint(null);
     setEquations((previous) => [...previous, '']);
   }, []);
 
   const removeEquation = useCallback((index) => {
+    setNotebookEquationModeHint(null);
     setEquations((previous) => previous.filter((_, equationIndex) => equationIndex !== index));
   }, []);
 
@@ -8880,25 +8001,145 @@ export default function App() {
   }, [activeNotebookCellId, notebookCells, updateEquationNote]);
 
   const applyPresetToNotebook = useCallback((preset) => {
-    const text = preset.join('\n');
-    setNotebookText(text);
-    const activeEquation = notebookCells.find((cell) => cell.id === activeNotebookCellId && cell.type === 'equation');
-    const fallbackEquation = notebookCells.find((cell) => cell.type === 'equation');
-    const targetId = activeEquation?.id ?? fallbackEquation?.id;
+    const text = Array.isArray(preset) ? preset.join('\n') : String(preset ?? '');
+    const parsed = parseNotebookScript(text);
+    const presetView = notebookModeForCells(parsed.cells, parsed.mode);
+    cancelNotebookPlayback();
+    setNotebookCheckpoint(null);
+    cameraProgressOverrideRef.current = null;
+    notebookCameraTransitionRef.current = null;
+    notebookReplayFromStartRef.current = false;
+    cameraMoveRef.current.active = false;
+    notebookAutoCameraViewRef.current = presetView;
+    autoCameraTargetViewRef.current = presetView;
+    setActiveSavedNotebookId(null);
+    setSavedNotebookTitle('');
+    setPendingNotebookDeleteId(null);
+    setNotebookText('');
+    setNotebookCells([createNotebookEquationCell('')]);
+    setActiveNotebookCellId(null);
+    setActiveNotebookCaption('');
+    setNotebookCursor(0);
+    setEquations(['']);
+    setVectors([]);
+    setMeasurements([]);
+    setMeasureMode(null);
+    setMeasureDraft([]);
+    setMeasureAnchorId(null);
+    applyNotebookCursor(0, parsed.cells, { lineCount: parsed.lineCount });
 
-    if (targetId) {
-      setNotebookCells((previous) =>
-        previous.map((cell) => (cell.id === targetId ? { ...cell, text } : cell))
-      );
-      setActiveNotebookCellId(targetId);
-    } else {
+    const startPlayback = () => {
       const nextCell = createNotebookEquationCell(text);
-      setNotebookCells((previous) => [...previous, nextCell]);
-      setActiveNotebookCellId(nextCell.id);
+      setNotebookText(text);
+      setNotebookCells([nextCell]);
+      setActiveNotebookCellId(null);
+      applyNotebookCursor(0, parsed.cells, { lineCount: parsed.lineCount });
+      const play = () => playNotebookToNextStop(0, parsed.cells, parsed.lineCount);
+      if (typeof window !== 'undefined') window.requestAnimationFrame(play);
+      else play();
+    };
+    if (typeof window !== 'undefined') window.requestAnimationFrame(startPlayback);
+    else startPlayback();
+  }, [applyNotebookCursor, cancelNotebookPlayback, playNotebookToNextStop]);
+
+  const replaceNotebookDocument = useCallback((source) => {
+    const text = String(source ?? '').replace(/\r/g, '');
+    const parsed = parseNotebookScript(text);
+    const documentView = notebookModeForCells(parsed.cells, parsed.mode);
+    cancelNotebookPlayback();
+    setNotebookCheckpoint(null);
+    cameraProgressOverrideRef.current = null;
+    notebookCameraTransitionRef.current = null;
+    notebookReplayFromStartRef.current = false;
+    cameraMoveRef.current.active = false;
+    notebookAutoCameraViewRef.current = documentView;
+    autoCameraTargetViewRef.current = documentView;
+    setNotebookText(text);
+    setNotebookCells([createNotebookEquationCell(text)]);
+    setActiveNotebookCellId(null);
+    setActiveNotebookCaption('');
+    setNotebookCursor(0);
+    setEquations(['']);
+    setVectors([]);
+    setMeasurements([]);
+    setMeasureMode(null);
+    setMeasureDraft([]);
+    setMeasureAnchorId(null);
+    applyNotebookCursor(0, parsed.cells, { lineCount: parsed.lineCount });
+  }, [applyNotebookCursor, cancelNotebookPlayback]);
+
+  const saveCurrentNotebook = useCallback(() => {
+    const text = String(notebookText ?? '').replace(/\r/g, '');
+    if (!text.trim()) {
+      toast.warning(t(locale, 'notebookSaveEmpty'));
+      return;
     }
 
-    updateEquationNote(text);
-  }, [activeNotebookCellId, notebookCells, updateEquationNote]);
+    const existing = savedNotebooks.find((note) => note.id === activeSavedNotebookId);
+    const id = existing?.id ?? createNotebookLibraryId();
+    const title = savedNotebookTitle.trim()
+      || suggestedNotebookTitle(text)
+      || t(locale, 'untitledNotebook', { index: savedNotebooks.length + 1 });
+    const entry = { id, title, text, updatedAt: Date.now() };
+    const next = [entry, ...savedNotebooks.filter((note) => note.id !== id)]
+      .sort((left, right) => right.updatedAt - left.updatedAt);
+    if (!writeNotebookLibrary(next)) {
+      toast.error(t(locale, 'notebookSaveFailed'));
+      return;
+    }
+    setSavedNotebooks(next);
+    setActiveSavedNotebookId(id);
+    setSavedNotebookTitle(title);
+    setPendingNotebookDeleteId(null);
+    toast.success(t(locale, existing ? 'notebookUpdated' : 'notebookSaved'));
+  }, [activeSavedNotebookId, locale, notebookText, savedNotebookTitle, savedNotebooks]);
+
+  const openSavedNotebook = useCallback((noteId) => {
+    const note = savedNotebooks.find((candidate) => candidate.id === noteId);
+    if (!note) return;
+    replaceNotebookDocument(note.text);
+    setActiveSavedNotebookId(note.id);
+    setSavedNotebookTitle(note.title);
+    setPendingNotebookDeleteId(null);
+  }, [replaceNotebookDocument, savedNotebooks]);
+
+  const startNewNotebook = useCallback(() => {
+    replaceNotebookDocument('');
+    setActiveSavedNotebookId(null);
+    setSavedNotebookTitle('');
+    setPendingNotebookDeleteId(null);
+  }, [replaceNotebookDocument]);
+
+  const deleteSavedNotebook = useCallback((noteId) => {
+    if (pendingNotebookDeleteId !== noteId) {
+      setPendingNotebookDeleteId(noteId);
+      return;
+    }
+    const next = savedNotebooks.filter((note) => note.id !== noteId);
+    if (!writeNotebookLibrary(next)) {
+      toast.error(t(locale, 'notebookSaveFailed'));
+      return;
+    }
+    setSavedNotebooks(next);
+    setPendingNotebookDeleteId(null);
+    if (activeSavedNotebookId === noteId) {
+      setActiveSavedNotebookId(null);
+      setSavedNotebookTitle('');
+    }
+    toast.success(t(locale, 'notebookDeleted'));
+  }, [activeSavedNotebookId, locale, pendingNotebookDeleteId, savedNotebooks]);
+
+  const formatSavedNotebookTime = useCallback((value) => {
+    const date = new Date(Number(value));
+    if (Number.isNaN(date.getTime())) return '';
+    const dateLocale = { ko: 'ko-KR', en: 'en-US', ja: 'ja-JP', zh: 'zh-CN' }[locale] ?? locale;
+    return new Intl.DateTimeFormat(dateLocale, {
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    }).format(date);
+  }, [locale]);
 
   const removeNotebookCell = useCallback((cellId) => {
     setNotebookCells((previous) => {
@@ -8982,7 +8223,7 @@ export default function App() {
       previous.map((item) => (item.id === targetId ? { ...item, ...nextVector } : item))
     );
     setShowVector(true);
-    setWorkspaceMode('transform');
+    setWorkspaceMode(TRANSFORM_WORKSPACE_ENABLED ? 'transform' : 'system');
   }, [lineSystem.mode, lineSystem.point]);
 
   const buildShareState = useCallback(() => ({
@@ -9003,6 +8244,7 @@ export default function App() {
       scalar: item.scalar,
       scalarEnabled: !!item.scalarEnabled,
       scalarSpace: item.scalarSpace === 'input' ? 'input' : 'output',
+      renderKind: item.renderKind === 'point' ? 'point' : 'arrow',
       visible: item.visible !== false,
     })),
     showVolume,
@@ -9012,6 +8254,7 @@ export default function App() {
     showRelativeGrid,
     relativeGridStrength,
     showCoordinates,
+    showAutomaticSolution,
     showDot,
     showAxes,
     showRelativeAxes,
@@ -9028,6 +8271,7 @@ export default function App() {
     showAxes,
     showBasis,
     showCoordinates,
+    showAutomaticSolution,
     showDot,
     showGrid,
     showRelativeGrid,
@@ -9041,25 +8285,284 @@ export default function App() {
     workspaceMode,
   ]);
 
-  const buildShareUrl = useCallback(() => {
-    const state = buildShareState();
-    const encoded = encodeShareState(state);
-    const url = new URL(window.location.href);
-    url.searchParams.set('s', encoded);
-    url.searchParams.set('lang', locale);
-    writeUrlDb(encoded, state);
-    return url.toString();
-  }, [buildShareState, locale]);
-
-  const copyShareUrl = useCallback(async () => {
+  const copyNotebookAiPrompt = useCallback(async () => {
     try {
-      const url = buildShareUrl();
-      await navigator.clipboard.writeText(url);
-      toast.success(t(locale, 'shareCopied'));
+      await copyTextToClipboard(buildNotebookAiPrompt(locale, notebookText));
+      toast.success(t(locale, 'notebookAiPromptCopied'));
     } catch {
-      toast.error('URL copy failed');
+      toast.error(t(locale, 'copyFailed'));
     }
-  }, [buildShareUrl, locale]);
+  }, [locale, notebookText]);
+
+  const copyNotebookAnimationLink = useCallback(async () => {
+    const url = buildAnimationViewerUrl({ locale, notebookSpeed, notebookText });
+    if (!url) {
+      toast.warning(t(locale, 'notebookAnimationShareEmpty'));
+      return;
+    }
+    try {
+      await copyTextToClipboard(url);
+      toast.success(t(locale, 'notebookAnimationShareCopied'));
+    } catch {
+      toast.error(t(locale, 'copyFailed'));
+    }
+  }, [locale, notebookSpeed, notebookText]);
+
+  const supportMailHref = useMemo(() => {
+    const currentUrl = typeof window === 'undefined' ? 'flow-math.com' : window.location.href;
+    const subject = encodeURIComponent(t(locale, 'supportReportSubject'));
+    const bodyText = t(locale, 'supportReportBody', { url: currentUrl }).replaceAll('\\n', '\n');
+    const body = encodeURIComponent(bodyText);
+    return `mailto:${supportEmail}?subject=${subject}&body=${body}`;
+  }, [locale]);
+
+  const isOperator = authUser?.isOperator === true || ['admin', 'operator'].includes(authUser?.role);
+  const authUserDisplayName =
+    authUser?.name?.trim() || authUser?.email?.split('@')[0] || t(locale, 'accountMenuLabel');
+  const authUserInitial = Array.from(authUserDisplayName)[0]?.toUpperCase() || '';
+
+  useEffect(() => {
+    if (!accountMenuOpen) return undefined;
+
+    const closeAccountMenu = (event) => {
+      if (event.type === 'keydown' && event.key !== 'Escape') return;
+      if (
+        event.type === 'pointerdown' &&
+        accountMenuRef.current?.contains(event.target)
+      ) {
+        return;
+      }
+      setAccountMenuOpen(false);
+    };
+
+    document.addEventListener('pointerdown', closeAccountMenu);
+    window.addEventListener('keydown', closeAccountMenu);
+    return () => {
+      document.removeEventListener('pointerdown', closeAccountMenu);
+      window.removeEventListener('keydown', closeAccountMenu);
+    };
+  }, [accountMenuOpen]);
+
+  const focusAuthField = useCallback((field) => {
+    window.requestAnimationFrame(() => {
+      if (field === 'email') authEmailInputRef.current?.focus();
+      if (field === 'password') authPasswordInputRef.current?.focus();
+      if (field === 'confirm') authPasswordConfirmInputRef.current?.focus();
+    });
+  }, []);
+
+  const closeLoginDialog = useCallback(() => {
+    if (authBusy) return;
+    setShowLoginDialog(false);
+    setAuthError('');
+    setAuthErrorField('');
+    window.requestAnimationFrame(() => authReturnFocusRef.current?.focus?.());
+  }, [authBusy]);
+
+  const transitionFlowView = useCallback((nextShowFlowHome, direction) => {
+    const commit = () => setShowFlowHome(nextShowFlowHome);
+    const root = document.documentElement;
+    const canAnimate =
+      !prefersReducedMotion &&
+      typeof document.startViewTransition === 'function' &&
+      !flowViewTransitionRef.current;
+
+    if (!canAnimate) {
+      commit();
+      return;
+    }
+
+    root.dataset.flowViewTransition = direction;
+    const transition = document.startViewTransition(() => {
+      flushSync(commit);
+    });
+    flowViewTransitionRef.current = transition;
+    transition.finished
+      .catch(() => {})
+      .finally(() => {
+        if (flowViewTransitionRef.current === transition) {
+          flowViewTransitionRef.current = null;
+        }
+        if (root.dataset.flowViewTransition === direction) {
+          delete root.dataset.flowViewTransition;
+        }
+      });
+  }, [prefersReducedMotion]);
+
+  const enterAuthenticatedLab = useCallback((user = null, { animate = true } = {}) => {
+    if (user) setAuthUser(user);
+    flowHomeReplayRequestedRef.current = false;
+    setShowLoginDialog(false);
+    if (animate) {
+      transitionFlowView(false, 'to-lab');
+    } else {
+      setShowFlowHome(false);
+    }
+    writeLabEntryToHistory(locale);
+  }, [locale, transitionFlowView]);
+
+  const replayFlowIntroduction = useCallback(() => {
+    flowHomeReplayRequestedRef.current = true;
+    setAccountMenuOpen(false);
+    writeFlowHomeToHistory(locale);
+    transitionFlowView(true, 'to-home');
+  }, [locale, transitionFlowView]);
+
+  const handleGoogleLogin = useCallback(() => {
+    setAuthBusy(true);
+    captureAuthStarted('google');
+    window.location.assign(googleLoginUrl());
+  }, []);
+
+  const handleGoogleOneTapCredential = useCallback(async (credential) => {
+    setAuthBusy(true);
+    try {
+      const response = await fetch(authApiUrl('/auth/google/one-tap'), {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ credential }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || !data?.authenticated) {
+        toast.error(t(locale, 'flowHomeLoginFailed'));
+        return;
+      }
+
+      captureAuthCompleted(data.user, 'google', 'one_tap');
+      enterAuthenticatedLab(data.user ?? null);
+    } catch {
+      toast.error(t(locale, 'flowHomeLoginFailed'));
+    } finally {
+      setAuthBusy(false);
+    }
+  }, [enterAuthenticatedLab, locale]);
+
+  const handleEmailAuth = useCallback(async (mode) => {
+    const email = authEmail.trim().toLowerCase();
+    const password = authPassword;
+    if (!email) {
+      setAuthError(t(locale, 'flowHomeLoginEmailRequired'));
+      setAuthErrorField('email');
+      focusAuthField('email');
+      return;
+    }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      setAuthError(t(locale, 'flowAuthEmailInvalid'));
+      setAuthErrorField('email');
+      focusAuthField('email');
+      return;
+    }
+    if (!password) {
+      setAuthError(t(locale, 'flowHomeLoginPasswordRequired'));
+      setAuthErrorField('password');
+      focusAuthField('password');
+      return;
+    }
+    if (password.length < 8) {
+      setAuthError(t(locale, 'flowHomeLoginPasswordShort'));
+      setAuthErrorField('password');
+      focusAuthField('password');
+      return;
+    }
+    if (mode === 'signup' && password !== authPasswordConfirm) {
+      setAuthError(t(locale, 'flowAuthPasswordMismatch'));
+      setAuthErrorField('confirm');
+      focusAuthField('confirm');
+      return;
+    }
+
+    setAuthBusy(true);
+    setAuthError('');
+    setAuthErrorField('');
+    captureAuthStarted(mode === 'signup' ? 'email_signup' : 'email');
+
+    try {
+      const response = await fetch(authApiUrl(`/auth/email/${mode}`), {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password }),
+      });
+      const data = await response.json().catch(() => ({}));
+
+      if (!response.ok) {
+        const errorKey =
+          data?.error === 'email_already_exists'
+            ? 'flowHomeLoginEmailExists'
+            : data?.error === 'email_not_found'
+              ? 'flowHomeLoginEmailMissing'
+              : data?.error === 'invalid_email'
+                ? 'flowAuthEmailInvalid'
+              : data?.error === 'invalid_password'
+                ? 'flowHomeLoginPasswordShort'
+                : data?.error === 'invalid_credentials' || data?.error === 'password_not_set'
+                  ? 'flowHomeLoginPasswordInvalid'
+                  : 'flowHomeLoginFailed';
+        const errorField =
+          data?.error === 'email_already_exists' ||
+          data?.error === 'email_not_found' ||
+          data?.error === 'invalid_email'
+            ? 'email'
+            : data?.error === 'invalid_password' ||
+                data?.error === 'invalid_credentials' ||
+                data?.error === 'password_not_set'
+              ? 'password'
+              : 'form';
+        setAuthError(t(locale, errorKey));
+        setAuthErrorField(errorField);
+        focusAuthField(errorField);
+        return;
+      }
+
+      captureAuthCompleted(data.user, 'email', mode === 'signup' ? 'signup' : 'login');
+      setAuthPassword('');
+      setAuthPasswordConfirm('');
+      enterAuthenticatedLab(data.user ?? null);
+    } catch {
+      setAuthError(t(locale, 'flowHomeLoginFailed'));
+      setAuthErrorField('form');
+    } finally {
+      setAuthBusy(false);
+    }
+  }, [
+    authEmail,
+    authPassword,
+    authPasswordConfirm,
+    enterAuthenticatedLab,
+    focusAuthField,
+    locale,
+  ]);
+
+  const handleLogout = useCallback(async () => {
+    if (logoutBusy) return;
+    setLogoutBusy(true);
+
+    try {
+      const response = await fetch(authApiUrl('/auth/logout'), {
+        method: 'POST',
+        credentials: 'include',
+      });
+      if (!response.ok) throw new Error('logout_failed');
+
+      if (isPostHogReady()) {
+        posthog.capture('flow_math_auth_logout');
+        posthog.reset();
+      }
+      googleOneTapPromptedRef.current = true;
+      flowHomeReplayRequestedRef.current = false;
+      setAuthUser(null);
+      setAccountMenuOpen(false);
+      setAuthPassword('');
+      setAuthPasswordConfirm('');
+      writeFlowHomeToHistory(locale);
+      setShowFlowHome(true);
+    } catch {
+      toast.error(t(locale, 'accountLogoutFailed'));
+    } finally {
+      setLogoutBusy(false);
+    }
+  }, [locale, logoutBusy]);
 
   useEffect(() => () => {
     if (cameraShareTimerRef.current) {
@@ -9069,22 +8572,147 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    let cancelled = false;
+
+    fetch(authApiUrl('/me'), {
+      credentials: 'include',
+    })
+      .then(async (response) => {
+        const data = await response.json().catch(() => ({}));
+        if (!cancelled && response.ok && data?.authenticated) {
+          if (showFlowHome && !flowHomeReplayRequestedRef.current) {
+            enterAuthenticatedLab(data.user ?? null, { animate: false });
+          } else {
+            setAuthUser(data.user ?? null);
+          }
+          const authTarget = new URLSearchParams(window.location.search).get('auth');
+          if (String(authTarget).toLowerCase() === 'google') {
+            captureAuthCompleted(data.user, 'google', 'login');
+          }
+        }
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (!cancelled) setAuthResolved(true);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [enterAuthenticatedLab, showFlowHome]);
+
+  useEffect(() => {
+    if (
+      !showFlowHome ||
+      !authResolved ||
+      authUser ||
+      showLoginDialog ||
+      googleOneTapPromptedRef.current
+    ) {
+      return undefined;
+    }
+
+    let disposed = false;
+    let cancelPrompt = () => {};
+
+    fetch(authApiUrl('/auth/google/one-tap/config'), { credentials: 'include' })
+      .then(async (response) => {
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || !data?.clientId || !data?.nonce || disposed) return;
+
+        captureAuthStarted('google_one_tap');
+        cancelPrompt = await promptGoogleOneTap({
+          clientId: data.clientId,
+          nonce: data.nonce,
+          onCredential: handleGoogleOneTapCredential,
+        });
+        googleOneTapPromptedRef.current = true;
+        if (disposed) cancelPrompt();
+      })
+      .catch(() => {
+        googleOneTapPromptedRef.current = false;
+      });
+
+    return () => {
+      disposed = true;
+      cancelPrompt();
+    };
+  }, [authResolved, authUser, handleGoogleOneTapCredential, showFlowHome, showLoginDialog]);
+
+  useEffect(() => {
     window.localStorage?.setItem('linearAlgebraLocale', locale);
     applySeo(locale);
   }, [locale]);
 
   useEffect(() => {
+    const onPopState = () => setShowFlowHome(shouldShowFlowHome());
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
+  }, []);
+
+  const enterLinearLab = useCallback(() => {
+    if (authUser) {
+      enterAuthenticatedLab(authUser);
+      return;
+    }
+    authReturnFocusRef.current =
+      document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    setAuthMode('login');
+    setAuthError('');
+    setAuthErrorField('');
+    setAuthPasswordConfirm('');
+    setAuthPasswordVisible(false);
+    setShowLoginDialog(true);
+  }, [authUser, enterAuthenticatedLab]);
+
+  useEffect(() => {
+    if (!showLoginDialog) return undefined;
+
+    const previousBodyOverflow = document.body.style.overflow;
+    const previousDocumentOverflow = document.documentElement.style.overflow;
+    document.body.style.overflow = 'hidden';
+    document.documentElement.style.overflow = 'hidden';
+    const focusTimer = window.setTimeout(() => authEmailInputRef.current?.focus(), 0);
+    const handleAuthKeyDown = (event) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        closeLoginDialog();
+        return;
+      }
+      if (event.key !== 'Tab') return;
+
+      const focusable = authDialogRef.current?.querySelectorAll(
+        'button:not(:disabled), input:not(:disabled), [href], select:not(:disabled), textarea:not(:disabled)'
+      );
+      if (!focusable?.length) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+
+    window.addEventListener('keydown', handleAuthKeyDown);
+    return () => {
+      window.clearTimeout(focusTimer);
+      window.removeEventListener('keydown', handleAuthKeyDown);
+      document.body.style.overflow = previousBodyOverflow;
+      document.documentElement.style.overflow = previousDocumentOverflow;
+    };
+  }, [closeLoginDialog, showLoginDialog]);
+
+  useEffect(() => {
+    if (showFlowHome) return undefined;
     const timer = window.setTimeout(() => {
       const state = buildShareState();
-      const encoded = encodeShareState(state);
-      const url = new URL(window.location.href);
-      url.searchParams.set('s', encoded);
-      url.searchParams.set('lang', locale);
-      window.history.replaceState(null, '', url);
-      writeUrlDb(encoded, state);
+      writeShareStateToUrl(state, { locale, title: t(locale, 'title') });
     }, 300);
     return () => window.clearTimeout(timer);
-  }, [buildShareState, locale]);
+  }, [buildShareState, locale, showFlowHome]);
 
   const resetTransformation = useCallback(() => {
     startAnimationTo([...identity3], t(locale, 'initialSpace'), {
@@ -9105,7 +8733,7 @@ export default function App() {
     setRelativeGridStrength(DEFAULT_RELATIVE_GRID_STRENGTH);
     setShowCoordinates(true);
     setShowVector(true);
-    setShowBasis(true);
+    setShowBasis(false);
     setBasisVisibility({ i: true, j: true, k: true });
     setShowDot(false);
     setShowAxes(true);
@@ -9116,11 +8744,14 @@ export default function App() {
     setMeasureAnchorId(null);
     setMeasurements([]);
     setEquations(['']);
+    setActiveSavedNotebookId(null);
+    setSavedNotebookTitle('');
+    setPendingNotebookDeleteId(null);
     setNotebookText('');
     setNotebookCells([createNotebookEquationCell('')]);
     setActiveNotebookCellId(null);
     setNotebookCursor(0);
-    setWorkspaceMode('transform');
+    setWorkspaceMode(TRANSFORM_WORKSPACE_ENABLED ? 'transform' : 'system');
     setVectorToolMode('vector');
     const initialVector = createVectorState(0, { id: 'v1', name: 'v1' });
     setVectors([initialVector]);
@@ -9131,26 +8762,480 @@ export default function App() {
     nextVectorIndexRef.current = 2;
   }, [locale, moveCameraToView, startAnimationTo]);
 
-  const lineSystemInfo = buildLineSystemInfo(lineSystem);
+  useEffect(() => {
+    if (previousMobileViewportRef.current === null) {
+      previousMobileViewportRef.current = isMobileViewport;
+      return;
+    }
+    if (previousMobileViewportRef.current === isMobileViewport) return;
+    previousMobileViewportRef.current = isMobileViewport;
+    setIsSidebarOpen(!isMobileViewport);
+  }, [isMobileViewport]);
+
+  const resolveControlPanelWidth = useCallback((value) => {
+    const workspaceWidth =
+      workspaceShellRef.current?.getBoundingClientRect().width ??
+      (typeof window === 'undefined' ? undefined : window.innerWidth);
+    return normalizeControlPanelWidth(value, workspaceWidth);
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    window.localStorage?.setItem(CONTROL_PANEL_STORAGE_KEY, String(controlPanelWidth));
+  }, [controlPanelWidth]);
+
+  useEffect(() => {
+    if (isMobileViewport || typeof window === 'undefined') return undefined;
+    const handleViewportResize = () => {
+      if (controlPanelResizeRef.current) return;
+      setControlPanelWidth((currentWidth) => resolveControlPanelWidth(currentWidth));
+    };
+    handleViewportResize();
+    window.addEventListener('resize', handleViewportResize);
+    return () => window.removeEventListener('resize', handleViewportResize);
+  }, [isMobileViewport, resolveControlPanelWidth]);
+
+  const handleControlPanelResizePointerDown = useCallback((event) => {
+    if (event.pointerType === 'mouse' && event.button !== 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    controlPanelResizeRef.current?.();
+    controlPanelResizeRef.current = startControlPanelResize({
+      event,
+      normalizeWidth: normalizeControlPanelWidth,
+      onCommit: (width) => {
+        controlPanelResizeRef.current = null;
+        setControlPanelWidth(width);
+      },
+      startWidth: controlPanelWidth,
+      workspace: workspaceShellRef.current,
+    });
+  }, [controlPanelWidth]);
+
+  const handleControlPanelResizeKeyDown = useCallback((event) => {
+    const key = event.key;
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(key)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    setControlPanelWidth((currentWidth) => {
+      if (key === 'Home') return CONTROL_PANEL_MIN_WIDTH;
+      if (key === 'End') return resolveControlPanelWidth(CONTROL_PANEL_MAX_WIDTH);
+      return resolveControlPanelWidth(
+        currentWidth + (key === 'ArrowLeft' ? 24 : -24)
+      );
+    });
+  }, [resolveControlPanelWidth]);
+
+  useEffect(() => () => controlPanelResizeRef.current?.(), []);
+
+  const resolveNotebookEditorHeight = useCallback((value) => {
+    const composerHeight =
+      notebookComposerRef.current?.getBoundingClientRect().height ??
+      (typeof window === 'undefined' ? undefined : window.innerHeight);
+    return normalizeNotebookEditorHeight(value, composerHeight);
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    window.localStorage?.setItem(
+      NOTEBOOK_EDITOR_HEIGHT_STORAGE_KEY,
+      String(notebookEditorHeight)
+    );
+  }, [notebookEditorHeight]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return undefined;
+    const handleNotebookComposerResize = () => {
+      setNotebookEditorHeight((currentHeight) =>
+        resolveNotebookEditorHeight(currentHeight)
+      );
+    };
+    window.addEventListener('resize', handleNotebookComposerResize);
+    return () => window.removeEventListener('resize', handleNotebookComposerResize);
+  }, [resolveNotebookEditorHeight]);
+
+  const resizeNotebookSectionToClientY = useCallback((clientY) => {
+    const resize = notebookSectionResizeRef.current;
+    if (
+      !resize ||
+      !Number.isFinite(clientY) ||
+      resize.lastClientY === clientY
+    ) {
+      return;
+    }
+    resize.lastClientY = clientY;
+    setNotebookEditorHeight(
+      resolveNotebookEditorHeight(
+        resize.startHeight + clientY - resize.startClientY
+      )
+    );
+  }, [resolveNotebookEditorHeight]);
+
+  const handleNotebookSectionResizePointerMove = useCallback((event) => {
+    if (!notebookSectionResizeRef.current) return;
+    event.preventDefault();
+    event.stopPropagation();
+    resizeNotebookSectionToClientY(event.clientY);
+  }, [resizeNotebookSectionToClientY]);
+
+  const finishNotebookSectionResize = useCallback((event) => {
+    const resize = notebookSectionResizeRef.current;
+    if (!resize) return;
+    if (
+      Number.isFinite(event?.pointerId) &&
+      event.pointerId !== resize.pointerId
+    ) {
+      return;
+    }
+    event?.preventDefault?.();
+    event?.stopPropagation?.();
+    if (
+      (event?.type === 'pointerup' || event?.type === 'mouseup') &&
+      Number.isFinite(event.clientY)
+    ) {
+      resizeNotebookSectionToClientY(event.clientY);
+    }
+    resize.cleanup?.();
+    notebookSectionResizeRef.current = null;
+    setIsNotebookSectionResizing(false);
+    if (resize.target?.hasPointerCapture?.(resize.pointerId)) {
+      resize.target.releasePointerCapture(resize.pointerId);
+    }
+  }, [resizeNotebookSectionToClientY]);
+
+  const handleNotebookSectionResizePointerDown = useCallback((event) => {
+    if (event.pointerType === 'mouse' && event.button > 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    finishNotebookSectionResize();
+
+    const resizeTarget = event.currentTarget;
+    const handleWindowMove = (moveEvent) => {
+      if (!notebookSectionResizeRef.current) return;
+      moveEvent.preventDefault();
+      resizeNotebookSectionToClientY(moveEvent.clientY);
+    };
+    const handleWindowUp = (upEvent) => finishNotebookSectionResize(upEvent);
+    const cleanup = () => {
+      window.removeEventListener('pointermove', handleWindowMove);
+      window.removeEventListener('pointerup', handleWindowUp);
+      window.removeEventListener('pointercancel', handleWindowUp);
+      window.removeEventListener('mousemove', handleWindowMove);
+      window.removeEventListener('mouseup', handleWindowUp);
+    };
+    notebookSectionResizeRef.current = {
+      cleanup,
+      pointerId: event.pointerId,
+      startClientY: event.clientY,
+      startHeight: notebookEditorHeight,
+      target: resizeTarget,
+    };
+    resizeTarget.setPointerCapture?.(event.pointerId);
+    window.addEventListener('pointermove', handleWindowMove, { passive: false });
+    window.addEventListener('pointerup', handleWindowUp);
+    window.addEventListener('pointercancel', handleWindowUp);
+    window.addEventListener('mousemove', handleWindowMove, { passive: false });
+    window.addEventListener('mouseup', handleWindowUp);
+    setIsNotebookSectionResizing(true);
+  }, [
+    finishNotebookSectionResize,
+    notebookEditorHeight,
+    resizeNotebookSectionToClientY,
+  ]);
+
+  const handleNotebookSectionResizeKeyDown = useCallback((event) => {
+    const key = event.key;
+    if (!['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(key)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    setNotebookEditorHeight((currentHeight) => {
+      if (key === 'Home') return NOTEBOOK_EDITOR_MIN_HEIGHT;
+      if (key === 'End') return resolveNotebookEditorHeight(NOTEBOOK_EDITOR_MAX_HEIGHT);
+      return resolveNotebookEditorHeight(
+        currentHeight + (key === 'ArrowDown' ? 24 : -24)
+      );
+    });
+  }, [resolveNotebookEditorHeight]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return undefined;
+    window.addEventListener('blur', finishNotebookSectionResize);
+    return () => {
+      window.removeEventListener('blur', finishNotebookSectionResize);
+      const resize = notebookSectionResizeRef.current;
+      resize?.cleanup?.();
+      if (resize?.target?.hasPointerCapture?.(resize.pointerId)) {
+        resize.target.releasePointerCapture(resize.pointerId);
+      }
+      notebookSectionResizeRef.current = null;
+    };
+  }, [finishNotebookSectionResize]);
+
+  const lineSystemInfo = buildLineSystemInfo(lineSystem, effectiveSystemMode);
   const resolvedActiveNotebookCellId = activeNotebookCellId ?? notebookCells[0]?.id ?? null;
   const isPanelVisible = isSidebarOpen && !isAnimationFocus;
+  const notebookEditorSurfaceHeight = isMobileViewport
+    ? Math.min(notebookEditorHeight, 180)
+    : notebookEditorHeight;
+  const renderNotebookComposer = (onTogglePlayback, className = '') => (
+    <div
+      className={[
+        'notebook-composer',
+        className,
+        isNotebookSectionResizing ? 'section-resizing' : '',
+      ].filter(Boolean).join(' ')}
+      ref={notebookComposerRef}
+      style={{ '--notebook-editor-height': `${notebookEditorSurfaceHeight}px` }}
+    >
+      <div className="section-heading spread">
+        <span className="heading-left">
+          <NotebookPen aria-hidden="true" size={17} strokeWidth={2.1} />
+          <h3>{t(locale, 'notebook')}</h3>
+        </span>
+        <NotebookAuthoringToolbar
+          checkpoint={notebookCheckpoint}
+          completed={notebookCompleted}
+          onCopyAnimationLink={copyNotebookAnimationLink}
+          onCopyPrompt={copyNotebookAiPrompt}
+          onTogglePlayback={onTogglePlayback}
+          playbackLabelKey={notebookPlaybackLabelKey}
+          playing={notebookPlaying}
+          translate={translate}
+        />
+      </div>
+      <NotebookSpeedControl
+        formatSpeed={formatNotebookSpeedLabel}
+        onSpeedChange={(value) => setNotebookSpeed(normalizeNotebookSpeed(value))}
+        speed={notebookSpeed}
+        translate={translate}
+      />
+
+      <div
+        className="notebook-runner notebook-runner-monaco"
+        style={{
+          '--notebook-progress': notebookProgressRatio,
+          '--notebook-progress-y': `${Math.max(0, Math.min(100, notebookCursor))}%`,
+        }}
+      >
+        <div
+          aria-label={t(locale, 'notebookProgress')}
+          aria-valuemax="100"
+          aria-valuemin="0"
+          aria-valuenow={Math.round(notebookCursor)}
+          className={[
+            'notebook-vertical-progress',
+            notebookProgressDragging ? 'dragging' : '',
+            notebookPlaying ? 'playing' : '',
+          ].filter(Boolean).join(' ')}
+          onKeyDown={handleNotebookProgressKeyDown}
+          onPointerCancel={finishNotebookProgressDrag}
+          onPointerDown={handleNotebookProgressPointerDown}
+          onPointerMove={handleNotebookProgressPointerMove}
+          onPointerUp={finishNotebookProgressDrag}
+          ref={notebookProgressRef}
+          role="slider"
+          tabIndex={0}
+        >
+          <span
+            aria-hidden="true"
+            data-progress={`${Math.round(notebookCursor)}%`}
+          />
+        </div>
+        <div className="notebook-flow-stack">
+          <div className="notebook-cell notebook-smart active">
+            <div className="notebook-cell-index">*</div>
+            <div className="notebook-cell-main">
+              <NotebookEditorSurface
+                ref={notebookEditorRef}
+                activeLineIndex={notebookActiveLineIndex}
+                autoFocus={!isMobileViewport}
+                autocompleteLabel={t(locale, 'notebookAutocomplete')}
+                commandDetail={t(locale, 'notebookCompletionCommand')}
+                cuedLineIndex={notebookCuedLineIndex}
+                foldLabel={t(locale, 'notebookSceneSetupFold')}
+                followActiveLine={notebookPlaying || notebookProgressDragging}
+                fill={isMobileViewport}
+                height={notebookEditorSurfaceHeight}
+                loadingLabel={t(locale, 'notebookEditorLoading')}
+                marks={notebookScript.marks}
+                matrixTitle={t(locale, 'notebookMatrixCell')}
+                notebookLabel={t(locale, 'notebook')}
+                onAcceptStarter={acceptSmartNotebookStarter}
+                onBlurFormat={handleNotebookEditorBlur}
+                onChange={handleNotebookEditorChange}
+                onFormat={prettifyNotebookScriptText}
+                onPaste={handleNotebookEditorPaste}
+                cueLabel={t(locale, 'cueNotebookLine')}
+                onCueLine={cueSmartNotebookAtLine}
+                playCueLabel={t(locale, 'playCuedNotebookLine')}
+                progressLabel={t(locale, 'notebookProgress')}
+                renderSyntaxLine={renderSmartNotebookSyntaxLine}
+                starterDetail={t(locale, 'notebookCompletionStarterDetail')}
+                starterLabel={t(locale, 'notebookCompletionStarter')}
+                starterPreviewText={notebookStarterPreviewText()}
+                starterText={notebookStarterText()}
+                tokenStyles={notebookTokenStyles}
+                value={notebookText}
+                variableDetail={t(locale, 'notebookCompletionVariable')}
+              />
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div
+        aria-label={t(locale, 'notebookEditorResize')}
+        aria-orientation="horizontal"
+        aria-valuemax={maxNotebookEditorHeight(
+          notebookComposerRef.current?.getBoundingClientRect().height
+        )}
+        aria-valuemin={NOTEBOOK_EDITOR_MIN_HEIGHT}
+        aria-valuenow={notebookEditorHeight}
+        aria-valuetext={`${notebookEditorHeight}px`}
+        className={`notebook-section-resizer ${isNotebookSectionResizing ? 'dragging' : ''}`}
+        onKeyDown={handleNotebookSectionResizeKeyDown}
+        onLostPointerCapture={finishNotebookSectionResize}
+        onPointerCancel={finishNotebookSectionResize}
+        onPointerDown={handleNotebookSectionResizePointerDown}
+        onPointerMove={handleNotebookSectionResizePointerMove}
+        onPointerUp={finishNotebookSectionResize}
+        role="separator"
+        tabIndex={0}
+        title={t(locale, 'notebookEditorResize')}
+      >
+        <span aria-hidden="true" />
+      </div>
+
+      <NotebookResourceShelf
+        activeSavedNotebookId={activeSavedNotebookId}
+        applyPresetToNotebook={applyPresetToNotebook}
+        collapsible={isMobileViewport}
+        deleteSavedNotebook={deleteSavedNotebook}
+        formatSavedNotebookTime={formatSavedNotebookTime}
+        locale={locale}
+        notebookCourse={notebookCourse}
+        notebookExamples={notebookExamples}
+        openSavedNotebook={openSavedNotebook}
+        pendingNotebookDeleteId={pendingNotebookDeleteId}
+        saveCurrentNotebook={saveCurrentNotebook}
+        savedNotebookTitle={savedNotebookTitle}
+        savedNotebooks={savedNotebooks}
+        setSavedNotebookTitle={setSavedNotebookTitle}
+        startNewNotebook={startNewNotebook}
+      />
+    </div>
+  );
+
+  if (showFlowHome) {
+    return (
+      <main className="app-shell flow-home-shell">
+        <Toaster
+          duration={1600}
+          gap={10}
+          offset={18}
+          position="bottom-center"
+          style={{ '--width': 'min(288px, calc(100vw - 32px))' }}
+          toastOptions={{
+            className: 'app-toast',
+          }}
+        />
+        <FlowMathLanding
+          locale={locale}
+          onEnter={enterLinearLab}
+          setLocale={setLocale}
+          supportMailHref={supportMailHref}
+        />
+        <AdSlot config={monetizationConfig} placement="bottom" translate={translate} />
+        {showLoginDialog && (
+          <FlowAuthDialog
+            auth={{
+              busy: authBusy,
+              email: authEmail,
+              error: authError,
+              errorField: authErrorField,
+              mode: authMode,
+              password: authPassword,
+              passwordConfirm: authPasswordConfirm,
+              passwordVisible: authPasswordVisible,
+            }}
+            dialogRef={authDialogRef}
+            emailInputRef={authEmailInputRef}
+            onClose={closeLoginDialog}
+            onEmailAuth={handleEmailAuth}
+            onEmailChange={(value) => {
+              setAuthEmail(value);
+              if (authErrorField === 'email') {
+                setAuthError('');
+                setAuthErrorField('');
+              }
+            }}
+            onGoogleLogin={handleGoogleLogin}
+            onModeChange={(mode) => {
+              setAuthMode(mode);
+              setAuthError('');
+              setAuthErrorField('');
+              setAuthPasswordConfirm('');
+            }}
+            onPasswordChange={(value) => {
+              setAuthPassword(value);
+              if (authErrorField === 'password') {
+                setAuthError('');
+                setAuthErrorField('');
+              }
+            }}
+            onPasswordConfirmChange={(value) => {
+              setAuthPasswordConfirm(value);
+              if (authErrorField === 'confirm') {
+                setAuthError('');
+                setAuthErrorField('');
+              }
+            }}
+            onTogglePasswordVisibility={() => (
+              setAuthPasswordVisible((visible) => !visible)
+            )}
+            passwordConfirmInputRef={authPasswordConfirmInputRef}
+            passwordInputRef={authPasswordInputRef}
+            translate={translate}
+          />
+        )}
+      </main>
+    );
+  }
 
   return (
-    <main className={`app-shell ${isAnimationFocus ? 'animation-focus' : ''}`}>
+    <main
+      className={`app-shell ${isAnimationFocus ? 'animation-focus' : ''} ${isAnimationViewer ? 'animation-viewer' : ''} ${isAnimationPreview ? 'animation-preview' : ''}`}
+      onPointerDownCapture={clearNotebookCueOnOutsidePointerDown}
+    >
       <Toaster
-        duration={1300}
-        gap={8}
+        duration={1600}
+        gap={10}
         offset={18}
         position="bottom-center"
-        richColors
+        style={{ '--width': 'min(288px, calc(100vw - 32px))' }}
         toastOptions={{
           className: 'app-toast',
         }}
       />
-      <AdBlockGate locale={locale} />
-      <AdSlot placement="top" locale={locale} />
-      <div className="workspace-shell">
-      <section className="scene-area" aria-label={t(locale, 'title')}>
+      <AdBlockGate disabled={!authResolved || isOperator} translate={translate} />
+      {!isMobileViewport && (
+        <AdSlot config={monetizationConfig} placement="top" translate={translate} />
+      )}
+      <div
+        className={[
+          'workspace-shell',
+          isMobileViewport && !isAnimationViewer && !isAnimationFocus
+            ? 'mobile-split-workspace'
+            : '',
+          isMobileKeyboardOpen ? 'mobile-keyboard-open' : '',
+        ].filter(Boolean).join(' ')}
+        ref={workspaceShellRef}
+        style={{ '--control-panel-width': `${controlPanelWidth}px` }}
+      >
+      <section
+        className={`scene-area ${workspaceMode === 'system' && notebookFieldMode === 'board' ? 'notebook-field-board' : 'notebook-field-graph'}`}
+        aria-label={t(locale, 'title')}
+      >
         {!isLoaded && (
           <div className="loader">
             <div className="spinner" />
@@ -9159,40 +9244,139 @@ export default function App() {
         )}
 
         <div className="scene-topbar">
-          <div className="scene-title">
-            <h1>{t(locale, 'title')}</h1>
-            <p>{t(locale, 'subtitle')}</p>
-            <div className="scene-utility-row">
-              <label className="locale-switcher" title={t(locale, 'language')}>
-                <span>{t(locale, 'language')}</span>
-                <select
-                  onChange={(event) => setLocale(normalizeLocale(event.target.value))}
-                  value={locale}
-                >
-                  {localeOrder.map((key) => (
-                    <option key={key} value={key}>{localeMessages[key].name}</option>
-                  ))}
-                </select>
-              </label>
-              <button className="utility-pill" onClick={copyShareUrl} type="button">
-                <Copy size={13} />
-                <span>{t(locale, 'shareUrl')}</span>
-              </button>
-              <a
-                className={`donation-pill ${monetizationConfig.donationUrl ? '' : 'disabled'}`}
-                href={monetizationConfig.donationUrl || undefined}
-                onClick={(event) => {
-                  if (!monetizationConfig.donationUrl) event.preventDefault();
-                }}
-                rel="noreferrer"
-                target="_blank"
-                title={t(locale, 'donationText')}
+          <div className="scene-utility-row">
+            <label className="locale-switcher" title={t(locale, 'language')}>
+              <span>{t(locale, 'language')}</span>
+              <select
+                onChange={(event) => setLocale(normalizeLocale(event.target.value))}
+                value={locale}
               >
-                <span>{monetizationConfig.donationLabel || t(locale, 'donation')}</span>
-              </a>
-            </div>
+                {localeOptions.map((key) => (
+                  <option key={key} value={key}>{localeMessages[key].name}</option>
+                ))}
+              </select>
+            </label>
+            <a
+              className="utility-pill support-pill"
+              href={supportMailHref}
+              title={t(locale, 'supportReportTitle')}
+            >
+              <Mail size={13} />
+              <span>{t(locale, 'supportReport')}</span>
+            </a>
+            <a
+              className={`donation-pill ${monetizationConfig.donationUrl ? '' : 'disabled'}`}
+              href={monetizationConfig.donationUrl || undefined}
+              onClick={(event) => {
+                if (!monetizationConfig.donationUrl) event.preventDefault();
+              }}
+              rel="noreferrer"
+              target="_blank"
+              title={t(locale, 'donationText')}
+            >
+              <span>{monetizationConfig.donationLabel || t(locale, 'donation')}</span>
+            </a>
           </div>
-          <div className="scene-actions">
+          <div
+            className={`scene-actions ${sceneToolsExpanded ? 'expanded' : 'collapsed'} ${
+              authUser ? 'has-account' : ''
+            }`}
+          >
+            <div className="scene-action-row">
+            <button
+              aria-controls="scene-tools-panel"
+              aria-expanded={sceneToolsExpanded}
+              className="scene-tools-toggle"
+              onClick={() => setSceneToolsExpanded((expanded) => !expanded)}
+              title={t(locale, sceneToolsExpanded ? 'collapseSceneTools' : 'expandSceneTools')}
+              type="button"
+            >
+              <SlidersHorizontal size={14} />
+              <strong>{String(activeView ?? autoCameraTargetViewRef.current ?? NOTEBOOK_SCENE_DEFAULTS.view).toUpperCase()}</strong>
+              <span>{t(locale, 'sceneTools')}</span>
+              <ChevronDown aria-hidden="true" className="scene-tools-toggle-chevron" size={14} />
+            </button>
+            {authUser && (
+              <div className={`account-menu ${accountMenuOpen ? 'open' : ''}`} ref={accountMenuRef}>
+                <button
+                  aria-expanded={accountMenuOpen}
+                  aria-haspopup="dialog"
+                  className="account-trigger"
+                  onClick={() => setAccountMenuOpen((open) => !open)}
+                  title={t(locale, 'accountMenuLabel')}
+                  type="button"
+                >
+                  <span className="account-avatar" aria-hidden="true">
+                    {authUser.pictureUrl ? (
+                      <img alt="" referrerPolicy="no-referrer" src={authUser.pictureUrl} />
+                    ) : authUserInitial ? (
+                      authUserInitial
+                    ) : (
+                      <User size={15} />
+                    )}
+                  </span>
+                  <span className="account-trigger-copy">
+                    <strong>{authUserDisplayName}</strong>
+                    <small>{t(locale, 'accountMenuLabel')}</small>
+                  </span>
+                  <ChevronDown aria-hidden="true" className="account-trigger-chevron" size={13} />
+                </button>
+
+                {accountMenuOpen && (
+                  <div
+                    aria-label={t(locale, 'accountMenuLabel')}
+                    className="account-popover"
+                    role="dialog"
+                  >
+                    <span className="account-popover-label">{t(locale, 'accountMenuLabel')}</span>
+                    <div className="account-identity">
+                      <span className="account-avatar large" aria-hidden="true">
+                        {authUser.pictureUrl ? (
+                          <img alt="" referrerPolicy="no-referrer" src={authUser.pictureUrl} />
+                        ) : authUserInitial ? (
+                          authUserInitial
+                        ) : (
+                          <User size={18} />
+                        )}
+                      </span>
+                      <span>
+                        <strong>{authUserDisplayName}</strong>
+                        <small>{authUser.email}</small>
+                      </span>
+                    </div>
+                    <button
+                      className="account-intro-replay"
+                      onClick={replayFlowIntroduction}
+                      type="button"
+                    >
+                      <RotateCcw size={15} />
+                      <span>{t(locale, 'accountReplayIntroduction')}</span>
+                    </button>
+                    <button
+                      className="account-logout"
+                      disabled={logoutBusy}
+                      onClick={handleLogout}
+                      type="button"
+                    >
+                      {logoutBusy ? (
+                        <span aria-hidden="true" className="flow-auth-spinner" />
+                      ) : (
+                        <LogOut size={15} />
+                      )}
+                      <span>
+                        {t(locale, logoutBusy ? 'accountLoggingOut' : 'accountLogout')}
+                      </span>
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+            </div>
+            <div
+              aria-hidden={!sceneToolsExpanded}
+              className="scene-tools-panel"
+              id="scene-tools-panel"
+            >
             <div className="view-actions">
               {Object.entries(viewPresets).map(([viewKey, preset]) => {
                 const viewLabel = t(locale, preset.labelKey);
@@ -9208,22 +9392,6 @@ export default function App() {
                 );
               })}
               <div className="camera-lock-group" aria-label={t(locale, 'lockControls')}>
-                <button
-                  aria-pressed={cameraAuto}
-                  className={`camera-lock-button camera-auto-button ${cameraAuto ? 'active' : ''}`}
-                  onClick={() => {
-                    const next = !cameraAuto;
-                    setCameraAuto(next);
-                    cameraAutoRef.current = next;
-                    autoCameraTargetViewRef.current = workspaceMode === 'system' ? effectiveSystemMode : displayMode;
-                    if (next) snapCameraToAutoView();
-                  }}
-                  title={cameraAuto ? t(locale, 'cameraAutoOffTitle') : t(locale, 'cameraAutoTitle')}
-                  type="button"
-                >
-                  <Magnet size={13} />
-                  <span>{t(locale, 'cameraAuto')}</span>
-                </button>
                 <button
                   aria-pressed={allLocked}
                   className={`camera-lock-button ${allLocked ? 'active' : ''}`}
@@ -9259,17 +9427,6 @@ export default function App() {
                   <span>{t(locale, 'lockCamera')}</span>
                 </button>
               </div>
-              {!isSidebarOpen && (
-                <button
-                  className="icon-text-button dark panel-open-inline"
-                  onClick={() => setIsSidebarOpen(true)}
-                  title={t(locale, 'panelOpen')}
-                  type="button"
-                >
-                  <Menu size={18} />
-                  <span>{t(locale, 'panelButton')}</span>
-                </button>
-              )}
             </div>
             <div className="scene-control-dock" aria-label={t(locale, 'graphControls')}>
               <div className="rank-chip" title={t(locale, 'rankTitle')}>
@@ -9342,6 +9499,20 @@ export default function App() {
                     <Braces size={14} />
                     <span>{t(locale, 'coordinates')}</span>
                   </label>
+                  {workspaceMode === 'system' && (
+                    <label
+                      className={showAutomaticSolution ? 'active' : ''}
+                      title={t(locale, 'automaticSolutionTitle')}
+                    >
+                      <input
+                        checked={showAutomaticSolution}
+                        onChange={(event) => setShowAutomaticSolution(event.target.checked)}
+                        type="checkbox"
+                      />
+                      <Sigma size={14} />
+                      <span>{t(locale, 'automaticSolution')}</span>
+                    </label>
+                  )}
                   <label className={snapToInteger ? 'active' : ''} title={t(locale, 'snapDragTitle')}>
                     <input
                       checked={snapToInteger}
@@ -9457,6 +9628,14 @@ export default function App() {
                   <div className="scene-vector-legend measure-chip-row" aria-label={t(locale, 'makeMeasurement')}>
                     <div className="legend-tools" aria-label={t(locale, 'makeMeasurement')}>
                       <button
+                        className={`legend-tool ${measureMode === 'sum' ? 'active' : ''}`}
+                        onClick={() => toggleMeasureMode('sum')}
+                        title={t(locale, 'sumMakeTitle')}
+                        type="button"
+                      >
+                        <Plus size={13} />
+                      </button>
+                      <button
                         className={`legend-tool ${measureMode === 'dot' ? 'active' : ''}`}
                         onClick={() => toggleMeasureMode('dot')}
                         title={t(locale, 'dotMakeTitle')}
@@ -9475,7 +9654,9 @@ export default function App() {
                     </div>
                     {measureMode && (
                       <span className="measure-draft-chip">
-                        {measureMode === 'dot'
+                        {measureMode === 'sum'
+                          ? t(locale, 'sum')
+                          : measureMode === 'dot'
                           ? t(locale, 'dot')
                           : displayMode === '3d'
                             ? t(locale, 'volume')
@@ -9497,12 +9678,14 @@ export default function App() {
                       >
                         <button
                           onClick={() => toggleMeasurementVisible(item.id)}
-                          title={t(locale, 'toggleMeasurement', { type: item.type === 'dot' ? t(locale, 'dot') : t(locale, 'volume') })}
+                          title={t(locale, 'toggleMeasurement', {
+                            type: item.type === 'dot' ? t(locale, 'dot') : item.type === 'sum' ? t(locale, 'sum') : t(locale, 'volume'),
+                          })}
                           type="button"
                         >
-                          <span>{item.type === 'dot' ? '∑' : '□'}</span>
+                          <span>{item.type === 'dot' ? '∑' : item.type === 'sum' ? '+' : '□'}</span>
                           <strong>{item.label}</strong>
-                          {item.value !== null && <em>{formatNumber(item.value)}</em>}
+                          {item.value !== null && <em>{item.valueText ?? formatNumber(item.value)}</em>}
                         </button>
                         <button
                           className="measure-remove"
@@ -9517,6 +9700,7 @@ export default function App() {
                   </div>
                 </div>
               )}
+            </div>
             </div>
           </div>
         </div>
@@ -9544,22 +9728,236 @@ export default function App() {
               <circle cx={measureDraftGuide.x2} cy={measureDraftGuide.y2} r="4" />
             </svg>
           )}
-          {dragSnapGuide && (
-            <>
-              <svg aria-hidden="true" className="drag-snap-guide">
-                <line
-                  x1={dragSnapGuide.x1}
-                  y1={dragSnapGuide.y1}
-                  x2={dragSnapGuide.x2}
-                  y2={dragSnapGuide.y2}
-                />
-                <circle cx={dragSnapGuide.x2} cy={dragSnapGuide.y2} r="4" />
-              </svg>
-            </>
+          <svg
+            aria-hidden="true"
+            className="drag-snap-guide"
+            ref={dragSnapGuideRef}
+            style={{ display: 'none' }}
+          >
+            <line ref={dragSnapGuideLineRef} />
+            <circle ref={dragSnapGuidePointRef} r="4" />
+          </svg>
+          {workspaceMode === 'system' && notebookSceneMatrices.length > 0 && (
+            <NotebookMatrixCards
+              boardMode={notebookFieldMode === 'board'}
+              formatValue={(value) => formatMatrixNumber(parseNumber(value))}
+              items={notebookSceneMatrices}
+              matrixWord={t(locale, 'matrix')}
+              annotation={notebookBoardAnnotation}
+              operation={notebookBoardOperation}
+              highlightedName={hoveredNotebookCaptionVariable}
+            />
           )}
-          {workspaceMode === 'system' && activeNotebookCaption && (
-            <div className="scene-caption" aria-live="polite">
-              <span>{activeNotebookCaption}</span>
+          {workspaceMode === 'system' && (activeNotebookCaption || notebookCheckpoint || notebookCompleted) && (
+            <div
+              className={`scene-caption ${notebookCaptionDragging ? 'dragging' : ''} ${notebookCheckpoint ? 'checkpoint' : ''} ${notebookInspectionActive ? 'inspect' : ''} ${notebookCompleted ? 'completed' : ''} ${notebookCheckpointCaptionHidden ? 'caption-hidden' : ''}`}
+              aria-live="polite"
+              ref={notebookCaptionRef}
+              style={{
+                '--scene-caption-x': `${notebookCaptionPosition.x}px`,
+                '--scene-caption-y': `${notebookCaptionPosition.y}px`,
+              }}
+            >
+              <div
+                className="scene-caption-card"
+                aria-hidden={notebookCheckpointCaptionHidden ? 'true' : undefined}
+                onLostPointerCapture={() => {
+                  notebookCaptionDragRef.current = null;
+                  setNotebookCaptionDragging(false);
+                }}
+                onPointerCancelCapture={finishNotebookCaptionDrag}
+                onPointerDownCapture={handleNotebookCaptionPointerDown}
+                onPointerMoveCapture={handleNotebookCaptionPointerMove}
+                onPointerUpCapture={finishNotebookCaptionDrag}
+                title={t(locale, 'dragNotebookCaption')}
+              >
+                <span className="scene-caption-text">
+                  {renderNotebookTaggedText(
+                    activeNotebookCaption || t(
+                      locale,
+                      notebookInspectionActive
+                        ? 'notebookInspectionHint'
+                        : notebookCheckpoint
+                          ? 'notebookCheckpointHint'
+                          : 'notebookCompleteHint'
+                    ),
+                    notebookTokenStyles,
+                    'scene-caption-variable',
+                    {
+                      hoveredVariable: hoveredNotebookCaptionVariable,
+                      onVariableEnter: pointToNotebookCaptionVariable,
+                      onVariableLeave: stopPointingToNotebookCaptionVariable,
+                    }
+                  )}
+                </span>
+              </div>
+              {notebookCompleted && activeNotebookSegmentProgress >= 99.999 && (
+                <div className="scene-caption-complete">
+                  <Check size={14} />
+                  <span>{t(locale, 'notebookComplete')}</span>
+                </div>
+              )}
+            </div>
+          )}
+          {workspaceMode === 'system' && (notebookCheckpoint || notebookCompleted) && (
+            <div
+              className={`scene-caption-actions ${notebookCaptionDragging ? 'dragging' : ''} ${notebookInspectionActive ? 'inspect' : ''}`}
+              onPointerDown={(event) => event.stopPropagation()}
+              style={{
+                '--scene-caption-x': `${notebookCaptionPosition.x}px`,
+                '--scene-caption-y': `${notebookCaptionPosition.y}px`,
+              }}
+            >
+              <button
+                aria-label={t(locale, 'dragNotebookCaption')}
+                className="scene-caption-drag-affordance"
+                onLostPointerCapture={() => {
+                  notebookCaptionDragRef.current = null;
+                  setNotebookCaptionDragging(false);
+                }}
+                onPointerCancelCapture={finishNotebookCaptionDrag}
+                onPointerDownCapture={handleNotebookCaptionPointerDown}
+                onPointerMoveCapture={handleNotebookCaptionPointerMove}
+                onPointerUpCapture={finishNotebookCaptionDrag}
+                title={t(locale, 'dragNotebookCaption')}
+                type="button"
+              >
+                <GripHorizontal size={14} />
+              </button>
+              {notebookInspectionActive ? (
+                <>
+                  <button
+                    className="scene-caption-action"
+                    onClick={(event) => {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      if (notebookStopCameraRestorePendingRef.current) return;
+                      restoreNotebookStopCamera();
+                    }}
+                    title={t(locale, 'restoreNotebookCheckpointView')}
+                    type="button"
+                  >
+                    <RotateCcw size={13} />
+                    <span>{t(locale, 'restoreNotebookCheckpointView')}</span>
+                  </button>
+                  <button
+                    className="scene-caption-action primary mobile-essential"
+                    onClick={(event) => {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      toggleSmartNotebookPlayback();
+                    }}
+                    title={t(locale, 'nextNotebookCheckpoint')}
+                    type="button"
+                  >
+                    <Play size={14} />
+                    <span>{t(locale, 'nextNotebookCheckpoint')}</span>
+                  </button>
+                </>
+              ) : (
+                <>
+                  <button
+                    className="scene-caption-action mobile-essential"
+                    disabled={!previousNotebookReviewStep}
+                    onClick={(event) => {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      returnToPreviousNotebookStep();
+                    }}
+                    title={t(locale, 'previousNotebookCheckpoint')}
+                    type="button"
+                  >
+                    <ChevronLeft size={14} />
+                    <span>{t(locale, 'previousNotebookCheckpoint')}</span>
+                  </button>
+                  <button
+                    className="scene-caption-action mobile-essential"
+                    disabled={!Number.isFinite(nextNotebookReviewCursor)}
+                    onClick={(event) => {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      advanceToNextNotebookStep();
+                    }}
+                    title={t(locale, 'nextNotebookReviewStep')}
+                    type="button"
+                  >
+                    <ChevronRight size={14} />
+                    <span>{t(locale, 'nextNotebookReviewStep')}</span>
+                  </button>
+                  <button
+                    className={`scene-caption-action ${notebookCompleted ? 'primary mobile-essential' : ''}`}
+                    onClick={(event) => {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      if (notebookCompleted) {
+                        toggleNotebookSceneSegmentPlayback(activeNotebookSegment?.id);
+                        return;
+                      }
+                      playCurrentNotebookCheckpoint();
+                    }}
+                    title={t(locale, 'playNotebookCheckpoint')}
+                    type="button"
+                  >
+                    <Play size={13} />
+                    <span>{t(locale, 'playNotebookCheckpoint')}</span>
+                  </button>
+                  <button
+                    className="scene-caption-action"
+                    onClick={(event) => {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      if (notebookStopCameraRestorePendingRef.current) return;
+                      restoreNotebookStopCamera();
+                    }}
+                    title={t(locale, 'restoreNotebookCheckpointView')}
+                    type="button"
+                  >
+                    <RotateCcw size={13} />
+                    <span>{t(locale, 'restoreNotebookCheckpointView')}</span>
+                  </button>
+                  <button
+                    className="scene-caption-action"
+                    onClick={(event) => {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      setHoveredNotebookCaptionVariable(null);
+                      setNotebookCheckpointCaptionHidden((hidden) => !hidden);
+                    }}
+                    title={t(
+                      locale,
+                      notebookCheckpointCaptionHidden
+                        ? 'showNotebookCheckpointCaption'
+                        : 'hideNotebookCheckpointCaption'
+                    )}
+                    type="button"
+                  >
+                    {notebookCheckpointCaptionHidden ? <Eye size={14} /> : <EyeOff size={14} />}
+                    <span>
+                      {t(
+                        locale,
+                        notebookCheckpointCaptionHidden
+                          ? 'showNotebookCheckpointCaption'
+                          : 'hideNotebookCheckpointCaption'
+                      )}
+                    </span>
+                  </button>
+                  {notebookCheckpoint && (
+                    <button
+                      className="scene-caption-action primary mobile-essential"
+                      onClick={(event) => {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        toggleSmartNotebookPlayback();
+                      }}
+                      title={t(locale, 'continueNotebookCheckpoint')}
+                      type="button"
+                    >
+                      <Play size={14} />
+                      <span>{t(locale, 'continueNotebookCheckpoint')}</span>
+                    </button>
+                  )}
+                </>
+              )}
             </div>
           )}
           <span ref={vectorVolumeLabelRef} className="axis-label vector-volume-label">
@@ -9663,7 +10061,7 @@ export default function App() {
           ))}
           {measurements.map((item) => {
             const measureKind = item.type === 'volume'
-              ? volumeMeasureKind(item.targets?.length ?? 0, displayMode)
+              ? volumeMeasureKind(item.targets?.length ?? 0)
               : item.type;
             return (
               <span
@@ -9674,7 +10072,9 @@ export default function App() {
                   else measurementLabelRefs.current.delete(item.id);
                 }}
               >
-                <span className="axis-label-text">{item.type === 'dot' ? t(locale, 'dot') : t(locale, measureKind)}</span>
+                <span className="axis-label-text">
+                  {item.type === 'dot' ? t(locale, 'dot') : item.type === 'sum' ? t(locale, 'sum') : t(locale, measureKind)}
+                </span>
                 {renderMeasurementLabelTools(item)}
               </span>
             );
@@ -9693,10 +10093,10 @@ export default function App() {
             </span>
           ))}
           <span ref={scalarSolutionLabelRef} className="axis-label scalar-solution-label">
-            {t(locale, 'solution')} x = (0, 0, 0)
+            <span className="axis-label-text">{t(locale, 'solution')} x = (0, 0, 0)</span>
           </span>
           <span ref={equationSolutionLabelRef} className="axis-label equation-solution-label">
-            {t(locale, 'solution')} x = (0, 0)
+            <span className="axis-label-text">{t(locale, 'solution')} x = (0, 0)</span>
           </span>
         </div>
 
@@ -9745,70 +10145,73 @@ export default function App() {
         )}
 
         {workspaceMode === 'system' && (
-          <div className="notebook-scene-dock">
-            <button
-              className={`notebook-scene-play ${notebookPlaying ? 'playing' : ''}`}
-              onClick={toggleSmartNotebookPlayback}
-              title={t(locale, notebookPlaying ? 'stopNotebookCell' : 'runNotebookCell')}
-              type="button"
-            >
-              {notebookPlaying ? <Square size={13} /> : <Play size={14} />}
-            </button>
-            <div className="notebook-scene-progress">
-              <div className="progress-meta notebook-scene-meta">
-                <span>{t(locale, 'notebookProgress')}</span>
-                <strong>{Math.round(notebookCursor)}%</strong>
-              </div>
-              <div
-                aria-label={t(locale, 'notebookProgress')}
-                aria-valuemax="100"
-                aria-valuemin="0"
-                aria-valuenow={Math.round(notebookCursor)}
-                className="notebook-scene-scrubber"
-                onKeyDown={handleNotebookProgressKeyDown}
-                onPointerDown={handleNotebookSceneProgressPointerDown}
-                ref={notebookSceneProgressRef}
-                role="slider"
-                tabIndex={0}
-              >
-                <span className="notebook-scene-track" />
-                <span className="notebook-scene-fill" style={{ width: `${notebookCursor}%` }} />
-                {notebookTimelineMarks.map((mark) => (
-                  <button
-                    className={`notebook-scene-mark ${mark.kind ?? ''} ${mark.lineIndex <= notebookActiveLineIndex ? 'revealed' : 'future'}`}
-                    key={`${mark.lineIndex}-${mark.label}`}
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      jumpNotebookToLine(mark.lineIndex);
-                    }}
-                    onPointerDown={(event) => event.stopPropagation()}
-                    style={{
-                      left: `${mark.percent}%`,
-                      '--line-color': mark.color ? colorToHex(mark.color) : '#8b5cf6',
-                    }}
-                    title={mark.label}
-                    type="button"
-                  >
-                    {mark.label}
-                  </button>
-                ))}
-                <span className="notebook-scene-thumb" style={{ left: `${notebookCursor}%` }} />
-              </div>
-            </div>
-            <button
-              aria-pressed={isAnimationFocus}
-              className={`icon-text-button animation-focus-button ${isAnimationFocus ? 'active' : ''}`}
-              onClick={() => setIsAnimationFocus((value) => !value)}
-              title={t(locale, isAnimationFocus ? 'animationFocusExitTitle' : 'animationFocusTitle')}
-              type="button"
-            >
-              {isAnimationFocus ? <EyeOff size={17} /> : <Eye size={17} />}
-              <span>{t(locale, isAnimationFocus ? 'animationFocusExit' : 'animationFocus')}</span>
-            </button>
-          </div>
+          <NotebookSceneDock
+            activeLineIndex={notebookActiveLineIndex}
+            activeSegment={activeNotebookSegment}
+            activeSegmentProgress={activeNotebookSegmentProgress}
+            checkpoint={notebookCheckpoint}
+            colorToHex={colorToHex}
+            completed={notebookCompleted}
+            isAnimationFocus={isAnimationFocus}
+            isAnimationViewer={isAnimationViewer}
+            marks={notebookSegmentTimelineMarks}
+            onFocusToggle={() => setIsAnimationFocus((value) => !value)}
+            onJumpToLine={jumpNotebookToLine}
+            onProgressKeyDown={handleNotebookSceneProgressKeyDown}
+            onProgressPointerDown={handleNotebookSceneProgressPointerDown}
+            onSelectSegment={selectNotebookPlaybackSegment}
+            onTogglePlayback={toggleNotebookSceneSegmentPlayback}
+            operationPresentation={notebookOperationPresentation}
+            playbackLabelKey={notebookScenePlaybackLabelKey}
+            playing={notebookPlaying}
+            progressRef={notebookSceneProgressRef}
+            renderMath={(math) => renderNotebookTaggedText(`\`${math}\``, notebookTokenStyles)}
+            segments={notebookPlaybackSegmentsList}
+            translate={translate}
+          />
+        )}
+        {workspaceMode === 'system' && (
+          <div
+            aria-hidden="true"
+            className={`notebook-board-field ${notebookFieldMode === 'board' ? 'active' : ''}`}
+          />
         )}
       </section>
 
+      {!isAnimationViewer && isMobileViewport && !isAnimationFocus && (
+        <aside
+          aria-label={t(locale, 'mobileNotebookTitle')}
+          className="mobile-notebook-pane"
+          ref={panelScrollRef}
+        >
+          <section className="mobile-notebook-workspace">
+            {renderNotebookComposer(toggleSmartNotebookPlayback, 'mobile-notebook-composer')}
+          </section>
+        </aside>
+      )}
+
+      {!isAnimationViewer && !isMobileViewport && isPanelVisible && (
+        <div
+          aria-label={t(locale, 'panelResize')}
+          aria-orientation="vertical"
+          aria-valuemax={maxControlPanelWidth(
+            workspaceShellRef.current?.getBoundingClientRect().width
+          )}
+          aria-valuemin={CONTROL_PANEL_MIN_WIDTH}
+          aria-valuenow={controlPanelWidth}
+          aria-valuetext={`${controlPanelWidth}px`}
+          className="control-panel-resizer"
+          onKeyDown={handleControlPanelResizeKeyDown}
+          onPointerDown={handleControlPanelResizePointerDown}
+          role="separator"
+          tabIndex={0}
+          title={t(locale, 'panelResize')}
+        >
+          <span aria-hidden="true" />
+        </div>
+      )}
+
+      {!isAnimationViewer && !isMobileViewport && (
       <aside
         className={`control-panel ${isPanelVisible ? 'open' : 'closed'}`}
         onDragStart={preventPanelNativeDrag}
@@ -9828,34 +10231,23 @@ export default function App() {
           '--panel-mobile-pointer': isPanelVisible ? 'auto' : 'none',
         }}
       >
-        <header className="panel-header">
-          <div>
-            <p className="eyebrow">{t(locale, 'panelEyebrow')}</p>
-            <h2>{t(locale, 'panelTitle')}</h2>
+        {/* Transform workspace is retained in code but temporarily hidden behind the feature flag. */}
+        {TRANSFORM_WORKSPACE_ENABLED && (
+          <div className="workspace-tabs" role="tablist" aria-label={t(locale, 'workspaceMode')}>
+            <button
+              className={workspaceMode === 'system' ? 'active' : ''}
+              onClick={() => switchWorkspaceMode('system')}
+            >
+              {t(locale, 'system')}
+            </button>
+            <button
+              className={workspaceMode === 'transform' ? 'active' : ''}
+              onClick={() => switchWorkspaceMode('transform')}
+            >
+              {t(locale, 'transform')}
+            </button>
           </div>
-          <button
-            className="icon-button"
-            onClick={() => setIsSidebarOpen(false)}
-            title={t(locale, 'panelClose')}
-          >
-            <PanelRightClose size={20} />
-          </button>
-        </header>
-
-        <div className="workspace-tabs" role="tablist" aria-label={t(locale, 'workspaceMode')}>
-          <button
-            className={workspaceMode === 'transform' ? 'active' : ''}
-            onClick={() => switchWorkspaceMode('transform')}
-          >
-            {t(locale, 'transform')}
-          </button>
-          <button
-            className={workspaceMode === 'system' ? 'active' : ''}
-            onClick={() => switchWorkspaceMode('system')}
-          >
-            {t(locale, 'system')}
-          </button>
-        </div>
+        )}
 
         <div className={`panel-scroll mode-${workspaceMode}`} ref={panelScrollRef}>
           {workspaceMode === 'transform' && (
@@ -9911,218 +10303,7 @@ export default function App() {
           )}
 
           <section className="panel system-main-panel">
-            <div className="section-heading spread">
-              <span className="heading-left">
-                <Braces size={17} />
-                <h3>{t(locale, 'notebook')}</h3>
-              </span>
-              <div className="notebook-add-top">
-                <button
-                  className={`tiny-add-button notebook-play-toggle ${notebookPlaying ? 'playing' : ''}`}
-                  onClick={toggleSmartNotebookPlayback}
-                  title={t(locale, notebookPlaying ? 'stopNotebookCell' : 'runNotebookCell')}
-                  type="button"
-                >
-                  {notebookPlaying ? <Square size={13} /> : <Play size={14} />}
-                  <span>{t(locale, notebookPlaying ? 'stopNotebookCell' : 'runNotebookCell')}</span>
-                </button>
-                <label className="notebook-speed-control" title={t(locale, 'notebookSpeedTitle')}>
-                  <span>{t(locale, 'speed')}</span>
-                  <input
-                    aria-label={t(locale, 'notebookSpeedTitle')}
-                    max="1.25"
-                    min="0.35"
-                    onChange={(event) => setNotebookSpeed(normalizeNotebookSpeed(event.target.value))}
-                    step="0.05"
-                    type="range"
-                    value={notebookSpeed}
-                  />
-                  <em>{formatNotebookSpeedLabel(notebookSpeed)}</em>
-                </label>
-              </div>
-            </div>
-
-            <div
-              className="notebook-runner"
-              style={{
-                '--notebook-progress': notebookProgressRatio,
-                '--notebook-progress-y': `${Math.max(0, Math.min(100, notebookCursor))}%`,
-              }}
-            >
-              <div
-                aria-label={t(locale, 'notebookProgress')}
-                aria-valuemax="100"
-                aria-valuemin="0"
-                aria-valuenow={Math.round(notebookCursor)}
-                className="notebook-vertical-progress"
-                onKeyDown={handleNotebookProgressKeyDown}
-                onPointerDown={handleNotebookProgressPointerDown}
-                ref={notebookProgressRef}
-                role="slider"
-                tabIndex={0}
-              >
-                <span>{Math.round(notebookCursor)}%</span>
-              </div>
-              <div className="notebook-flow-stack">
-                <div className="notebook-cell notebook-smart active">
-                  <div className="notebook-cell-index">*</div>
-                  <div className="notebook-cell-main">
-                    <div
-                      className="equation-note-editor smart-notebook-editor"
-                      style={{ '--note-lines': notebookLineCount }}
-                    >
-                      <div className="equation-note-rail smart-note-rail" aria-label={t(locale, 'notebookProgress')}>
-                        {Array.from({ length: notebookLineCount }).map((_, lineIndex) => {
-                          const mark = notebookScript.marks[lineIndex];
-                          const lineState = lineIndex <= notebookActiveLineIndex ? 'revealed' : 'future';
-                          const markClassName = mark?.kind
-                            ? `smart-mark ${mark.kind} ${lineState} ${mark.hidden ? 'hidden' : ''}`
-                            : `smart-mark blank ${lineState}`;
-                          if (!mark?.label) {
-                            return (
-                              <span
-                                aria-hidden="true"
-                                className={markClassName}
-                                key={lineIndex}
-                                style={mark?.color ? { '--line-color': `#${mark.color.toString(16).padStart(6, '0')}` } : undefined}
-                              />
-                            );
-                          }
-                          return (
-                            <button
-                              aria-label={`${mark.label} ${t(locale, 'runNotebookCell')}`}
-                              className={markClassName}
-                              key={lineIndex}
-                              onDoubleClick={mark?.kind === 'vector' ? () => renameSmartNotebookVariable(lineIndex, mark.label) : undefined}
-                              onClick={() => playSmartNotebookFromLine(lineIndex)}
-                              style={mark?.color ? { '--line-color': `#${mark.color.toString(16).padStart(6, '0')}` } : undefined}
-                              title={mark?.kind === 'vector' ? '더블클릭해서 변수명 수정' : mark?.kind === 'matrix' ? t(locale, 'notebookMatrixCell') : undefined}
-                              type="button"
-                            >
-                              {mark.label}
-                            </button>
-                          );
-                        })}
-                      </div>
-                      {!notebookText.trim() && (
-                        <div className="smart-tab-hint" aria-hidden="true">
-                          <kbd>Tab</kbd>
-                          <span>자동완성</span>
-                        </div>
-                      )}
-                      {!notebookText.trim() && (
-                        <div className="smart-placeholder-overlay" aria-hidden="true">
-                          {notebookStarterText(locale).split('\n').map((line, lineIndex, lines) => (
-                            <span className="smart-placeholder-line" key={`${lineIndex}-${line}`}>
-                              {line || ' '}
-                              {lineIndex === lines.length - 1 && <kbd>Tab</kbd>}
-                            </span>
-                          ))}
-                        </div>
-                      )}
-                      {notebookText.trim() && (
-                        <div className="smart-syntax-overlay" aria-hidden="true">
-                          {notebookText.split('\n').map((line, lineIndex) => (
-                            <span className="smart-syntax-line" key={`syntax-${lineIndex}`}>
-                              {renderSmartNotebookSyntaxLine(line, lineIndex)}
-                            </span>
-                          ))}
-                        </div>
-                      )}
-                      <textarea
-                        aria-label={t(locale, 'notebook')}
-                        className="smart-notebook-textarea"
-                        onBlur={(event) => updateSmartNotebookText(prettifyNotebookScriptText(event.target.value))}
-                        onChange={(event) => updateSmartNotebookText(event.target.value, { revealAll: true })}
-                        onFocus={(event) => {
-                          const textarea = event.currentTarget;
-                          if (!textarea.value.trim()) {
-                            window.requestAnimationFrame(() => {
-                              textarea.selectionStart = 0;
-                              textarea.selectionEnd = 0;
-                            });
-                          }
-                        }}
-                        onKeyDown={handleSmartNotebookKeyDown}
-                        onPaste={() => {
-                          notebookReplayFromStartRef.current = true;
-                        }}
-                        placeholder=""
-                        spellCheck="false"
-                        value={notebookText}
-                        wrap="off"
-                      />
-                    </div>
-                  </div>
-                  <div className="notebook-cell-actions">
-                    <button
-                      className={`notebook-run-button ${notebookPlaying ? 'playing' : ''}`}
-                      onClick={toggleSmartNotebookPlayback}
-                      type="button"
-                    >
-                      {notebookPlaying ? <Square size={12} /> : <Play size={13} />}
-                      <span>{t(locale, notebookPlaying ? 'stopNotebookCell' : 'runNotebookCell')}</span>
-                    </button>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div className="notebook-status-slot">
-              <div className={`line-status-card ${lineSystem.status}`}>
-                <div className="solver-topline">
-                  <span>{t(locale, 'status')}</span>
-                  <strong>{t(locale, statusKeyForLineSystem(lineSystem.status))}</strong>
-                </div>
-                {lineSystemInfo.kindKey && (
-                  <div className="system-solution-readout">
-                    <span>{t(locale, 'solution')}</span>
-                    <strong>{t(locale, lineSystemInfo.kindKey)}</strong>
-                    {lineSystemInfo.solutionText && <code>{lineSystemInfo.solutionText}</code>}
-                  </div>
-                )}
-                {typeof lineSystemInfo.rankA === 'number' && (
-                  <div className="system-fact-grid">
-                    <span><em>{t(locale, 'systemFactRank')}</em><strong>{lineSystemInfo.rankA} {'->'} {lineSystemInfo.rankAugmented}</strong></span>
-                    <span><em>{t(locale, 'systemFactDimension')}</em><strong>{lineSystemInfo.solutionDimension === null ? '-' : `${lineSystemInfo.solutionDimension}D`}</strong></span>
-                    <span><em>{t(locale, 'systemFactFree')}</em><strong>{lineSystemInfo.freeCount}</strong></span>
-                    <span><em>{t(locale, 'systemFactEquations')}</em><strong>{lineSystemInfo.equationCount}/{lineSystemInfo.variableCount}</strong></span>
-                  </div>
-                )}
-                <p className="system-education-note">{t(locale, lineSystemInfo.noteKey)}</p>
-                {!!lineSystem.relations.length && (
-                  <div className="relation-list">
-                    {lineSystem.relations.map((relation, relationIndex) => (
-                      <span key={relationIndex}>{relationText(relation, lineSystem.lines)}</span>
-                    ))}
-                  </div>
-                )}
-                {lineSystem.point && (
-                  <button className="secondary-action compact-action" onClick={applyLineSystemPointToVector}>
-                    {t(locale, 'applyPointToVector', { name: activeVector.name })}
-                  </button>
-                )}
-              </div>
-            </div>
-
-            <div className="notebook-example-bank">
-              <div className="notebook-example-label">{t(locale, 'systemExamples')}</div>
-              <div className="equation-presets line-presets" aria-label={t(locale, 'systemExamples')}>
-                <button onClick={() => applyPresetToNotebook(equationExamples.unique)}>{t(locale, 'intersection')}</button>
-                <button onClick={() => applyPresetToNotebook(equationExamples.none)}>{t(locale, 'parallel')}</button>
-                <button onClick={() => applyPresetToNotebook(equationExamples.infinite)}>{t(locale, 'overlap')}</button>
-                <button onClick={() => applyPresetToNotebook(equationExamples.space3d)}>3D</button>
-                <button onClick={() => applyPresetToNotebook(equationExamples.overlap3d)}>{t(locale, 'overlap3d')}</button>
-              </div>
-            </div>
-
-            <div className="equation-presets line-presets" aria-label={t(locale, 'systemExamples')}>
-              <button onClick={() => setEquations(equationExamples.unique)}>{t(locale, 'intersection')}</button>
-              <button onClick={() => setEquations(equationExamples.none)}>{t(locale, 'parallel')}</button>
-              <button onClick={() => setEquations(equationExamples.infinite)}>{t(locale, 'overlap')}</button>
-              <button onClick={() => setEquations(equationExamples.space3d)}>3D</button>
-              <button onClick={() => setEquations(equationExamples.overlap3d)}>{t(locale, 'overlap3d')}</button>
-            </div>
+            {renderNotebookComposer(toggleSmartNotebookPlayback)}
 
             <div
               className="equation-note-editor"
@@ -10163,7 +10344,7 @@ export default function App() {
             <div className={`line-status-card ${lineSystem.status}`}>
               <div className="solver-topline">
                 <span>{t(locale, 'status')}</span>
-                <strong>{t(locale, statusKeyForLineSystem(lineSystem.status))}</strong>
+                <strong>{t(locale, statusKeyForLineSystemDisplay(lineSystem, effectiveSystemMode))}</strong>
               </div>
               {lineSystemInfo.kindKey && (
                 <div className="system-solution-readout">
@@ -10204,7 +10385,7 @@ export default function App() {
               {lineSystem.status === 'none' && (
                 <p className="line-note">{t(locale, 'noCommonLineNote')}</p>
               )}
-              {lineSystem.status === 'single3d' && (
+              {lineSystem.status === 'single3d' && effectiveSystemMode === '3d' && (
                 <p className="line-note">{t(locale, 'single3dNote')}</p>
               )}
               {lineSystem.status === 'infinite3d' && (
@@ -10252,7 +10433,7 @@ export default function App() {
                       accent={cell.mode === '3d' ? 'teal' : 'red'}
                       onChange={(values) => updateNotebookCellValues(cell.id, values)}
                       onEnter={() => runNotebookMatrixCell(cell)}
-                      locale={locale}
+                      translate={translate}
                     />
                   </div>
                   <div className="notebook-cell-actions">
@@ -10304,11 +10485,11 @@ export default function App() {
               </button>
             </div>
             {previewHistory && (
-              <HistoryDetail
+              <TransformHistoryDetail
                 entry={previewHistory}
                 index={previewIndex}
                 isActive={previewIndex === activeHistoryIndex}
-                locale={locale}
+                translate={translate}
               />
             )}
           </section>
@@ -10356,7 +10537,7 @@ export default function App() {
                     }
                     onChange={updateMatrixInputValues}
                     onEnter={applyCurrentInput}
-                    locale={locale}
+                    translate={translate}
                   />
                 </div>
 
@@ -10812,9 +10993,10 @@ export default function App() {
           </section>
         </div>
       </aside>
+      )}
 
       </div>
-      <AdSlot placement="bottom" locale={locale} />
+      <AdSlot config={monetizationConfig} placement="bottom" translate={translate} />
     </main>
   );
 }

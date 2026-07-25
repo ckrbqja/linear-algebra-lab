@@ -2,18 +2,231 @@
 <html lang="ko">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="description" content="행렬 변환, 기저 벡터, 내적, 부피, 연립방정식을 3D로 탐구하는 인터랙티브 선형대수 실험실." />
-    <meta name="keywords" content="linear algebra, matrix, 3D, vectors, determinant, dot product, 선형대수, 行列, 线性代数" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="naver-site-verification" content="ff49f18593a5cfc26d8d5f729c44310b8fae6278" />
+    <script>
+      document.documentElement.classList.add('flow-js');
+      window.__flowAssetRecoveryKey = 'flow-math-asset-recovery-v3';
+      window.__flowAttemptAssetRecovery = function () {
+        var recoveryAlreadyAttempted = false;
+        try {
+          recoveryAlreadyAttempted = window.sessionStorage.getItem(window.__flowAssetRecoveryKey) === '1';
+        } catch {
+          recoveryAlreadyAttempted = Boolean(window.__flowAssetRecoveryAttempted);
+        }
+        if (recoveryAlreadyAttempted) return;
+
+        window.__flowAssetRecoveryAttempted = true;
+        try {
+          window.sessionStorage.setItem(window.__flowAssetRecoveryKey, '1');
+        } catch {
+          // The in-memory guard still prevents a loop on this page.
+        }
+
+        var recoveryUrl = new URL(window.location.href);
+        recoveryUrl.searchParams.set('__flowAssetRetry', String(Date.now()));
+        window.location.replace(recoveryUrl.toString());
+      };
+      window.addEventListener('error', function (event) {
+        var target = event.target;
+        var isScript = target && target.tagName === 'SCRIPT' && target.src;
+        var isStylesheet = target && target.tagName === 'LINK'
+          && target.rel === 'stylesheet' && target.href;
+        if (!isScript && !isStylesheet) return;
+
+        var assetUrl = new URL(isScript ? target.src : target.href, window.location.href);
+        if (assetUrl.origin !== window.location.origin || !assetUrl.pathname.startsWith('/assets/')) return;
+        if (isStylesheet && target.dataset.flowAssetRetry !== '1') {
+          target.dataset.flowAssetRetry = '1';
+          assetUrl.searchParams.set('__flowAssetRetry', String(Date.now()));
+          target.href = assetUrl.toString();
+          return;
+        }
+        window.setTimeout(window.__flowAttemptAssetRecovery, 350);
+      }, true);
+      window.__flowReadyTimeout = window.setTimeout(function () {
+        document.documentElement.classList.add('flow-app-ready');
+      }, 8000);
+    </script>
+    <meta name="robots" content="index, follow, max-image-preview:large" />
+    <meta name="application-name" content="Flow Math" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Flow Math" />
+    <meta
+      name="description"
+      content="선형대수 장면을 직접 구성하거나 AI로 초안을 만들고, Flow Math 타임라인에서 수식·그래프·2D·3D 연출을 세밀하게 편집하세요."
+    />
+    <meta
+      name="keywords"
+      content="선형대수, 선형대수 시각화, 행렬 변환 시각화, 3D 벡터 시각화, 연립방정식 그래프, 행렬식, 행렬 랭크, 영공간, 가우스 소거법, linear algebra visualizer, matrix transformation visualizer, 3D vector visualizer, determinant, matrix rank, null space, Gaussian elimination, systems of equations, Flow Math"
+    />
     <meta name="geo.region" content="KR" />
-    <meta property="og:title" content="3D 선형대수 실험실" />
-    <meta property="og:description" content="행렬 변환, 기저 벡터, 내적, 부피, 연립방정식을 3D로 탐구하는 인터랙티브 선형대수 실험실." />
+    <meta name="geo.placename" content="South Korea" />
+    <meta name="theme-color" content="#0f0f0d" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="shortcut icon" href="/favicon.svg" />
+    <link rel="apple-touch-icon" href="/pwa-icon-180.png" />
+    <meta name="google-adsense-account" content="ca-pub-6291648771242114" />
+    <link rel="canonical" href="https://flow-math.com/" />
+    <link rel="alternate" hreflang="ko-KR" href="https://flow-math.com/" />
+    <link rel="alternate" hreflang="en-US" href="https://flow-math.com/en/" />
+    <link rel="alternate" hreflang="ja-JP" href="https://flow-math.com/ja/" />
+    <link rel="alternate" hreflang="zh-CN" href="https://flow-math.com/zh/" />
+    <link rel="alternate" hreflang="x-default" href="https://flow-math.com/" />
+    <meta property="og:title" content="Flow Math | 선형대수 장면 제작 · 행렬 변환 시각화" />
+    <meta
+      property="og:description"
+      content="장면을 직접 구성하거나 AI로 초안을 만든 뒤, Flow Math에서 수식·그래프·2D·3D 연출을 편집하고 재생하세요."
+    />
     <meta property="og:type" content="website" />
+    <meta property="og:url" content="https://flow-math.com/" />
+    <meta property="og:site_name" content="Flow Math" />
     <meta property="og:locale" content="ko_KR" />
-    <title>3D 선형대수 실험실</title>
+    <meta property="og:locale:alternate" content="en_US" />
+    <meta property="og:locale:alternate" content="ja_JP" />
+    <meta property="og:locale:alternate" content="zh_CN" />
+    <meta property="og:image" content="https://flow-math.com/flow-math-og.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="수학의 흐름을 설계하고 움직이는 장면으로 만드세요" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Flow Math | Linear Algebra Scene Builder" />
+    <meta
+      name="twitter:description"
+      content="Build linear algebra scenes directly or begin with an AI draft, then edit and replay the 2D or 3D result in Flow Math."
+    />
+    <meta name="twitter:image" content="https://flow-math.com/flow-math-og.png" />
+    <script type="application/ld+json" data-linear-lab-schema>
+      {
+        "@context": "https://schema.org",
+        "@graph": [
+          {
+            "@type": "Organization",
+            "@id": "https://flow-math.com/#organization",
+            "name": "Flow Math",
+            "url": "https://flow-math.com/",
+            "logo": "https://flow-math.com/pwa-icon-512.png",
+            "contactPoint": {
+              "@type": "ContactPoint",
+              "contactType": "customer support",
+              "email": "privacy@flow-math.com"
+            }
+          },
+          {
+            "@type": "WebSite",
+            "@id": "https://flow-math.com/#website",
+            "name": "Flow Math",
+            "url": "https://flow-math.com/",
+            "inLanguage": ["ko-KR", "en-US", "ja-JP", "zh-CN"],
+            "description": "제작 프롬프트를 평소 사용하는 AI에 복사해 선형대수 장면을 만들고 애니메이션으로 재생하는 실험실.",
+            "publisher": { "@id": "https://flow-math.com/#organization" }
+          },
+          {
+            "@type": ["WebApplication", "LearningResource"],
+            "@id": "https://flow-math.com/#application",
+            "name": "Flow Math",
+            "alternateName": ["선형대수 시각화 실험실", "Interactive Linear Algebra Visualizer"],
+            "url": "https://flow-math.com/",
+            "image": "https://flow-math.com/flow-math-og.png",
+            "applicationCategory": "EducationalApplication",
+            "applicationSubCategory": "Linear Algebra Visualizer",
+            "operatingSystem": "Any",
+            "browserRequirements": "Requires a modern web browser with JavaScript and WebGL.",
+            "isAccessibleForFree": true,
+            "offers": {
+              "@type": "Offer",
+              "price": "0",
+              "priceCurrency": "USD"
+            },
+            "inLanguage": ["ko-KR", "en-US", "ja-JP", "zh-CN"],
+            "learningResourceType": "Interactive visualization",
+            "educationalUse": ["instruction", "self study", "classroom presentation"],
+            "description": "Build linear algebra scenes directly or begin with an AI draft, then edit equations, graphs, and 2D or 3D direction on the Flow Math timeline.",
+            "keywords": ["선형대수 시각화", "행렬 변환 시각화", "3D 벡터 시각화", "연립방정식 그래프", "linear algebra visualizer", "matrix transformation visualizer"],
+            "featureList": ["직접 제작과 AI 초안", "재생 가능한 타임라인", "2D·3D 시각화", "계산판과 그래프 동기화", "애니메이션 링크 공유", "설명과 체크포인트"],
+            "publisher": { "@id": "https://flow-math.com/#organization" }
+          },
+          {
+            "@type": "FAQPage",
+            "@id": "https://flow-math.com/#faq",
+            "inLanguage": "ko-KR",
+            "mainEntity": [
+              {
+                "@type": "Question",
+                "name": "Flow Math는 어떤 도구인가요?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "Flow Math는 제작 프롬프트를 평소 사용하는 AI에 복사해 선형대수 노트북 스크립트를 만들고, 그 결과를 2D·3D 애니메이션으로 재생·수정·공유하는 브라우저 기반 실험실입니다."
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "일반 선형대수 계산기와 무엇이 다른가요?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "일반 계산기가 최종 숫자나 해를 중심으로 보여준다면, Flow Math는 선언과 연산의 순서를 장면으로 만들고 타임라인에서 변환 과정을 재생·정지·되돌릴 수 있게 합니다."
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "어떤 선형대수 주제를 시각화할 수 있나요?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "행렬 변환, 벡터와 기저, 내적, 행렬식, 면적과 부피, 직선·평면·연립방정식, 랭크와 영공간, 행 연산을 한 노트북 흐름 안에서 다룰 수 있습니다."
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "내가 만든 장면을 다른 사람과 공유할 수 있나요?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "노트와 애니메이션 상태를 담은 공유 링크를 만들어 학생, 동료 또는 스터디 구성원이 같은 장면을 열어보게 할 수 있습니다."
+                }
+              },
+              {
+                "@type": "Question",
+                "name": "프로그램을 설치해야 하나요?",
+                "acceptedAnswer": {
+                  "@type": "Answer",
+                  "text": "별도 프로그램 설치 없이 최신 웹 브라우저에서 사용할 수 있습니다. 3D 장면과 노트북을 함께 볼 때는 화면이 넓은 환경이 가장 편합니다."
+                }
+              }
+            ]
+          }
+        ]
+      }
+    </script>
+    <style>
+      html,body{margin:0;background:#0b0c0a}
+      html.flow-js:not(.flow-app-ready) #root{visibility:hidden}
+      .seo-fallback{min-height:100vh;padding:64px 24px;color:#f7f4eb;background:#0b0c0a;font-family:system-ui,sans-serif}.seo-fallback>div{max-width:980px;margin:auto}.seo-fallback small{color:#4ddbd2;font-weight:800;letter-spacing:.12em}.seo-fallback h1{max-width:760px;margin:18px 0;font-size:clamp(2.7rem,8vw,5rem);line-height:1;letter-spacing:-.055em}.seo-fallback h1 span{color:#4ddbd2}.seo-fallback p,.seo-fallback dd{color:#aaa69b;line-height:1.7}.seo-fallback a{display:inline-block;margin:12px 0 40px;padding:13px 18px;border-radius:8px;color:#071312;background:#4ddbd2;font-weight:800;text-decoration:none}.seo-fallback section{padding:44px 0;border-top:1px solid #292a25}.seo-fallback h2{font-size:1.7rem}.seo-fallback dl{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:24px}.seo-fallback dt{font-weight:800}.seo-fallback dd{margin:8px 0}.seo-fallback details{padding:18px 0;border-bottom:1px solid #292a25}.seo-fallback summary{font-weight:800;cursor:pointer}
+    </style>
+    <title>Flow Math | 선형대수 장면 제작 · 행렬 변환 시각화</title>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <main class="seo-fallback">
+        <div>
+          <small>선형대수 장면 제작 도구</small>
+          <h1>수학의 흐름을 설계하고 <span>움직이는 장면으로 만드세요</span></h1>
+          <p>Flow Math 프롬프트를 AI에 붙여넣고 원하는 수학 장면을 말하세요.<br />생성된 결과를 가져오면 바로 애니메이션으로 재생됩니다.</p>
+          <a href="https://flow-math.com/">Flow Math 시작하기</a>
+          <section>
+            <h2>직접 만들고, 필요할 때 AI로 빠르게 시작하세요</h2>
+            <p>Flow Math 문법으로 정교하게 구성하거나 AI로 초안을 만든 뒤, 타임라인에서 수식·그래프·카메라·타이밍을 직접 편집합니다.</p>
+          </section>
+          <section id="flow-faq">
+            <h2>자주 묻는 질문</h2>
+            <details open><summary>Flow Math는 어떤 도구인가요?</summary><p>제작 프롬프트를 평소 사용하는 AI에 복사해 선형대수 노트북 스크립트를 만들고, 그 결과를 2D·3D 애니메이션으로 재생·수정·공유하는 브라우저 기반 실험실입니다.</p></details>
+            <details><summary>일반 선형대수 계산기와 무엇이 다른가요?</summary><p>최종 숫자만 보여주지 않고 선언과 연산의 순서를 장면으로 만들며, 타임라인에서 변환 과정을 재생·정지·되돌릴 수 있습니다.</p></details>
+            <details><summary>프로그램을 설치해야 하나요?</summary><p>별도 설치 없이 최신 웹 브라우저에서 사용할 수 있습니다.</p></details>
+          </section>
+        </div>
+      </main>
+    </div>
     <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>

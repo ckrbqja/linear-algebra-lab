@@ -1,0 +1,7 @@
+.shiny-sparkles {
+  display: block;
+  width: var(--shiny-sparkles-size, 16px);
+  height: var(--shiny-sparkles-size, 16px);
+  flex: 0 0 auto;
+  color: var(--shiny-sparkles-base, currentColor);
+}

@@ -1,1 +1,2 @@
-/* /index.html 200
+# Locale entry pages are emitted as real /en/, /ja/, and /zh/ directories.
+# Do not add a catch-all 200 rewrite: missing hashed assets must remain 404s.
